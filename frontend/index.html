@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>CC ES Analyzer</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"/>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
+  <link rel="stylesheet" href="/static/css/style.css"/>
+</head>
+<body>
+
+<!-- ── TOP NAVBAR ────────────────────────────────────────────────────── -->
+<nav class="navbar navbar-dark bg-dark px-3 py-0" style="height:52px;">
+  <div class="d-flex align-items-center">
+    <button id="sidebarToggle" class="btn btn-sm text-light border-0 px-2 me-2"
+            onclick="toggleSidebar()" title="Show / hide menu">
+      <i class="bi bi-list fs-4"></i>
+    </button>
+    <span class="navbar-brand mb-0 fw-bold fs-5">
+      <i class="bi bi-layers-half text-info me-2"></i>CC ES Analyzer
+    </span>
+  </div>
+
+  <!-- Active connection pill (shown when connected) -->
+  <div id="connectedPill" class="conn-pill d-none">
+    <span class="conn-dot connected"></span>
+    <span id="pillMachine" class="fw-semibold text-white"></span>
+    <span id="pillCluster" class="text-info small"></span>
+    <span id="pillVersion" class="badge bg-info text-dark ms-1" style="font-size:0.65rem;"></span>
+    <button class="btn btn-link btn-sm text-danger p-0 ms-2" onclick="disconnect()" title="Disconnect">
+      <i class="bi bi-x-circle"></i>
+    </button>
+  </div>
+
+  <!-- Disconnected pill -->
+  <div id="disconnectedPill" class="conn-pill">
+    <span class="conn-dot disconnected"></span>
+    <span class="text-secondary small">Not connected</span>
+    <button class="btn btn-sm btn-outline-info ms-2 py-0 px-2" onclick="showView('connection')" style="font-size:0.75rem;">
+      <i class="bi bi-plug me-1"></i>Configure
+    </button>
+  </div>
+</nav>
+
+<!-- ── LAYOUT ────────────────────────────────────────────────��──────── -->
+<div class="d-flex" style="height: calc(100vh - 52px); overflow: hidden;">
+
+  <!-- Sidebar -->
+  <aside id="sidebar" class="bg-dark text-light d-flex flex-column" style="width:260px;min-width:260px;overflow-y:auto;">
+
+    <!-- Connection quick-info box -->
+    <div id="sidebarConnBox" class="sidebar-conn-box d-none">
+      <div class="d-flex align-items-center gap-2">
+        <span class="conn-dot connected"></span>
+        <div class="overflow-hidden">
+          <div class="text-white fw-semibold small text-truncate" id="sidebarMachine"></div>
+          <div class="text-secondary" style="font-size:0.7rem;" id="sidebarCluster"></div>
+        </div>
+        <button class="btn btn-link btn-sm text-secondary p-0 ms-auto" onclick="showView('connection')" title="Edit connection">
+          <i class="bi bi-pencil-square"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- Nav buttons -->
+    <div class="p-2 pt-1">
+      <div class="sidebar-section mb-1">
+        <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-connection"
+                onclick="showView('connection')">
+          <i class="bi bi-hdd-network me-2"></i>Connection
+        </button>
+        <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-dashboard"
+                onclick="showView('dashboard')">
+          <i class="bi bi-speedometer2 me-2"></i>Dashboard
+        </button>
+        <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-summary"
+                onclick="showView('summary')">
+          <i class="bi bi-bar-chart-line me-2"></i>Summary Analytics
+        </button>
+        <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-attacks"
+                onclick="showView('attacks')">
+          <i class="bi bi-shield-exclamation me-2"></i>Attacks View
+        </button>
+        <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-query"
+                onclick="showView('query')">
+          <i class="bi bi-terminal me-2"></i>Query Editor
+        </button>
+      </div>
+
+      <hr class="border-secondary my-1"/>
+      <div class="d-flex align-items-center justify-content-between px-2 mb-1">
+        <p class="text-secondary mb-0" style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.05em">Indices</p>
+        <input id="indexSearch" type="text" class="form-control form-control-sm bg-dark text-light border-secondary"
+               placeholder="Filter…" style="width:90px;font-size:0.75rem;padding:2px 6px;"/>
+      </div>
+      <div id="sidebarIndices">
+        <div class="text-secondary small px-2 py-2">Connect to see indices</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="flex-grow-1 overflow-auto bg-body-secondary p-0">
+
+    <!-- ── CONNECTION SETTINGS VIEW ── -->
+    <div id="view-connection" class="view-panel p-4 d-none">
+      <h5 class="fw-bold mb-1"><i class="bi bi-hdd-network me-2 text-info"></i>Connection Settings</h5>
+      <p class="text-secondary small mb-4">Configure the CC Linux machine and its Elasticsearch credentials.</p>
+
+      <div class="row justify-content-center">
+        <div class="col-lg-6 col-xl-5">
+
+          <!-- Saved profiles -->
+          <div class="card shadow-sm mb-3" id="savedProfilesCard">
+            <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+              <span><i class="bi bi-bookmark-star me-2 text-warning"></i>Saved Profiles</span>
+              <span id="profileCount" class="badge bg-secondary">0</span>
+            </div>
+            <div class="card-body p-2" id="savedProfilesList">
+              <p class="text-secondary small text-center py-2 mb-0">No saved profiles yet</p>
+            </div>
+          </div>
+
+          <!-- Connection form -->
+          <div class="card shadow-sm">
+            <div class="card-header fw-semibold">
+              <i class="bi bi-plug me-2 text-info"></i>
+              <span id="formTitle">New Connection</span>
+            </div>
+            <div class="card-body">
+              <div class="row g-3">
+
+                <div class="col-12">
+                  <label class="form-label fw-semibold">Profile Name <span class="text-secondary fw-normal">(optional)</span></label>
+                  <input id="connLabel" type="text" class="form-control" placeholder="e.g. Production CC, Lab Machine…"/>
+                </div>
+
+                <div class="col-12">
+                  <label class="form-label fw-semibold">
+                    <i class="bi bi-pc-display me-1 text-info"></i>CC Machine IP / Hostname
+                  </label>
+                  <input id="connHost" type="text" class="form-control form-control-lg"
+                         placeholder="192.168.1.100" autocomplete="off"/>
+                  <div class="form-text">IP address or hostname of the CC Linux machine</div>
+                </div>
+
+                <div class="col-5">
+                  <label class="form-label fw-semibold">ES Port</label>
+                  <input id="connPort" type="number" class="form-control" value="9200"/>
+                </div>
+                <div class="col-7">
+                  <label class="form-label fw-semibold">Protocol</label>
+                  <div class="d-flex gap-2">
+                    <div class="form-check mt-2">
+                      <input class="form-check-input" type="radio" name="connScheme" id="schemeHttp" value="http" checked/>
+                      <label class="form-check-label" for="schemeHttp">HTTP</label>
+                    </div>
+                    <div class="form-check mt-2">
+                      <input class="form-check-input" type="radio" name="connScheme" id="schemeHttps" value="https"/>
+                      <label class="form-check-label" for="schemeHttps">HTTPS</label>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="col-12"><hr class="my-0"/></div>
+
+                <div class="col-6">
+                  <label class="form-label fw-semibold">
+                    <i class="bi bi-person me-1"></i>Username <span class="text-secondary fw-normal">(optional)</span>
+                  </label>
+                  <input id="connUser" type="text" class="form-control" placeholder="elastic" autocomplete="off"/>
+                </div>
+                <div class="col-6">
+                  <label class="form-label fw-semibold">
+                    <i class="bi bi-key me-1"></i>Password <span class="text-secondary fw-normal">(optional)</span>
+                  </label>
+                  <div class="input-group">
+                    <input id="connPass" type="password" class="form-control" placeholder="••••••••" autocomplete="off"/>
+                    <button class="btn btn-outline-secondary" type="button" onclick="togglePassVis()">
+                      <i class="bi bi-eye" id="passEyeIcon"></i>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="col-12">
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="connVerify"/>
+                    <label class="form-check-label" for="connVerify">Verify SSL certificates</label>
+                  </div>
+                </div>
+
+                <div class="col-12"><hr class="my-0"/></div>
+
+                <!-- ── SSH fallback ── -->
+                <div class="col-12">
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="connSshEnabled" onchange="toggleSshFields()" checked/>
+                    <label class="form-check-label fw-semibold" for="connSshEnabled">
+                      <i class="bi bi-terminal me-1 text-warning"></i>Open ES port via SSH if closed
+                    </label>
+                  </div>
+                  <div class="form-text">
+                    Used only if the direct ES connection fails. SSH opens the ES port on the CC machine's firewall.
+                  </div>
+                </div>
+
+                <div id="sshFields" class="col-12">
+                  <div class="row g-3">
+                    <div class="col-6">
+                      <label class="form-label fw-semibold">
+                        <i class="bi bi-person-gear me-1"></i>SSH Username
+                      </label>
+                      <input id="connSshUser" type="text" class="form-control" placeholder="root" autocomplete="off"/>
+                      <div class="form-text"><code>root</code> uses the Radware firewall script; any other user uses <code>net firewall</code>.</div>
+                    </div>
+                    <div class="col-6">
+                      <label class="form-label fw-semibold">
+                        <i class="bi bi-key me-1"></i>SSH Password
+                      </label>
+                      <div class="input-group">
+                        <input id="connSshPass" type="password" class="form-control" placeholder="••••••••" autocomplete="off"/>
+                        <button class="btn btn-outline-secondary" type="button" onclick="toggleSshPassVis()">
+                          <i class="bi bi-eye" id="sshPassEyeIcon"></i>
+                        </button>
+                      </div>
+                    </div>
+                    <div class="col-5">
+                      <label class="form-label fw-semibold">SSH Port</label>
+                      <input id="connSshPort" type="number" class="form-control" value="22"/>
+                    </div>
+                  </div>
+                </div>
+
+              </div><!-- /row -->
+
+              <!-- Status feedback -->
+              <div id="connFeedback" class="mt-3 d-none"></div>
+
+              <!-- Action buttons -->
+              <div class="d-flex gap-2 mt-4">
+                <button class="btn btn-primary flex-grow-1" onclick="doConnect()" id="btnConnect">
+                  <i class="bi bi-plug-fill me-1"></i>Connect
+                </button>
+                <button class="btn btn-outline-secondary" onclick="saveProfile()" title="Save this profile">
+                  <i class="bi bi-bookmark-plus"></i>
+                </button>
+                <button class="btn btn-outline-danger" onclick="clearForm()" title="Clear form">
+                  <i class="bi bi-x-lg"></i>
+                </button>
+              </div>
+
+            </div><!-- /card-body -->
+          </div><!-- /card -->
+
+        </div>
+      </div>
+    </div>
+
+    <!-- ── DASHBOARD VIEW ── -->
+    <div id="view-dashboard" class="view-panel p-3 d-none">
+      <h5 class="fw-bold mb-3"><i class="bi bi-speedometer2 me-2 text-warning"></i>Cluster Dashboard</h5>
+
+      <div class="row g-3 mb-3" id="clusterCards">
+        <div class="col-auto"><div class="stat-card text-center"><div class="stat-value" id="c-status">—</div><div class="stat-label">Status</div></div></div>
+        <div class="col-auto"><div class="stat-card text-center"><div class="stat-value" id="c-nodes">—</div><div class="stat-label">Nodes</div></div></div>
+        <div class="col-auto"><div class="stat-card text-center"><div class="stat-value" id="c-shards">—</div><div class="stat-label">Active Shards</div></div></div>
+        <div class="col-auto"><div class="stat-card text-center"><div class="stat-value text-danger" id="c-unassigned">—</div><div class="stat-label">Unassigned Shards</div></div></div>
+        <div class="col-auto"><div class="stat-card text-center"><div class="stat-value text-info" id="c-version">—</div><div class="stat-label">ES Version</div></div></div>
+      </div>
+
+
+      <div class="card shadow-sm">
+        <div class="card-header d-flex justify-content-between align-items-center gap-2 flex-wrap">
+          <span class="fw-semibold"><i class="bi bi-table me-2 text-info"></i>CC Indices Overview</span>
+          <div class="d-flex align-items-center gap-2 ms-auto">
+            <div class="btn-group btn-group-sm" role="group" aria-label="Indices view">
+              <button type="button" class="btn btn-outline-secondary active py-0 px-2" id="iv-table"
+                      onclick="setIndicesView('table')">Table</button>
+              <button type="button" class="btn btn-outline-secondary py-0 px-2" id="iv-csv"
+                      onclick="setIndicesView('csv')">CSV</button>
+            </div>
+            <button class="btn btn-sm btn-outline-success py-0 px-2" onclick="downloadIndicesCsv()" title="Download indices as CSV">
+              <i class="bi bi-download"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="loadIndices()" title="Refresh">
+              <i class="bi bi-arrow-clockwise"></i>
+            </button>
+          </div>
+        </div>
+        <div class="card-body p-0">
+          <div id="indicesTableWrap" class="table-responsive">
+            <table class="table table-sm table-hover mb-0">
+              <thead class="table-dark">
+                <tr><th>Index</th><th>Health</th><th>Docs</th><th>Size</th><th>Category</th><th></th></tr>
+              </thead>
+              <tbody id="indicesTableBody"><tr><td colspan="6" class="text-center text-secondary py-3">Connect to load data</td></tr></tbody>
+            </table>
+          </div>
+          <pre id="indicesCsv" class="d-none m-0 p-2" style="font-size:0.74rem;white-space:pre;overflow:auto;max-height:420px;">No indices.</pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── SUMMARY ANALYTICS VIEW ── -->
+    <div id="view-summary" class="view-panel p-3 d-none">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="fw-bold mb-0"><i class="bi bi-bar-chart-line me-2 text-primary"></i>Summary Analytics</h5>
+        <div class="d-flex gap-2">
+          <button class="btn btn-sm btn-outline-success" onclick="downloadSummaryJson()" id="btnDownloadJson">
+            <i class="bi bi-download me-1"></i>Download JSON
+          </button>
+          <button class="btn btn-sm btn-outline-primary" onclick="loadSummary()">
+            <i class="bi bi-arrow-clockwise"></i> Refresh
+          </button>
+        </div>
+      </div>
+
+      <!-- Stat cards row -->
+      <div class="row g-2 mb-3" id="summaryStatCards">
+        <div class="col-auto"><div class="stat-card"><div class="stat-value" id="s-totalAttacks">—</div><div class="stat-label">Total Attacks</div></div></div>
+        <div class="col-auto"><div class="stat-card"><div class="stat-value text-warning" id="s-avgDur">—</div><div class="stat-label">Avg Duration (s)</div></div></div>
+        <div class="col-auto"><div class="stat-card"><div class="stat-value text-danger" id="s-maxDur">—</div><div class="stat-label">Max Duration (s)</div></div></div>
+        <div class="col-auto"><div class="stat-card"><div class="stat-value text-info" id="s-maxBps">—</div><div class="stat-label">Peak Attack BW</div></div></div>
+        <div class="col-auto"><div class="stat-card"><div class="stat-value text-success" id="s-avgGap">—</div><div class="stat-label">Avg Gap Between Attacks (s)</div></div></div>
+        <div class="col-auto"><div class="stat-card"><div class="stat-value" id="s-trafficAvg">—</div><div class="stat-label">Avg Traffic (bps)</div></div></div>
+      </div>
+
+      <!-- Charts row -->
+      <div class="row g-3 mb-3">
+        <!-- Attacks over time -->
+        <div class="col-lg-8">
+          <div class="card shadow-sm h-100">
+            <div class="card-header d-flex justify-content-between align-items-center py-2">
+              <span class="fw-semibold">Attacks Over Time</span>
+              <div class="btn-group btn-group-sm" role="group">
+                <button type="button" class="btn btn-outline-secondary active" id="btnGranDay"   onclick="setTimeGranularity('day')">Day</button>
+                <button type="button" class="btn btn-outline-secondary"        id="btnGranWeek"  onclick="setTimeGranularity('week')">Week</button>
+                <button type="button" class="btn btn-outline-secondary"        id="btnGranMonth" onclick="setTimeGranularity('month')">Month</button>
+              </div>
+            </div>
+            <div class="card-body" style="height:240px;position:relative;">
+              <canvas id="chartSummaryTimeline"></canvas>
+            </div>
+          </div>
+        </div>
+        <!-- Category doughnut -->
+        <div class="col-lg-4">
+          <div class="card shadow-sm h-100">
+            <div class="card-header fw-semibold py-2">Attack Categories</div>
+            <div class="card-body" style="height:240px;position:relative;">
+              <canvas id="chartSummaryCategory"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Second row: risk + status + traffic bps chart -->
+      <div class="row g-3 mb-3">
+        <div class="col-lg-3">
+          <div class="card shadow-sm h-100">
+            <div class="card-header fw-semibold py-2">By Risk</div>
+            <div class="card-body p-2" id="summaryRiskList"></div>
+          </div>
+        </div>
+        <div class="col-lg-3">
+          <div class="card shadow-sm h-100">
+            <div class="card-header fw-semibold py-2">By Status</div>
+            <div class="card-body p-2" id="summaryStatusList"></div>
+          </div>
+        </div>
+        <div class="col-lg-6">
+          <div class="card shadow-sm h-100">
+            <div class="card-header fw-semibold py-2">Traffic Over Time (avg bps)</div>
+            <div class="card-body" style="height:160px;position:relative;">
+              <canvas id="chartSummaryTraffic"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Duration stats per category -->
+      <div class="row g-3 mb-3">
+        <div class="col-12">
+          <div class="card shadow-sm">
+            <div class="card-header fw-semibold py-2">
+              <i class="bi bi-stopwatch me-2 text-warning"></i>Duration Stats per Attack Category (seconds)
+            </div>
+            <div class="card-body p-0">
+              <div class="table-responsive">
+                <table class="table table-sm table-hover mb-0">
+                  <thead class="table-dark">
+                    <tr>
+                      <th>Category</th><th class="text-center">Count</th>
+                      <th class="text-end">Min (s)</th><th class="text-end">Avg (s)</th><th class="text-end">Max (s)</th>
+                      <th class="text-end">Avg BW (bps)</th><th class="text-end">Peak BW (bps)</th>
+                    </tr>
+                  </thead>
+                  <tbody id="durationByCatBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Inter-attack gap stats -->
+      <div class="row g-3">
+        <div class="col-12">
+          <div class="card shadow-sm">
+            <div class="card-header fw-semibold py-2">
+              <i class="bi bi-clock-history me-2 text-info"></i>Inter-Attack Gap Stats — Time Between Consecutive Attacks (seconds)
+            </div>
+            <div class="card-body p-0">
+              <div class="table-responsive">
+                <table class="table table-sm table-hover mb-0">
+                  <thead class="table-dark">
+                    <tr>
+                      <th>Scope</th><th class="text-center">Attacks</th><th class="text-center">Gaps Measured</th>
+                      <th class="text-end">Min Gap (s)</th><th class="text-end">Avg Gap (s)</th><th class="text-end">Max Gap (s)</th>
+                    </tr>
+                  </thead>
+                  <tbody id="gapsByCatBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── ATTACKS VIEW ── -->
+    <div id="view-attacks" class="view-panel p-3 d-none">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="fw-bold mb-0"><i class="bi bi-shield-exclamation me-2 text-danger"></i>Recent Attacks</h5>
+        <div class="d-flex gap-2">
+          <select id="attackStatusFilter" class="form-select form-select-sm" style="width:140px;" onchange="loadAttacks()">
+            <option value="">All Statuses</option>
+            <option value="active">Active</option>
+            <option value="closed">Closed</option>
+          </select>
+          <button class="btn btn-sm btn-outline-primary" onclick="loadAttacks()">
+            <i class="bi bi-arrow-clockwise"></i> Refresh
+          </button>
+        </div>
+      </div>
+      <div class="card shadow-sm">
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-sm table-hover mb-0">
+              <thead class="table-dark">
+                <tr>
+                  <th>Attack ID</th><th>Type</th><th>Start Time</th><th>End Time</th>
+                  <th>Blocking</th><th>Device IP</th><th>Protection</th>
+                  <th>Destination IP</th><th>Total BW (kbps)</th><th>Total Pkts</th><th>Records</th>
+                </tr>
+              </thead>
+              <tbody id="attacksTableBody">
+                <tr><td colspan="11" class="text-center text-secondary py-3">Connect to load data</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── INDEX DETAIL VIEW ── -->
+    <div id="view-index" class="view-panel p-3 d-none">
+      <div class="d-flex align-items-center gap-2 mb-3">
+        <button class="btn btn-sm btn-outline-secondary" onclick="showView('dashboard')">
+          <i class="bi bi-arrow-left"></i>
+        </button>
+        <h5 class="fw-bold mb-0" id="indexDetailTitle">Index Details</h5>
+      </div>
+      <div class="row g-3 mb-3" id="indexStatCards"></div>
+      <div class="card shadow-sm">
+        <div class="card-header d-flex justify-content-between align-items-center gap-2 flex-wrap">
+          <span class="fw-semibold">Sample Documents — sorted by date desc</span>
+          <div class="d-flex align-items-center gap-2 ms-auto flex-wrap">
+            <div class="btn-group btn-group-sm" role="group" aria-label="Index doc view">
+              <button type="button" class="btn btn-outline-secondary active py-0 px-2" id="iv2-json" onclick="setResultView('json')">JSON</button>
+              <button type="button" class="btn btn-outline-secondary py-0 px-2" id="iv2-table" onclick="setResultView('table')">Table</button>
+              <button type="button" class="btn btn-outline-secondary py-0 px-2" id="iv2-csv" onclick="setResultView('csv')">CSV</button>
+            </div>
+            <button class="btn btn-sm btn-outline-success py-0 px-2" onclick="downloadResults()" title="Download shown docs (CSV for Table/CSV, JSON for JSON)">
+              <i class="bi bi-download"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-primary py-0 px-2 js-export-all" onclick="exportAll()" title="Export ALL docs in this index (scrolls past the Show limit)">
+              <i class="bi bi-cloud-download me-1"></i>All
+            </button>
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2 js-write-toggle"
+                    onclick="toggleWriteMode()" title="Enable editing/deleting fields in the Table view (writes to Elasticsearch)">
+              <i class="bi bi-lock me-1"></i>Read-only
+            </button>
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="popOutResults()" title="Open in a separate window">
+              <i class="bi bi-box-arrow-up-right"></i>
+            </button>
+            <span class="border-start ps-2 d-flex align-items-center gap-2">
+              <button class="btn btn-sm btn-outline-danger py-0 px-2" id="btnClearFilters" onclick="clearAllFilters()" title="Clear all column filters">
+                <i class="bi bi-x-circle me-1"></i>Clear Filters
+              </button>
+              <button class="btn btn-sm btn-outline-info py-0 px-2" id="btnQueryFromFilters" onclick="generateQueryFromFilters()" title="Create ES query from active filters to run on multiple indices">
+                <i class="bi bi-funnel me-1"></i>Query from Filters
+              </button>
+            </span>
+            <span class="border-start ps-2 d-flex align-items-center gap-2">
+              <label class="small text-secondary mb-0">Show:</label>
+              <select id="sampleSizeSelect" class="form-select form-select-sm" style="width:90px;"
+                      onchange="refreshCurrentIndex()">
+                <option value="10" selected>10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+                <option value="500">500</option>
+                <option value="1000">1,000</option>
+                <option value="5000">5,000</option>
+                <option value="10000">10,000</option>
+              </select>
+              <button class="btn btn-sm btn-outline-secondary" id="btnRefreshSample" onclick="refreshCurrentIndex()">
+                <i class="bi bi-arrow-clockwise"></i>
+              </button>
+            </span>
+          </div>
+        </div>
+        <span id="idxMeta" class="text-secondary small px-3 pt-1 d-block"></span>
+        <div class="card-body p-2" style="max-height:520px;overflow:auto;">
+          <pre id="idxResults" style="font-size:0.78rem;white-space:pre-wrap;word-break:break-all;margin:0;">Loading…</pre>
+          <div id="idxResultsTable" class="d-none" style="font-size:0.74rem;"></div>
+          <pre id="idxResultsCsv" class="d-none" style="font-size:0.74rem;white-space:pre;margin:0;">No rows.</pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── QUERY EDITOR VIEW ── -->
+    <div id="view-query" class="view-panel p-3 d-none">
+      <h5 class="fw-bold mb-3"><i class="bi bi-terminal me-2 text-success"></i>Query Editor</h5>
+      <div id="qeditSplit" class="qedit-split">
+        <div class="qedit-pane" id="qeditQueryPane">
+          <div class="card shadow-sm h-100">
+            <div class="card-header fw-semibold">Query</div>
+            <div class="card-body d-flex flex-column gap-2" style="overflow-y:auto;">
+
+              <!-- Natural language input -->
+              <div class="input-group">
+                <span class="input-group-text bg-dark text-info border-secondary" title="Natural language query">
+                  <i class="bi bi-chat-text"></i>
+                </span>
+                <input id="nlQueryInput" type="text" class="form-control bg-dark text-light border-secondary"
+                       placeholder='e.g. "DNS attacks on device 10.205.102.50 today"'
+                       style="font-size:0.85rem;"
+                       onkeydown="if(event.key==='Enter') translateNlQuery()"/>
+                 <button class="btn btn-outline-secondary btn-sm" id="btnTypePicker"
+                         onclick="toggleAttackTypePicker()" title="Filter by attack type">
+                   <i class="bi bi-tags me-1"></i>Types
+                 </button>
+                 <button class="btn btn-outline-secondary btn-sm" id="btnTimeRange"
+                         onclick="toggleTimeRangePicker()" title="Filter by time range">
+                   <i class="bi bi-calendar-range me-1"></i>Time
+                 </button>
+                 <button class="btn btn-outline-info btn-sm" onclick="translateNlQuery()" title="Translate to ES query">
+                  <i class="bi bi-magic me-1"></i>Translate
+                </button>
+              </div>
+              <div id="nlInterpretation" class="d-none small text-success px-1"></div>
+
+              <!-- ── Field suggestions (ambiguous field references) ── -->
+              <div id="fieldSuggestions" class="d-none"></div>
+
+              <!-- ── Attack-type picker ── -->
+              <div id="attackTypePicker" class="d-none rounded p-2" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.12);">
+                <div class="d-flex align-items-center mb-2 gap-2">
+                  <span class="small fw-semibold text-info"><i class="bi bi-tags me-1"></i>Attack Types</span>
+                  <span class="small text-secondary me-auto">click to toggle · multi-select supported</span>
+                  <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none"
+                          onclick="clearAttackTypeSelection()" title="Clear selection">
+                    <i class="bi bi-x-circle me-1"></i>Clear
+                  </button>
+                  <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none"
+                          onclick="hideAttackTypePicker()" title="Dismiss">
+                    <i class="bi bi-chevron-up"></i>
+                  </button>
+                </div>
+                <div id="attackTypeChips" class="d-flex flex-wrap gap-1">
+                  <span class="text-secondary small fst-italic">Loading…</span>
+                </div>
+                <div id="selectedTypesLabel" class="small text-info mt-1 d-none"></div>
+              </div>
+
+              <!-- ── Time Range picker ── -->
+              <div id="timeRangePicker" class="d-none rounded p-2" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,165,0,0.25);">
+                <div class="d-flex align-items-center mb-2 gap-2">
+                  <i class="bi bi-calendar-range text-warning"></i>
+                  <span class="small fw-semibold text-warning">Time Range</span>
+                  <span class="text-secondary small me-auto" style="font-size:0.72rem;">each bound is independent</span>
+                  <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none" onclick="clearTimeRange()">
+                    <i class="bi bi-x-circle me-1"></i>Clear
+                  </button>
+                  <button class="btn btn-link btn-sm text-secondary p-0 text-decoration-none" onclick="hideTimeRangePicker()">
+                    <i class="bi bi-chevron-up"></i>
+                  </button>
+                </div>
+                <!-- Started At row -->
+                <div class="d-flex align-items-center gap-2 mb-2">
+                  <label class="small text-secondary mb-0 text-nowrap" style="width:68px;text-align:right;">Started At</label>
+                  <select id="startAtOp" class="form-select form-select-sm"
+                          style="width:115px;font-size:0.78rem;background:#1e1e1e;color:#ddd;border-color:rgba(255,255,255,0.2);">
+                    <option value="gte" selected>After  (≥)</option>
+                    <option value="lte">Before (≤)</option>
+                  </select>
+                  <input type="datetime-local" id="startAtValue"
+                         class="form-control form-control-sm flex-grow-1"
+                         style="background:#1e1e1e;color:#e0e0e0;border-color:rgba(255,255,255,0.2);font-size:0.82rem;"
+                         onchange="onTimeRangeChanged()"/>
+                </div>
+                <!-- Ended At row -->
+                <div class="d-flex align-items-center gap-2">
+                  <label class="small text-secondary mb-0 text-nowrap" style="width:68px;text-align:right;">Ended At</label>
+                  <select id="endAtOp" class="form-select form-select-sm"
+                          style="width:115px;font-size:0.78rem;background:#1e1e1e;color:#ddd;border-color:rgba(255,255,255,0.2);">
+                    <option value="lte" selected>Before (≤)</option>
+                    <option value="gte">After  (≥)</option>
+                  </select>
+                  <input type="datetime-local" id="endAtValue"
+                         class="form-control form-control-sm flex-grow-1"
+                         style="background:#1e1e1e;color:#e0e0e0;border-color:rgba(255,255,255,0.2);font-size:0.82rem;"
+                         onchange="onTimeRangeChanged()"/>
+                </div>
+                <div id="timeRangeLabel" class="small text-warning mt-2 d-none"></div>
+              </div>
+
+              <!-- ── Sort by time ── -->
+              <div class="d-flex align-items-center gap-2 flex-wrap">
+                <span class="small text-secondary text-nowrap">
+                  <i class="bi bi-sort-down me-1"></i>Sort by:
+                </span>
+                <select id="sortHint" class="form-select form-select-sm"
+                        style="width:120px;font-size:0.78rem;background:#2a2a2a;color:#ddd;border-color:rgba(255,255,255,0.2);"
+                        onchange="onSortChanged()">
+                  <option value="start" selected>Start Time</option>
+                  <option value="end">End Time</option>
+                  <option value="">None</option>
+                </select>
+                <div class="btn-group btn-group-sm" id="sortDirGroup">
+                  <input type="radio" class="btn-check" name="sortDir" id="sortDesc" value="desc" checked autocomplete="off">
+                  <label class="btn btn-outline-secondary py-0 px-2" for="sortDesc" style="font-size:0.78rem;">▼ Desc</label>
+                  <input type="radio" class="btn-check" name="sortDir" id="sortAsc"  value="asc"  autocomplete="off">
+                  <label class="btn btn-outline-secondary py-0 px-2" for="sortAsc"  style="font-size:0.78rem;">▲ Asc</label>
+                </div>
+                <span id="sortFieldHint" class="small text-secondary fst-italic"></span>
+              </div>
+
+              <div class="d-flex gap-2">
+                <input id="queryIndex" type="text" class="form-control" placeholder="Index pattern (e.g. dp-attack-raw-*)" value="dp-attack-raw-*"/>
+                <input id="querySize" type="number" class="form-control" placeholder="Size" value="10" style="width:80px;"/>
+              </div>
+              <textarea id="queryBody" class="form-control flex-grow-1"
+                        style="min-height:220px;resize:vertical;font-family:monospace;font-size:0.8rem;"
+                        spellcheck="false">{
+  "query": {
+    "match_all": {}
+  },
+  "sort": [{ "startTime": { "order": "desc" } }]
+}</textarea>
+              <div id="queryBodyError" class="small text-danger d-none px-1"></div>
+
+              <!-- Per-index query accordion (shown when translate returns >1 group) -->
+              <div id="perIndexQueriesSection" class="d-none">
+                <div class="d-flex align-items-center gap-2 mb-1">
+                  <i class="bi bi-layers-half text-info small"></i>
+                  <span class="small text-info fw-semibold">Multi-index query plan</span>
+                  <span id="perIndexCount" class="badge bg-info text-dark"></span>
+                  <span class="small text-secondary me-auto" style="font-size:0.7rem;">editable · click a header to collapse</span>
+                </div>
+                <div id="perIndexQueriesList"></div>
+              </div>
+
+              <div class="d-flex gap-2 flex-wrap">
+                <button class="btn btn-success" id="btnRunSingle" onclick="runQuery()">
+                  <i class="bi bi-play-fill me-1"></i>Run Query
+                </button>
+                <button class="btn btn-primary d-none" id="btnRunAll" onclick="runMultiQuery(perIndexQueries)">
+                  <i class="bi bi-play-circle-fill me-1"></i>Run All Indices
+                </button>
+                <button class="btn btn-outline-secondary btn-sm" id="btnFormat" onclick="formatQuery()">
+                  <i class="bi bi-braces me-1"></i>Format
+                </button>
+              </div>
+            </div><!-- /card-body -->
+          </div><!-- /card -->
+        </div><!-- /qeditQueryPane -->
+
+        <!-- Drag handle between query and results -->
+        <div class="qedit-gutter" id="qeditGutter" title="Drag to resize"></div>
+
+        <div class="qedit-pane qedit-pane-grow" id="qeditResultsPane">
+          <div class="card shadow-sm h-100">
+            <div class="card-header d-flex justify-content-between align-items-center gap-2 flex-wrap">
+              <span class="fw-semibold">Results</span>
+              <span id="queryMeta" class="text-secondary small me-auto"></span>
+              <div class="btn-group btn-group-sm" role="group" aria-label="Result view">
+                <button type="button" class="btn btn-outline-secondary active py-0 px-2" id="rv-json"
+                        onclick="setResultView('json')">JSON</button>
+                <button type="button" class="btn btn-outline-secondary py-0 px-2" id="rv-table"
+                        onclick="setResultView('table')">Table</button>
+                <button type="button" class="btn btn-outline-secondary py-0 px-2" id="rv-csv"
+                        onclick="setResultView('csv')">CSV</button>
+              </div>
+              <button class="btn btn-sm btn-outline-success py-0 px-2" id="btnDownloadResults"
+                      onclick="downloadResults()" title="Download shown results (CSV for Table/CSV view, JSON for JSON view)">
+                <i class="bi bi-download"></i>
+              </button>
+              <button class="btn btn-sm btn-outline-primary py-0 px-2 js-export-all" id="btnExportAll"
+                      onclick="exportAll()" title="Export ALL matching docs (scrolls past the Size limit)">
+                <i class="bi bi-cloud-download me-1"></i>All
+              </button>
+              <button class="btn btn-sm btn-outline-secondary py-0 px-2 js-write-toggle" id="btnWriteMode"
+                      onclick="toggleWriteMode()" title="Enable editing/deleting fields in the Table view (writes to Elasticsearch)">
+                <i class="bi bi-lock me-1"></i>Read-only
+              </button>
+              <button class="btn btn-sm btn-outline-secondary py-0 px-2" id="btnPopResults"
+                      onclick="popOutResults()" title="Open results in a separate window">
+                <i class="bi bi-box-arrow-up-right"></i>
+              </button>
+              <button class="btn btn-sm btn-outline-danger py-0 px-2" id="btnClearFiltersQuery" onclick="clearAllFilters()" title="Clear all column filters">
+                <i class="bi bi-x-circle me-1"></i>Clear Filters
+              </button>
+            </div>
+            <div class="card-body p-2" style="overflow:auto;">
+              <pre id="queryResults" style="font-size:0.78rem;white-space:pre-wrap;word-break:break-all;margin:0;">Run a query to see results here…</pre>
+              <div id="queryResultsTable" class="d-none" style="font-size:0.74rem;"></div>
+              <pre id="queryResultsCsv" class="d-none" style="font-size:0.74rem;white-space:pre;margin:0;">No results yet…</pre>
+            </div>
+          </div>
+        </div><!-- /qeditResultsPane -->
+      </div><!-- /qeditSplit -->
+    </div>
+
+  </main>
+</div>
+
+<!-- ── DISCONNECT CONFIRM TOAST ──────────────────────────────────────── -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:9999;">
+  <div id="toastMsg" class="toast align-items-center border-0" role="alert">
+    <div class="d-flex">
+      <div class="toast-body fw-semibold" id="toastBody"></div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

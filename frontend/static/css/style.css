@@ -1,0 +1,443 @@
+/* ── Base ─────────────────────────────────────────────────────────────── */
+body { background: #f0f2f5; }
+
+/* ── Navbar connection pill ──────────────────────────────────────────── */
+.conn-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 20px;
+  padding: 4px 12px;
+  font-size: 0.82rem;
+}
+
+.conn-dot {
+  display: inline-block;
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.conn-dot.connected  { background: #20c997; box-shadow: 0 0 6px #20c997; }
+.conn-dot.disconnected { background: #6c757d; }
+.conn-dot.connecting { background: #ffc107; animation: blink .8s infinite; }
+
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+/* ── Sidebar ────────────────────────────────────────────────────────── */
+#sidebar {
+  border-right: 1px solid #343a40;
+  transition: width 0.18s ease, min-width 0.18s ease, opacity 0.18s ease;
+}
+/* Collapsed state — toggled from the navbar hamburger */
+#sidebar.collapsed {
+  width: 0 !important;
+  min-width: 0 !important;
+  opacity: 0;
+  overflow: hidden;
+  border-right: none;
+  pointer-events: none;
+}
+
+#sidebarToggle:hover { background: #2c3034; }
+
+/* ── Query Editor — resizable split panes ────────────────────────────── */
+.qedit-split {
+  display: flex;
+  align-items: stretch;
+  min-height: 540px;
+  height: calc(100vh - 150px);
+}
+.qedit-pane {
+  width: 50%;
+  min-width: 260px;
+  overflow: hidden;
+}
+.qedit-pane-grow {       /* results pane fills the remaining space */
+  flex: 1 1 0;
+  width: auto;
+}
+.qedit-gutter {
+  flex: 0 0 10px;
+  cursor: col-resize;
+  position: relative;
+  background: transparent;
+}
+.qedit-gutter::before {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0; left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: #ced4da;
+  border-radius: 2px;
+  transition: background 0.15s, width 0.15s;
+}
+.qedit-gutter:hover::before,
+.qedit-gutter.dragging::before { background: #0d6efd; width: 4px; }
+
+/* While dragging the gutter — kill text selection & force the cursor */
+body.qedit-resizing { cursor: col-resize; user-select: none; }
+
+/* Stack the panes on narrow screens (gutter hidden) */
+@media (max-width: 991px) {
+  .qedit-split { flex-direction: column; height: auto; min-height: 0; }
+  .qedit-pane, .qedit-pane-grow { width: auto !important; min-height: 320px; }
+  .qedit-gutter { display: none; }
+}
+
+.sidebar-conn-box {
+  background: #1a2232;
+  border-bottom: 1px solid #343a40;
+  padding: 10px 12px;
+}
+
+.sidebar-nav-btn {
+  color: #adb5bd;
+  background: transparent;
+  border: none;
+  font-size: 0.85rem;
+  border-radius: 6px;
+  transition: background 0.15s, color 0.15s;
+}
+.sidebar-nav-btn:hover { background: #2c3034; color: #fff !important; }
+.sidebar-nav-btn.active { background: #0d6efd22; color: #6ea8fe !important; }
+
+.index-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: #adb5bd;
+  font-size: 0.78rem;
+  padding: 4px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.12s, color 0.12s;
+}
+.index-btn:hover { background: #2c3034; color: #fff; }
+.index-btn .dot {
+  display: inline-block; width: 8px; height: 8px;
+  border-radius: 50%; margin-right: 6px; flex-shrink: 0;
+}
+
+.category-header {
+  font-size: 0.67rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #6c757d;
+  padding: 6px 10px 2px;
+}
+.cat-toggle {
+  cursor: pointer;
+  user-select: none;
+  border-radius: 5px;
+  transition: background 0.12s, color 0.12s;
+}
+.cat-toggle:hover { background: #2c3034; color: #adb5bd; }
+.cat-toggle .bi { font-size: 0.7rem; }
+.cat-count {
+  font-size: 0.6rem;
+  background: #343a40;
+  color: #adb5bd;
+  border-radius: 9px;
+  padding: 0 6px;
+  line-height: 1.4;
+}
+
+/* ── Saved profile items ─────────────────────────────────────────────── */
+.profile-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.profile-item:hover { background: #f8f9fa; }
+.profile-item .profile-name { font-weight: 600; font-size: 0.85rem; }
+.profile-item .profile-host { font-size: 0.75rem; color: #6c757d; }
+.profile-item .btn-del {
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.profile-item:hover .btn-del { opacity: 1; }
+
+/* ── Stat cards ──────────────────────────────────────────────────────── */
+.stat-card {
+  background: #fff;
+  border-radius: 10px;
+  padding: 16px 24px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.08);
+  min-width: 110px;
+}
+.stat-value { font-size: 1.5rem; font-weight: 700; }
+.stat-label { font-size: 0.72rem; color: #6c757d; text-transform: uppercase; letter-spacing: .05em; }
+
+/* ── Health colour helpers ───────────────────────────────────────────── */
+.health-green { color: #198754; }
+.health-yellow { color: #ffc107; }
+.health-red { color: #dc3545; }
+
+/* ── Cards ───────────────────────────────────────────────────────────── */
+.card { border: none; border-radius: 10px; }
+.card-header {
+  background: #fff;
+  border-bottom: 1px solid #e9ecef;
+  border-radius: 10px 10px 0 0 !important;
+  padding: 10px 16px;
+}
+
+/* ── Tables ──────────────────────────────────────────────────────────── */
+.table { font-size: 0.82rem; }
+.table-hover tbody tr:hover { background: #f8f9fa; cursor: pointer; }
+
+/* ── JSON doc display ────────────────────────────────────────────────── */
+.doc-card {
+  background: #1e2530;
+  color: #c9d1d9;
+  border-radius: 8px;
+  padding: 12px;
+  margin: 6px;
+  font-size: 0.75rem;
+  font-family: 'Consolas', 'Courier New', monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ── Connection form ─────────────────────────────────────────────────── */
+#connFeedback .alert { border-radius: 8px; }
+
+/* ── Rich results table (sticky header, sort, filter, cell controls) ──── */
+.rt-table { white-space: nowrap; }
+.rt-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: #212529;
+  color: #fff;
+  vertical-align: top;
+  padding: 4px 8px;
+}
+.rt-th-row { display: flex; align-items: center; gap: 6px; }
+.rt-th { position: relative; }   /* anchor the filter dropdown to its own cell */
+.rt-sort { cursor: pointer; user-select: none; white-space: nowrap; }
+.rt-sort:hover { color: #6ea8fe; }
+.rt-arrow { color: #6ea8fe; font-size: 0.75rem; }
+/* Active-filter summary — sits BELOW the field name so it never hides it. */
+.rt-th-filterval {
+  max-width: 180px; margin-top: 2px;
+  font-size: 0.66rem; font-weight: 600; color: #ffc107;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.rt-funnel {
+  background: transparent; border: none; color: #adb5bd;
+  padding: 0 2px; cursor: pointer; font-size: 0.78rem; line-height: 1;
+}
+.rt-funnel:hover { color: #fff; }
+.rt-th.filtered .rt-funnel { color: #ffc107; }
+
+/* Per-column filter dropdown */
+.rt-filter {
+  position: absolute;
+  top: 100%; left: 0;               /* drop below the whole header cell */
+  margin-top: 4px;
+  min-width: 180px; max-width: 280px;
+  background: #2b3035; color: #e9ecef;
+  border: 1px solid #495057; border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,.4);
+  padding: 6px; z-index: 20;
+  font-weight: normal;
+}
+.rt-filter input.rt-filter-search {
+  width: 100%; font-size: 0.75rem; padding: 2px 6px; margin-bottom: 4px;
+  background: #1e2226; color: #e9ecef; border: 1px solid #495057; border-radius: 4px;
+}
+.rt-filter-all {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.74rem; font-weight: 600; cursor: pointer;
+  padding: 2px 2px 4px; margin-bottom: 4px;
+  border-bottom: 1px solid #495057;
+}
+.rt-filter-list { max-height: 200px; overflow: auto; }
+.rt-filter-list label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.74rem; padding: 1px 2px; cursor: pointer; white-space: nowrap;
+}
+.rt-filter-actions { display: flex; gap: 6px; margin-top: 6px; }
+.rt-filter-actions button { flex: 1; font-size: 0.72rem; padding: 2px 6px; }
+
+/* Row/column selection */
+.rt-selcol { width: 28px; text-align: center; }
+.rt-table thead th.rt-selcol { background: #212529; }
+.rt-colsel { margin-right: 2px; }
+.rt-selbar {
+  position: sticky; left: 0;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+  background: #fff3cd; color: #664d03;
+  border: 1px solid #ffe69c; border-radius: 6px;
+  padding: 5px 8px; margin-bottom: 6px; font-size: 0.78rem;
+}
+
+/* Scope-choice modal (viewable vs ALL) */
+.rt-modal-overlay {
+  position: fixed; inset: 0; z-index: 1080;
+  background: rgba(0,0,0,.5);
+  display: flex; align-items: center; justify-content: center;
+}
+.rt-modal {
+  background: #fff; color: #212529;
+  border-radius: 10px; padding: 18px 20px;
+  width: min(440px, 92vw);
+  box-shadow: 0 10px 40px rgba(0,0,0,.4);
+}
+.rt-modal-title { font-weight: 700; font-size: 1rem; margin-bottom: 10px; }
+.rt-modal-body { font-size: 0.88rem; margin-bottom: 16px; line-height: 1.5; }
+
+/* Pretty-JSON viewer modal (object/array cell values) */
+.rt-modal-json { width: min(760px, 94vw); }
+.rt-json-pre {
+  background: #1e1e1e; color: #e6e6e6;
+  border: 1px solid #343a40; border-radius: 6px;
+  padding: 12px 14px; margin: 0 0 14px;
+  max-height: 62vh; overflow: auto;
+  font-family: ui-monospace, Menlo, Consolas, "Courier New", monospace;
+  font-size: 0.8rem; line-height: 1.5; white-space: pre; tab-size: 2;
+}
+.rt-json-edit {
+  width: 100%; min-height: 42vh; max-height: 62vh; resize: vertical;
+  background: #1e1e1e; color: #e6e6e6;
+  border: 1px solid #0d6efd; border-radius: 6px;
+  padding: 12px 14px; margin: 0 0 10px;
+  font-family: ui-monospace, Menlo, Consolas, "Courier New", monospace;
+  font-size: 0.8rem; line-height: 1.5; white-space: pre; tab-size: 2;
+}
+.rt-modal-note {
+  font-size: 0.8rem; line-height: 1.45;
+  background: #fff3cd; color: #664d03;
+  border: 1px solid #ffe69c; border-radius: 6px;
+  padding: 8px 10px; margin-bottom: 14px;
+}
+.rt-modal-note .bi { margin-right: 4px; }
+.rt-modal-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+/* Cell controls (edit / delete) appear on hover */
+.rt-cell { position: relative; }
+
+/* Field missing from a document — red-gray, with an "add" control on hover */
+.rt-cell-missing { background-color: #e7d6d6 !important; color: #8a5a5a; }
+.rt-cell-missing .rt-missing { font-style: italic; opacity: 0.7; }
+
+/* Modal text input */
+.rt-modal-input { width: 100%; margin-bottom: 14px; }
+
+/* Long cell text is truncated with an ellipsis; full text is in the title tooltip */
+.rt-val {
+  display: inline-block;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+/* Controls are pinned to the right edge of the cell so they always appear in
+   the SAME predictable spot on hover — even when the cell text is very long.
+   They float above the text as a small chip. */
+.rt-cellctrl {
+  display: none;
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  white-space: nowrap;
+  gap: 2px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08), 0 1px 5px rgba(0, 0, 0, 0.18);
+  z-index: 4;
+}
+.rt-cell:hover .rt-cellctrl { display: inline-flex; }
+.rt-cellctrl button {
+  background: transparent; border: none; padding: 0 3px; cursor: pointer;
+  color: #6c757d; font-size: 0.78rem; line-height: 1;
+}
+.rt-cellctrl button:hover { color: #0d6efd; }
+.rt-cellctrl button.rt-del:hover { color: #dc3545; }
+.rt-cell-editing input {
+  font-size: 0.72rem; padding: 0 4px; width: 140px;
+  border: 1px solid #0d6efd; border-radius: 3px;
+}
+
+/* ── Filter action buttons ──────────────────────────────────────────────── */
+#btnClearFilters, #btnQueryFromFilters {
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+#btnClearFilters .badge,
+#btnQueryFromFilters .badge {
+  font-size: 0.65rem;
+  padding: 2px 5px;
+}
+
+/* Active filter indicator on columns */
+.rt-th.filtered {
+  background: rgba(255, 193, 7, 0.15);
+}
+
+.rt-th.filtered .rt-sort {
+  color: #ffc107;
+}
+
+/* ── Field-visibility: clickable stat card, banner, picker modal ─────────── */
+.stat-card-action { cursor: pointer; transition: box-shadow .15s, transform .15s; }
+.stat-card-action:hover {
+  box-shadow: 0 0 0 2px #6ea8fe inset;
+  transform: translateY(-1px);
+}
+.stat-card-icon { font-size: 0.85rem; opacity: 0.7; }
+
+.rt-fieldbanner {
+  display: flex; align-items: center; gap: 10px;
+  padding: 4px 10px; margin-bottom: 6px;
+  background: rgba(110, 168, 254, 0.12);
+  border: 1px solid rgba(110, 168, 254, 0.35);
+  border-radius: 6px;
+  font-size: 0.78rem; color: #cfe2ff;
+}
+.rt-fieldbanner .bi { color: #6ea8fe; }
+.rt-fieldbanner .btn-link { font-size: 0.78rem; text-decoration: none; }
+
+.rt-modal-fields { width: 420px; max-width: 92vw; }
+.rt-fieldvis-body { max-height: 50vh; overflow: auto; }
+.rt-field-group { margin-bottom: 8px; }
+.rt-field-group-unmapped {
+  margin-top: 8px; padding-top: 6px; border-top: 1px dashed #495057;
+}
+.rt-field-master {
+  display: flex; align-items: center; gap: 8px;
+  font-weight: 600; font-size: 0.8rem; padding: 3px 2px;
+  margin-bottom: 2px; cursor: pointer;
+  position: sticky; top: 0; background: #2b3035; z-index: 1;
+}
+.rt-field-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 0.78rem; padding: 2px 2px 2px 18px; cursor: pointer;
+}
+.rt-field-row:hover { background: rgba(255,255,255,0.05); }
+.rt-field-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rt-field-badge {
+  font-size: 0.6rem; font-weight: 700; text-transform: uppercase;
+  color: #ffca2c; background: rgba(255, 193, 7, 0.15);
+  border: 1px solid rgba(255, 193, 7, 0.4);
+  border-radius: 4px; padding: 0 4px;
+}
+
