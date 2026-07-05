@@ -1,0 +1,8 @@
+# Keep shell scripts LF so they run on Linux even when edited on Windows.
+*.sh text eol=lf
+# Normalise line endings for common text types.
+*.py text
+*.md text
+*.yml text
+*.yaml text
+
