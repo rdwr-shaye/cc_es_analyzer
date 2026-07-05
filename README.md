@@ -71,6 +71,41 @@ docker restart cc_es_analyzer
 docker rm -f cc_es_analyzer          # remove just this container
 ```
 
+## Access through the host nginx reverse proxy
+
+On hosts where a perimeter firewall only allows 80/443 (and those are served by the
+existing `docs-platform` nginx reverse proxy), the analyzer is published via a
+**dedicated name-based vhost** — it does **not** touch the docs routing. The docs
+proxy routes by path on `server_name _` (owning `/`, `/api/`, `/mcp/`, `/images/`),
+so the analyzer gets its own `server_name` instead of sharing that path space.
+
+`deploy/setup_nginx.py` applies this safely: it backs up the proxy's source
+template, appends our vhost (idempotent, marker-guarded, durable across image
+rebuilds), then applies it live as a **separate** `conf.d/cc-analyzer.conf`,
+validates with `nginx -t` (aborting if invalid — docs untouched), and does a
+graceful `nginx -s reload`.
+
+```bash
+python deploy/setup_nginx.py --host 10.27.20.24 --user root
+```
+
+The vhost config lives in `deploy/nginx/cc-analyzer.conf`. To use it from a
+browser, point the hostname at the VM (add to your OS hosts file):
+
+```
+10.27.20.24  cc-analyzer  cc-analyzer.local
+```
+
+Then open **http://cc-analyzer/** (HTTP, no cert warning) — or
+`https://cc-analyzer/` (self-signed cert warning is expected).
+
+### Alternative: SSH tunnel (no nginx / no hosts change)
+```bash
+python deploy/tunnel.py --host 10.27.20.24 --user root
+# then open http://localhost:8801/
+```
+
+
 
 ## Auto-start at Windows logon
 
