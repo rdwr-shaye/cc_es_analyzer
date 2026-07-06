@@ -199,13 +199,13 @@
                   <div class="form-check">
                     <input class="form-check-input" type="checkbox" id="connSshEnabled" onchange="toggleSshFields()" checked/>
                     <label class="form-check-label fw-semibold" for="connSshEnabled">
-                      <i class="bi bi-hdd-network me-1 text-warning"></i>Tunnel to ES over SSH if port is blocked
+                      <i class="bi bi-hdd-network me-1 text-warning"></i>Use SSH if the ES port isn't reachable
                     </label>
                   </div>
                   <div class="form-text">
-                    Used only if the direct ES connection fails. The app SSHes to the CC machine and forwards
-                    ES traffic through the SSH connection (port 22) — works when a firewall blocks the ES port
-                    or ES only listens on the machine's loopback.
+                    Only if the direct connection fails: the app SSHes to the CC machine, tries to open the ES
+                    port on its firewall, and — if that still doesn't reach ES — forwards ES traffic through the
+                    SSH connection (port 22) as a fallback.
                   </div>
                 </div>
 

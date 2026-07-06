@@ -33,6 +33,110 @@ def build_open_port_command(ssh_user: str, port: int) -> str:
     return f'net firewall open-port set {port} open'
 
 
+def build_list_ports_command(ssh_user: str) -> str:
+    """Return the firewall list-ports command appropriate for the SSH user."""
+    if (ssh_user or "").strip().lower() == "root":
+        return '/opt/radware/box/bin/net_firewall_open-port.sh list'
+    return 'net firewall open-port list'
+
+
+def _port_open_in_listing(output: str, port: int) -> bool:
+    """True if the firewall listing shows `port` as an open tcp port.
+
+    Both the root and non-root list commands print a line like:  `tcp   9200`.
+    """
+    p = str(port)
+    for line in (output or "").splitlines():
+        toks = line.split()
+        if not toks:
+            continue
+        low = [t.lower() for t in toks]
+        # A listing row (has "tcp" and the exact port). The echoed command line
+        # never contains the port number, so this won't false-match.
+        if "tcp" in low and p in toks:
+            return True
+    return False
+
+
+def ensure_port_open_via_ssh(host: str, ssh_user: str, ssh_password: str,
+                             port: int, ssh_port: int = 22,
+                             timeout: float = 20.0) -> dict:
+    """
+    SSH in and make sure the ES `port` is open in the CC machine's firewall,
+    WITHOUT re-opening it needlessly:
+
+      1. run the firewall `list` command and check whether `port` is already open,
+      2. if already open  -> return {already_open: True} (caller skips ahead),
+      3. if not           -> run the `open` command.
+
+    Returns: { ok, already_open, opened, list_command, command,
+               list_output, output, error }.
+    """
+    result = {
+        "ok": False, "already_open": False, "opened": False,
+        "list_command": "", "command": "",
+        "list_output": "", "output": "", "error": "",
+    }
+
+    try:
+        import paramiko
+    except ImportError:
+        result["error"] = "paramiko is not installed (see requirements.txt)."
+        return result
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        logger.info("[ssh] connecting to %s@%s:%s to check/open port %s",
+                    ssh_user, host, ssh_port, port)
+        client.connect(hostname=host, port=ssh_port, username=ssh_user,
+                       password=ssh_password, timeout=timeout,
+                       banner_timeout=timeout, auth_timeout=timeout,
+                       allow_agent=False, look_for_keys=False)
+
+        # 1) Is the port already open in the firewall?
+        list_cmd = build_list_ports_command(ssh_user)
+        result["list_command"] = list_cmd
+        list_out = _run_in_interactive_shell(client, list_cmd, timeout=timeout)
+        result["list_output"] = list_out
+
+        if _port_open_in_listing(list_out, port):
+            result["already_open"] = True
+            result["ok"] = True
+            logger.info("[ssh] port %s is already open in the firewall — not re-opening", port)
+            return result
+
+        # 2) Not open — open it.
+        open_cmd = build_open_port_command(ssh_user, port)
+        result["command"] = open_cmd
+        logger.info("[ssh] port %s not open; running: %s", port, open_cmd)
+        out = _run_in_interactive_shell(client, open_cmd, timeout=timeout)
+        result["output"] = out
+        result["opened"] = True
+
+        low = out.lower()
+        if any(tok in low for tok in (
+            "can't access tty", "permission denied", "not allowed",
+            "invalid", "error", "failure", "failed", "unknown command",
+        )):
+            result["ok"] = False
+            result["error"] = _first_error_line(out) or "Firewall open command reported an error."
+        else:
+            result["ok"] = True
+        logger.info("[ssh] open-port done ok=%s output=%r", result["ok"], out)
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if e.__class__.__name__ == "AuthenticationException":
+            msg = "SSH authentication failed — check the SSH username/password."
+        result["error"] = msg
+        logger.error("[ssh] ensure_port_open failed: %s", e)
+    finally:
+        try: client.close()
+        except Exception: pass
+
+    return result
+
+
 def open_port_via_ssh(host: str, ssh_user: str, ssh_password: str,
                       port: int, ssh_port: int = 22,
                       timeout: float = 20.0) -> dict:

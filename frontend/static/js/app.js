@@ -1725,6 +1725,8 @@ async function doConnect() {
       onConnected(settings, data);
       const sshMsg = data.ssh_tunnel
         ? `<br><small class="text-warning"><i class="bi bi-hdd-network me-1"></i>Connected via SSH tunnel: <code>${(data.tunnel||'').replace(/</g,'&lt;')}</code></small>`
+        : data.ssh_opened_port
+        ? `<br><small class="text-warning"><i class="bi bi-unlock me-1"></i>ES port opened via SSH: <code>${(data.ssh_command||'').replace(/</g,'&lt;')}</code></small>`
         : '';
       showFeedback('success',
         `<i class="bi bi-check-circle-fill me-2"></i>Connected! ` +
