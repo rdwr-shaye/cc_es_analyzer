@@ -46,14 +46,19 @@ def connect(req: ConnectionRequest):
     """
     Update the active Elasticsearch connection.
 
-    If the direct ES connection fails and SSH is enabled, SSH into the target
-    machine and open the ES port via the firewall, then retry — SSH is used
-    ONLY after a failed direct connection.
+    If the direct ES connection fails and SSH is enabled, open an SSH tunnel to
+    the target machine and forward a local port to the ES port on the remote
+    box's loopback — every ES request then "rides" inside the SSH connection.
+    This works when a firewall blocks the ES port but permits SSH (22), and
+    when ES only listens on the remote host's loopback.
     """
+    from services.ssh_tunnel import start_tunnel, stop_tunnel
+
     # 1) Try the direct ES connection first.
     try:
         ok, client, info = _try_connect(req)
         if ok:
+            stop_tunnel()   # direct works — drop any stale tunnel
             return {
                 "connected": True,
                 "es_version": info.get("version", {}).get("number"),
@@ -61,58 +66,54 @@ def connect(req: ConnectionRequest):
             }
     except Exception as e:
         logger.warning("[connect] direct ES connection error: %s", e)
-        info = None
-        ok = False
 
-    # 2) Direct connection failed — try the SSH firewall fallback if enabled.
+    # 2) Direct connection failed — fall back to an SSH tunnel if enabled.
     if not req.ssh_enabled:
         return {"connected": False,
                 "error": "Ping failed — check host/port. "
-                         "Enable SSH to auto-open the port."}
-
+                         "Enable SSH to tunnel to ES through the firewall."}
     if not req.ssh_user:
         return {"connected": False,
                 "error": "SSH is enabled but no SSH username was provided."}
 
-    from services.ssh_opener import port_is_open, open_port_via_ssh
-
-    logger.info("[connect] direct ES connect failed; attempting SSH fallback "
-                "to open port %s on %s", req.port, req.host)
-    ssh_res = open_port_via_ssh(
-        host=req.host,
-        ssh_user=req.ssh_user,
-        ssh_password=req.ssh_password,
-        port=req.port,
-        ssh_port=req.ssh_port,
+    logger.info("[connect] direct ES connect failed; opening SSH tunnel "
+                "%s:22 -> 127.0.0.1:%s", req.host, req.port)
+    tun = start_tunnel(
+        ssh_host=req.host, ssh_user=req.ssh_user, ssh_password=req.ssh_password,
+        ssh_port=req.ssh_port, remote_host="127.0.0.1", remote_port=req.port,
     )
-
-    if not ssh_res["ok"]:
+    if not tun["ok"]:
         return {
             "connected": False,
-            "error": f"Direct connection failed and SSH port-open failed: "
-                     f"{ssh_res.get('error') or 'unknown error'}",
-            "ssh": ssh_res,
+            "error": f"Direct connection failed and the SSH tunnel could not be "
+                     f"opened: {tun.get('error') or 'unknown error'}",
+            "ssh": tun,
         }
 
-    # 3) Port opened — retry the ES connection.
+    # 3) Point the ES client at the tunnel's local port and retry.
     try:
-        ok, client, info = _try_connect(req)
-        if ok:
+        client = update_client(
+            host=tun["local_host"], port=tun["local_port"],
+            scheme=req.scheme or "http",
+            user=req.user, password=req.password, verify_certs=req.verify_certs,
+        )
+        if client.ping():
+            info = client.info()
             return {
                 "connected": True,
                 "es_version": info.get("version", {}).get("number"),
                 "cluster_name": info.get("cluster_name"),
-                "ssh_opened_port": True,
-                "ssh_command": ssh_res.get("command"),
+                "ssh_tunnel": True,
+                "tunnel": f"127.0.0.1:{tun['local_port']} → (ssh) {req.host} → 127.0.0.1:{req.port}",
             }
     except Exception as e:
-        logger.warning("[connect] ES connection error after SSH open: %s", e)
+        logger.warning("[connect] ES via SSH tunnel failed: %s", e)
 
+    stop_tunnel()
     return {
         "connected": False,
-        "error": "Port was opened via SSH but Elasticsearch still did not "
-                 "respond — check that ES is running on the target machine.",
-        "ssh": ssh_res,
+        "error": f"SSH tunnel opened but Elasticsearch did not respond through it — "
+                 f"check that ES is running and reachable on 127.0.0.1:{req.port} on {req.host}.",
     }
 
 

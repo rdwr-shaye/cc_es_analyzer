@@ -1723,8 +1723,8 @@ async function doConnect() {
       localStorage.setItem(LS_ACTIVE, JSON.stringify(settings));
       isConnected = true;
       onConnected(settings, data);
-      const sshMsg = data.ssh_opened_port
-        ? `<br><small class="text-warning"><i class="bi bi-terminal me-1"></i>Port opened via SSH: <code>${(data.ssh_command||'').replace(/</g,'&lt;')}</code></small>`
+      const sshMsg = data.ssh_tunnel
+        ? `<br><small class="text-warning"><i class="bi bi-hdd-network me-1"></i>Connected via SSH tunnel: <code>${(data.tunnel||'').replace(/</g,'&lt;')}</code></small>`
         : '';
       showFeedback('success',
         `<i class="bi bi-check-circle-fill me-2"></i>Connected! ` +
@@ -1743,15 +1743,15 @@ async function doConnect() {
 
       // Check for SSH-specific errors
       if (errorMsg.includes('SSH') || errorMsg.includes('ssh')) {
-        if (errorMsg.includes('Authentication') || errorMsg.includes('authentication') || errorMsg.includes('password')) {
-          errorHtml = `<i class="bi bi-x-circle-fill me-2"></i>SSH authentication failed. Check your username and password.`;
+        if (errorMsg.includes('authentication')) {
+          errorHtml = `<i class="bi bi-x-circle-fill me-2"></i>SSH authentication failed. Check the SSH username and password.`;
         } else if (!settings.ssh_user || !settings.ssh_password) {
-          errorHtml = `<i class="bi bi-x-circle-fill me-2"></i>ES port is closed. SSH credentials are required to open it.
-            <br><small class="text-secondary">Please provide SSH username and password.</small>`;
+          errorHtml = `<i class="bi bi-x-circle-fill me-2"></i>ES port isn't reachable directly. SSH credentials are required to tunnel to it.
+            <br><small class="text-secondary">Please provide the SSH username and password.</small>`;
         }
       } else if (errorMsg.includes('Connection refused') || errorMsg.includes('timed out') || errorMsg.includes('port')) {
         if (settings.ssh_enabled && (!settings.ssh_user || !settings.ssh_password)) {
-          errorHtml = `<i class="bi bi-x-circle-fill me-2"></i>ES port appears closed. SSH credentials needed to open it.
+          errorHtml = `<i class="bi bi-x-circle-fill me-2"></i>ES port appears blocked. SSH credentials are needed to tunnel to it.
             <br><small class="text-secondary">SSH is enabled but username/password are missing.</small>`;
         }
       }
