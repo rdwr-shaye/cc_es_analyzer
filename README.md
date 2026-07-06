@@ -57,9 +57,9 @@ defaults to **8801** and auto-advances if that port is already taken.
 
 ```bash
 pip install paramiko
-python deploy/deploy.py --host 10.27.20.24 --user root      # prompts for password
+python deploy/deploy.py --host <host> --user root      # prompts for password
 # or non-interactive:
-python deploy/deploy.py --host 10.27.20.24 --user root --password '***' --port 8801
+python deploy/deploy.py --host <host> --user root --password '***' --port 8801
 ```
 
 After it prints `DEPLOY_RESULT=OK PORT=<n>`, open `http://<host-ip>:<n>/`.
@@ -86,14 +86,14 @@ validates with `nginx -t` (aborting if invalid — docs untouched), and does a
 graceful `nginx -s reload`.
 
 ```bash
-python deploy/setup_nginx.py --host 10.27.20.24 --user root
+python deploy/setup_nginx.py --host <host> --user root
 ```
 
 The vhost config lives in `deploy/nginx/cc-analyzer.conf`. To use it from a
 browser, point the hostname at the VM (add to your OS hosts file):
 
 ```
-10.27.20.24  cc-analyzer  cc-analyzer.local
+<host-ip>  cc-analyzer  cc-analyzer.local
 ```
 
 Then open **http://cc-analyzer/** (HTTP, no cert warning) — or
@@ -101,7 +101,7 @@ Then open **http://cc-analyzer/** (HTTP, no cert warning) — or
 
 ### Alternative: SSH tunnel (no nginx / no hosts change)
 ```bash
-python deploy/tunnel.py --host 10.27.20.24 --user root
+python deploy/tunnel.py --host <host> --user root
 # then open http://localhost:8801/
 ```
 

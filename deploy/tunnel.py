@@ -7,8 +7,8 @@ It forwards  localhost:<local_port>  ->  (through SSH)  ->  <host>:<remote_port>
 so you can open  http://localhost:<local_port>/  in your browser.
 
 Usage:
-    python deploy/tunnel.py --host 10.27.20.24 --user root
-    python deploy/tunnel.py --host 10.27.20.24 --user root --local 8801 --remote 8801
+    python deploy/tunnel.py --host <host> --user root
+    python deploy/tunnel.py --host <host> --user root --local 8801 --remote 8801
 
 Password: --password / env CC_DEPLOY_PASS / interactive prompt.
 Leave it running; press Ctrl+C to close the tunnel.
@@ -60,7 +60,8 @@ class ForwardServer(socketserver.ThreadingTCPServer):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="SSH tunnel to reach CC ES Analyzer through a firewall.")
-    ap.add_argument("--host", default=os.getenv("CC_DEPLOY_HOST", "10.27.20.24"))
+    ap.add_argument("--host", default=os.getenv("CC_DEPLOY_HOST"),
+                    help="SSH host to tunnel through (or set CC_DEPLOY_HOST). Required.")
     ap.add_argument("--user", default=os.getenv("CC_DEPLOY_USER", "root"))
     ap.add_argument("--password", default=os.getenv("CC_DEPLOY_PASS"))
     ap.add_argument("--ssh-port", type=int, default=22)
@@ -68,6 +69,9 @@ def main() -> int:
     ap.add_argument("--remote", type=int, default=8801, help="remote (host) port to reach")
     ap.add_argument("--remote-host", default="127.0.0.1", help="target as seen from the SSH host")
     args = ap.parse_args()
+
+    if not args.host:
+        ap.error("--host is required (or set CC_DEPLOY_HOST).")
 
     password = args.password or getpass.getpass(f"SSH password for {args.user}@{args.host}: ")
 

@@ -16,8 +16,15 @@ What it does, carefully and idempotently:
 
 Nothing else on the host is touched (no other container, image, or network).
 
+This is an OPTIONAL integration for a host that already runs a path-based nginx
+reverse proxy (the reference environment is a "docs-platform" proxy). The proxy
+container name and template path are configurable, so it can target any such
+host — nothing here is required to run the app itself.
+
 Usage:
-    python deploy/setup_nginx.py --host 10.27.20.24 --user root
+    python deploy/setup_nginx.py --host <host> --user root
+    python deploy/setup_nginx.py --host <host> --proxy-container <name> \
+        --template-path /path/to/nginx.conf.template
 """
 from __future__ import annotations
 import argparse, getpass, os, sys, datetime
@@ -30,6 +37,8 @@ except ImportError:
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOCAL_VHOST  = os.path.join(PROJECT_ROOT, "deploy", "nginx", "cc-analyzer.conf")
 
+# Reference-environment defaults; override with --proxy-container / --template-path
+# (or env CC_PROXY_CONTAINER / CC_PROXY_TEMPLATE) for any other host.
 PROXY_CONTAINER = "docs-reverse-proxy"
 TEMPLATE_PATH   = "/opt/kvision_tools/docs-platform/reverse-proxy/nginx.conf.template"
 LIVE_CONF_IN_CONTAINER = "/etc/nginx/conf.d/cc-analyzer.conf"
@@ -40,12 +49,22 @@ MARK_END   = "# <<< cc_es_analyzer vhost (managed) <<<"
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Publish CC ES Analyzer via the docs nginx proxy (safe).")
-    ap.add_argument("--host", default=os.getenv("CC_DEPLOY_HOST", "10.27.20.24"))
+    global PROXY_CONTAINER, TEMPLATE_PATH
+    ap = argparse.ArgumentParser(description="Publish CC ES Analyzer via an existing nginx reverse proxy (safe).")
+    ap.add_argument("--host", default=os.getenv("CC_DEPLOY_HOST"),
+                    help="Target host running the reverse proxy (or set CC_DEPLOY_HOST). Required.")
     ap.add_argument("--user", default=os.getenv("CC_DEPLOY_USER", "root"))
     ap.add_argument("--password", default=os.getenv("CC_DEPLOY_PASS"))
     ap.add_argument("--ssh-port", type=int, default=22)
+    ap.add_argument("--proxy-container", default=os.getenv("CC_PROXY_CONTAINER", PROXY_CONTAINER),
+                    help="Name of the host's reverse-proxy nginx container.")
+    ap.add_argument("--template-path", default=os.getenv("CC_PROXY_TEMPLATE", TEMPLATE_PATH),
+                    help="Path on the host to the proxy's nginx source template (for a durable edit).")
     args = ap.parse_args()
+    if not args.host:
+        ap.error("--host is required (or set CC_DEPLOY_HOST).")
+    PROXY_CONTAINER = args.proxy_container
+    TEMPLATE_PATH = args.template_path
     password = args.password or getpass.getpass(f"SSH password for {args.user}@{args.host}: ")
 
     with open(LOCAL_VHOST, "r", encoding="utf-8") as fh:

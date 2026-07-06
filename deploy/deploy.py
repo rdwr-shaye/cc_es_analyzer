@@ -8,11 +8,12 @@ isolated Docker container. It NEVER touches other containers on the host.
 
 Examples
 --------
-    python deploy/deploy.py --host 10.27.20.24 --user root --password '***'
-    python deploy/deploy.py --host 10.27.20.24 --user root         # prompts
-    CC_DEPLOY_PASS=*** python deploy/deploy.py --host 10.27.20.24   # env var
+    python deploy/deploy.py --host <host> --user root --password '***'
+    python deploy/deploy.py --host <host> --user root         # prompts for password
+    CC_DEPLOY_HOST=<host> CC_DEPLOY_PASS=*** python deploy/deploy.py
 
-Secrets are never written to disk or committed — pass them at runtime.
+The target host is required (--host or CC_DEPLOY_HOST); the app can run on any
+machine. Secrets are never written to disk or committed — pass them at runtime.
 """
 from __future__ import annotations
 
@@ -135,13 +136,17 @@ def _exec_stream(ssh: "paramiko.SSHClient", cmd: str) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Deploy CC ES Analyzer to a remote host via Docker.")
-    ap.add_argument("--host", default=os.getenv("CC_DEPLOY_HOST", "10.27.20.24"))
+    ap.add_argument("--host", default=os.getenv("CC_DEPLOY_HOST"),
+                    help="Target host to deploy to (or set CC_DEPLOY_HOST). Required.")
     ap.add_argument("--user", default=os.getenv("CC_DEPLOY_USER", "root"))
     ap.add_argument("--password", default=os.getenv("CC_DEPLOY_PASS"))
     ap.add_argument("--port", type=int, default=int(os.getenv("CC_DEPLOY_PORT", "8801")),
                     help="Desired host port (auto-advances if busy). Default 8801.")
     ap.add_argument("--ssh-port", type=int, default=22)
     args = ap.parse_args()
+
+    if not args.host:
+        ap.error("--host is required (or set CC_DEPLOY_HOST).")
 
     password = args.password or getpass.getpass(f"SSH password for {args.user}@{args.host}: ")
 
