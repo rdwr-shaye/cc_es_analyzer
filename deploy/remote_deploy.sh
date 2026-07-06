@@ -40,8 +40,17 @@ port_in_use() {
   return 1
 }
 
+# A port published by OUR OWN container is reusable — the container is replaced
+# below, so a redeploy must keep its port (nginx proxies to it) instead of drifting.
+OWN_PORT="$(docker ps --filter "name=^${NAME}\$" --format '{{.Ports}}' 2>/dev/null \
+            | grep -oE '0\.0\.0\.0:[0-9]+' | head -1 | cut -d: -f2 || true)"
+
 HOST_PORT="${REQ_PORT}"
 for _ in $(seq 0 20); do
+  if [ -n "${OWN_PORT}" ] && [ "${HOST_PORT}" = "${OWN_PORT}" ]; then
+    log "Port ${HOST_PORT} is held by our own '${NAME}' container — reusing it."
+    break
+  fi
   if port_in_use "${HOST_PORT}"; then
     log "Port ${HOST_PORT} is in use — trying next."
     HOST_PORT=$((HOST_PORT + 1))
@@ -49,7 +58,7 @@ for _ in $(seq 0 20); do
     break
   fi
 done
-if port_in_use "${HOST_PORT}"; then
+if [ "${HOST_PORT}" != "${OWN_PORT:-}" ] && port_in_use "${HOST_PORT}"; then
   echo "[deploy] ERROR: could not find a free host port near ${REQ_PORT}"; exit 3
 fi
 log "Using host port ${HOST_PORT}"

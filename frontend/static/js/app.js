@@ -6,6 +6,16 @@
 const LS_ACTIVE  = 'cc_es_active_conn';   // last-used connection settings
 const LS_PROFILES = 'cc_es_profiles';     // saved named profiles
 
+/* ── Base path (reverse-proxy prefix support) ───────────────────────────
+   The app may be served at "/" (direct, e.g. :8801) OR under a path prefix
+   behind nginx (e.g. http://<host>/cc_es_analyzer/). Derive the prefix from
+   the page URL so every API/static request stays inside it. */
+const APP_BASE = new URL('.', window.location.href).pathname.replace(/\/$/, '');
+/** Prefix an absolute app path ("/api/...", "/static/...") with APP_BASE. */
+function appUrl(path) {
+  return path.startsWith('/') ? APP_BASE + path : path;
+}
+
 /* ── App state ──────────────────────────────────────────────────────────── */
 let allIndices   = [];
 let chartCategory = null;
@@ -1484,7 +1494,7 @@ async function runServerExport(items) {
   const orig = btns.map(b => b.innerHTML);
   btns.forEach(b => { b.disabled = true; b.innerHTML = '<span class="spinner-border spinner-border-sm" style="width:0.8rem;height:0.8rem;"></span>'; });
   try {
-    const res = await fetch('/api/query/export', {
+    const res = await fetch(appUrl('/api/query/export'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -1554,7 +1564,7 @@ function popOutResults() {
     <title>CC ES Analyzer — Results</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"/>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
-    <link rel="stylesheet" href="/static/css/style.css"/>
+    <link rel="stylesheet" href="${appUrl('/static/css/style.css')}"/>
     <style>
       body{margin:0;background:#1e2530;color:#c9d1d9;font-family:Consolas,'Courier New',monospace;}
       header{background:#11161d;padding:8px 12px;border-bottom:1px solid #343a40;
@@ -1701,7 +1711,7 @@ async function doConnect() {
   showFeedback('info', '<i class="bi bi-hourglass-split me-2"></i>Connecting to Elasticsearch…' + sshNote);
 
   try {
-    const res  = await fetch('/api/connect', {
+    const res  = await fetch(appUrl('/api/connect'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(settings),
@@ -2256,7 +2266,7 @@ async function downloadSummaryJson() {
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Building…';
 
   try {
-    const res = await fetch('/api/cc/summary/export');
+    const res = await fetch(appUrl('/api/cc/summary/export'));
     if (!res.ok) throw new Error('HTTP ' + res.status);
 
     // Extract filename from Content-Disposition header
@@ -3000,7 +3010,7 @@ function showToast(msg, bgClass = 'bg-dark') {
    UTILITIES
    ══════════════════════════════════════════════════════════════════════════ */
 async function api(url, opts = {}) {
-  const res = await fetch(url, opts);
+  const res = await fetch(appUrl(url), opts);
   return res.json();
 }
 function setText(id, val) {
@@ -3046,7 +3056,7 @@ function esc(s) {
       }
 
       // Server lost state (e.g. restart) — reconnect silently
-      const res  = await fetch('/api/connect', {
+      const res  = await fetch(appUrl('/api/connect'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings),
