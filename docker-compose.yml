@@ -7,6 +7,9 @@ services:
   cc_es_analyzer:
     build: .
     image: cc_es_analyzer:latest
+    # Rebuild from source on every `docker compose up -d` (no need for --build),
+    # so re-running it after a `git pull` always picks up the latest code.
+    pull_policy: build
     container_name: cc_es_analyzer
     restart: unless-stopped
     # Host port is configurable; defaults to 8801 to avoid common conflicts.

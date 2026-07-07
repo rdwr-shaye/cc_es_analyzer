@@ -53,6 +53,15 @@ Then open `http://<LINUX-IP>:8801/` from a browser and click **Connect** to poin
 at your Elasticsearch host. To use a different host port, set `HOST_PORT` (e.g.
 `HOST_PORT=9000 docker compose up -d --build`).
 
+To update to the latest code later, just `git pull` and re-run `docker compose up -d`
+(the `--build` is no longer required — the compose file sets `pull_policy: build`, so
+`up -d` always rebuilds the image from the current source before starting):
+
+```bash
+git pull
+docker compose up -d
+```
+
 ### Build and run locally
 ```bash
 docker compose up -d --build         # serves on http://localhost:8801
@@ -134,6 +143,23 @@ Then open **http://cc-analyzer/** (HTTP, no cert warning) — or
 ```bash
 python deploy/tunnel.py --host <host> --user root
 # then open http://localhost:8801/
+```
+
+### Alternative: share the docs proxy's path space (/cc_es_analyzer/)
+
+If you'd rather reach it at `http://<host-ip>/cc_es_analyzer/` — same IP, no hosts
+file edit, no separate hostname — `deploy/setup_nginx_path.py` inserts a
+`location /cc_es_analyzer/` block directly into the docs proxy's own
+`server_name _;` block(s). This is **more invasive** than the name-based vhost
+above: it edits the shared docs template rather than adding a fully isolated
+file, since a location can only take effect inside the server block that
+actually matches the request. It still backs up the template first, applies
+the live change to a copy, validates with `nginx -t`, and rolls back
+automatically if validation fails — no other docs route is touched or removed.
+
+```bash
+python deploy/setup_nginx_path.py --host <host> --user root
+# then open http://<host-ip>/cc_es_analyzer/  (or https://<host-ip>/cc_es_analyzer/)
 ```
 
 
