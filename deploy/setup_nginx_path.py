@@ -34,18 +34,16 @@ the most specific prefix location regardless of order, so /cc_es_analyzer/
 cannot shadow the proxy's own `location /`, `/api/`, etc.
 
 Usage:
+    # over SSH from your workstation:
     python deploy/setup_nginx_path.py --host <host> --user root
+    # ON the host itself (no SSH), e.g. from deploy/install.sh:
+    python3 deploy/setup_nginx_path.py --local --skip-if-no-proxy
     # pin things explicitly if auto-detection needs help:
     python deploy/setup_nginx_path.py --host <host> --proxy-container rdwrsim-nginx \
-        --upstream 172.17.0.1:8801 --anchor 'server_name _;'
+        --upstream 172.17.0.1:8801 --upstream-scheme https --anchor 'server_name _;'
 """
 from __future__ import annotations
-import argparse, getpass, os, re, sys, datetime
-
-try:
-    import paramiko
-except ImportError:
-    sys.exit("paramiko is required:  pip install paramiko")
+import argparse, getpass, os, re, sys, datetime, subprocess
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOCAL_SNIPPET = os.path.join(PROJECT_ROOT, "deploy", "nginx", "cc-analyzer-path.conf")
@@ -55,6 +53,7 @@ TEMPLATE_PATH    = "/opt/kvision_tools/docs-platform/reverse-proxy/nginx.conf.te
 HOST_STAGE       = "/opt/cc_es_analyzer/nginx"
 DEFAULT_APP_PORT = "8801"          # host-published port of the analyzer container
 UPSTREAM_TOKEN   = "__CC_UPSTREAM__"
+SCHEME_TOKEN     = "__CC_SCHEME__"     # http, or https when the app serves TLS
 # Line our location block is inserted after — the default server owning the
 # host's root path. Override with --anchor if the proxy's default server uses a
 # concrete server_name instead of the catch-all `_`.
@@ -139,6 +138,21 @@ def _pick_upstream(run, proxy: str, app_port: str) -> tuple[str, str]:
     return f"127.0.0.1:{app_port}", "fallback: no gateway found, using loopback"
 
 
+def _pick_scheme(run, app_port: str) -> tuple[str, str]:
+    """Detect whether the app speaks TLS on its published port.
+
+    Probes the host's own loopback: if https answers with a real HTTP status the
+    app runs with SERVICE_SSL=true (so nginx must proxy over https); otherwise
+    plain http. Returns (scheme, human_reason).
+    """
+    _rc, out, _ = run(f"curl -sk -m 6 -o /dev/null -w '%{{http_code}}' "
+                      f"https://127.0.0.1:{app_port}/api/health")
+    code = out.strip()
+    if code and code not in ("000",):
+        return "https", f"app answered https on :{app_port} (HTTP {code}) — SERVICE_SSL is on"
+    return "http", f"app not serving TLS on :{app_port} — using plain http"
+
+
 def _detect_proxy_container(run, anchor: str):
     """Auto-detect the reverse-proxy nginx container. Returns
     (chosen|None, candidates, note)."""
@@ -169,8 +183,18 @@ def _detect_proxy_container(run, anchor: str):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Publish CC ES Analyzer at /cc_es_analyzer/ on an nginx proxy's own path space.")
+    ap.add_argument("--local", action="store_true",
+                    help="Run against THIS machine directly (subprocess + local files) instead of "
+                         "over SSH. Use when running on the host itself; --host/--user are ignored.")
+    ap.add_argument("--skip-if-no-proxy", action="store_true",
+                    help="Exit 0 with a note (instead of erroring) when no nginx reverse-proxy "
+                         "container is found — for hosts where the app is reached directly on its port.")
+    ap.add_argument("--upstream-scheme", choices=("auto", "http", "https"), default="auto",
+                    help="Scheme nginx uses to reach the app. 'auto' (default) detects whether the "
+                         "app serves TLS (SERVICE_SSL=true) and picks https, else http.")
     ap.add_argument("--host", default=os.getenv("CC_DEPLOY_HOST"),
-                    help="Target host running the reverse proxy (or set CC_DEPLOY_HOST). Required.")
+                    help="Target host running the reverse proxy (or set CC_DEPLOY_HOST). "
+                         "Required unless --local.")
     ap.add_argument("--user", default=os.getenv("CC_DEPLOY_USER", "root"))
     ap.add_argument("--password", default=os.getenv("CC_DEPLOY_PASS"))
     ap.add_argument("--ssh-port", type=int, default=22)
@@ -190,31 +214,50 @@ def main() -> int:
     ap.add_argument("--anchor", default=os.getenv("CC_PROXY_ANCHOR", DEFAULT_ANCHOR),
                     help=f"Config line to insert our location block after (default {DEFAULT_ANCHOR!r}).")
     args = ap.parse_args()
-    if not args.host:
-        ap.error("--host is required (or set CC_DEPLOY_HOST).")
+    if not args.local and not args.host:
+        ap.error("--host is required (or set CC_DEPLOY_HOST), unless --local.")
     template_path = args.template_path
     anchor = args.anchor
-    password = args.password or getpass.getpass(f"SSH password for {args.user}@{args.host}: ")
+    host_label = args.host or "this-host"
 
     with open(LOCAL_SNIPPET, "r", encoding="utf-8") as fh:
         snippet_raw = fh.read().replace("\r\n", "\n")
 
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    print(f"[nginx-path] Connecting to {args.user}@{args.host} …")
-    ssh.connect(args.host, port=args.ssh_port, username=args.user, password=password, timeout=20)
+    ssh = None
+    if args.local:
+        # Run against THIS machine: shell commands via subprocess, files written
+        # directly. `_write` truncates in place (O_TRUNC) so bind mounts stay valid.
+        print("[nginx-path] Running locally on this host (no SSH).")
 
-    def run(cmd: str):
-        _i, o, e = ssh.exec_command(cmd)
-        rc = o.channel.recv_exit_status()
-        return rc, o.read().decode(errors="replace"), e.read().decode(errors="replace")
+        def run(cmd: str):
+            p = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True)
+            return p.returncode, p.stdout, p.stderr
 
-    def _write(path: str, text: str):
-        with sftp.file(path, "w") as f:      # O_TRUNC keeps the inode → bind mounts stay valid
-            f.write(text.encode("utf-8"))
+        def _write(path: str, text: str):
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+    else:
+        try:
+            import paramiko
+        except ImportError:
+            sys.exit("paramiko is required for remote mode:  pip install paramiko  (or use --local)")
+        password = args.password or getpass.getpass(f"SSH password for {args.user}@{args.host}: ")
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        print(f"[nginx-path] Connecting to {args.user}@{args.host} …")
+        ssh.connect(args.host, port=args.ssh_port, username=args.user, password=password, timeout=20)
+
+        def run(cmd: str):
+            _i, o, e = ssh.exec_command(cmd)
+            rc = o.channel.recv_exit_status()
+            return rc, o.read().decode(errors="replace"), e.read().decode(errors="replace")
+
+        def _write(path: str, text: str):
+            with sftp.file(path, "w") as f:  # O_TRUNC keeps the inode → bind mounts stay valid
+                f.write(text.encode("utf-8"))
 
     try:
-        sftp = ssh.open_sftp()
+        sftp = ssh.open_sftp() if ssh is not None else None
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # 0) Pick the reverse-proxy nginx container: explicit flag, else detect.
@@ -228,6 +271,10 @@ def main() -> int:
             print(f"[nginx-path] Using nginx container: {proxy} (specified).")
         else:
             proxy, candidates, note = _detect_proxy_container(run, anchor)
+            if not proxy and not candidates and args.skip_if_no_proxy:
+                print(f"[nginx-path] No nginx reverse proxy found ({note}). Skipping proxy setup — "
+                      f"reach the app directly on its published port.")
+                return 0
             if not proxy:
                 print(f"[nginx-path] ERROR: could not auto-pick an nginx container ({note}).")
                 if candidates:
@@ -244,7 +291,17 @@ def main() -> int:
         else:
             upstream, why = _pick_upstream(run, proxy, args.app_port)
         print(f"[nginx-path] Upstream for proxy_pass: {upstream}  ({why}).")
-        snippet = snippet_raw.replace(UPSTREAM_TOKEN, upstream)
+
+        # 1b) Scheme nginx uses to reach the app (https when SERVICE_SSL=true).
+        if args.upstream_scheme != "auto":
+            scheme, why_s = args.upstream_scheme, "specified"
+        else:
+            scheme, why_s = _pick_scheme(run, args.app_port)
+        print(f"[nginx-path] Upstream scheme: {scheme}  ({why_s}).")
+
+        snippet = (snippet_raw
+                   .replace(UPSTREAM_TOKEN, upstream)
+                   .replace(SCHEME_TOKEN, scheme))
         block = f"{MARK_BEGIN}\n{snippet.rstrip()}\n{MARK_END}"
 
         # 2) Durable edit of the source template — best-effort, skipped if absent.
@@ -338,22 +395,24 @@ def main() -> int:
                 return 7
             print(f"[nginx-path] {action.capitalize()} block live and reloaded nginx gracefully.")
 
-        sftp.close()
+        if sftp is not None:
+            sftp.close()
 
         # 6) Diagnostics: is the app itself reachable, and where does the proxy listen?
-        _rc, out, _ = run(f"curl -s -m 8 -o /dev/null -w '%{{http_code}}' http://127.0.0.1:{args.app_port}/api/health")
-        print(f"[nginx-path] App health on host 127.0.0.1:{args.app_port} -> HTTP {out.strip()}  "
+        _rc, out, _ = run(f"curl -sk -m 8 -o /dev/null -w '%{{http_code}}' {scheme}://127.0.0.1:{args.app_port}/api/health")
+        print(f"[nginx-path] App health on host {scheme}://127.0.0.1:{args.app_port} -> HTTP {out.strip()}  "
               f"(200 = app up; 000/refused = app not reachable on that port).")
-        _rc, out, _ = run(f"docker exec {proxy} sh -c \"(command -v curl >/dev/null && curl -s -m 8 -o /dev/null "
-                          f"-w '%{{http_code}}' http://{upstream}/api/health) || echo 'no-curl-in-proxy'\"")
-        print(f"[nginx-path] App reachable from inside {proxy} at {upstream} -> {out.strip()}  "
+        _rc, out, _ = run(f"docker exec {proxy} sh -c \"(command -v curl >/dev/null && curl -sk -m 8 -o /dev/null "
+                          f"-w '%{{http_code}}' {scheme}://{upstream}/api/health) || echo 'no-curl-in-proxy'\"")
+        print(f"[nginx-path] App reachable from inside {proxy} at {scheme}://{upstream} -> {out.strip()}  "
               f"(200 = proxy can reach the app).")
 
-        print(f"\n[nginx-path] DONE. Upstream={upstream}. Open  http://{args.host}/cc_es_analyzer/  "
-              f"(or https://{args.host}/cc_es_analyzer/).")
+        print(f"\n[nginx-path] DONE. Upstream={scheme}://{upstream}. Open  http://{host_label}/cc_es_analyzer/  "
+              f"(or https://{host_label}/cc_es_analyzer/).")
         return 0
     finally:
-        ssh.close()
+        if ssh is not None:
+            ssh.close()
 
 
 if __name__ == "__main__":

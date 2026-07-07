@@ -38,20 +38,41 @@ Click **Connect** in the top-right, enter the remote Linux machine's IP and Elas
 
 ## Run in Docker
 
-### Deploy on a Linux host (git + docker)
+### Deploy on a Linux host (one command)
 
-The simplest way to run it on any Linux machine that has **git** and **docker**:
+On any Linux machine with **git** and **docker**, the installer does everything —
+starts the app over HTTPS and, if the host runs an nginx reverse proxy, publishes
+the app at `/cc_es_analyzer/` on it automatically:
 
 ```bash
-# on the Linux machine (needs git + docker):
 git clone https://github.com/rdwr-shaye/cc_es_analyzer.git
 cd cc_es_analyzer
+./deploy/install.sh
+```
+
+When it finishes, **both** of these work (the second only if an nginx proxy exists):
+
+- `https://<host-ip>:8801/` — direct to the app (self-signed cert → one-time browser warning)
+- `https://<host-ip>/cc_es_analyzer/` — through the host's nginx proxy on port 443
+
+`install.sh` sets `SERVICE_SSL=true` in `.env` so the app serves TLS (correct for
+HTTPS-only hosts), runs `docker compose up -d`, then runs
+`deploy/setup_nginx_path.py --local` to patch nginx — auto-detecting the proxy
+container, the upstream address, and the http/https scheme. If there's no nginx
+proxy, that step is skipped cleanly and only the direct URL applies.
+
+Options: `./deploy/install.sh --no-ssl` keeps the app on plain HTTP;
+`HOST_PORT=9000 ./deploy/install.sh` publishes it on a different host port.
+
+Click **Connect** in the UI to point it at your Elasticsearch host.
+
+#### Manual (without the installer)
+
+```bash
 docker compose up -d --build     # serves on http://<LINUX-IP>:8801/
 ```
 
-Then open `http://<LINUX-IP>:8801/` from a browser and click **Connect** to point it
-at your Elasticsearch host. To use a different host port, set `HOST_PORT` (e.g.
-`HOST_PORT=9000 docker compose up -d --build`).
+To use a different host port, set `HOST_PORT` (e.g. `HOST_PORT=9000 docker compose up -d --build`).
 
 To update to the latest code later, just `git pull` and re-run `docker compose up -d`
 (the `--build` is no longer required — the compose file sets `pull_policy: build`, so
@@ -158,9 +179,17 @@ the live change to a copy, validates with `nginx -t`, and rolls back
 automatically if validation fails — no other docs route is touched or removed.
 
 ```bash
+# from your workstation, over SSH:
 python deploy/setup_nginx_path.py --host <host> --user root
+# or ON the host itself (what install.sh runs — no SSH):
+python3 deploy/setup_nginx_path.py --local --skip-if-no-proxy
 # then open http://<host-ip>/cc_es_analyzer/  (or https://<host-ip>/cc_es_analyzer/)
 ```
+
+It auto-detects whether the app serves TLS (`SERVICE_SSL=true`) and proxies over
+`https://` (with `proxy_ssl_verify off`, since the app's cert is self-signed) or
+`http://` accordingly — so the `/cc_es_analyzer/` URL keeps working whether or not
+the app port itself is HTTPS. `./deploy/install.sh` runs this step for you.
 
 
 
