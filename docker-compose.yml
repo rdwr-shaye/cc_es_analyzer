@@ -16,6 +16,10 @@ services:
       # ES connection is entered in the UI at runtime; these are only defaults.
       SERVICE_HOST: "0.0.0.0"
       SERVICE_PORT: "8000"
+      # Serve HTTPS (set SERVICE_SSL=true) for hosts that block plain HTTP. With
+      # no cert supplied a self-signed one is generated on first start (browsers
+      # warn — expected). Then browse https://<host>:<port>/.
+      SERVICE_SSL: "${SERVICE_SSL:-false}"
     volumes:
       - cc_es_analyzer_logs:/app/logs
     networks:

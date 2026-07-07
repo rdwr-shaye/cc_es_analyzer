@@ -2066,6 +2066,82 @@ function refreshCurrentIndex() {
   }
 }
 
+/* ── Create / delete index · import CSV ─────────────────────────────────────── */
+
+/** Prompt for a name and create a new (empty) index, then open it. */
+async function createIndex() {
+  const name = await uiPrompt(document, {
+    title: 'Create new index — enter a lowercase name',
+    value: '', okText: 'Create',
+  });
+  if (name == null) return;
+  const clean = name.trim();
+  if (!clean) return;
+  const res = await api('/api/indices/create', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: clean }),
+  });
+  if (!res || res.error) { showToast('Create failed: ' + (res?.error || 'unknown'), 'bg-danger'); return; }
+  showToast(`Index "${res.name}" created`, 'bg-success');
+  await loadIndices();
+  showIndexDetail(res.name);
+}
+
+/** Delete the index currently shown in the detail view (typed confirmation). */
+async function deleteCurrentIndex() {
+  const name = _currentIndexName;
+  if (!name) return;
+  const typed = await uiPrompt(document, {
+    title: `Delete index — type "${name}" to confirm`,
+    value: '', okText: 'Delete',
+  });
+  if (typed == null) return;
+  if (typed.trim() !== name) { showToast('Name did not match — deletion cancelled', 'bg-warning'); return; }
+  const res = await api(`/api/indices/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (!res || res.error) { showToast('Delete failed: ' + (res?.error || 'unknown'), 'bg-danger'); return; }
+  showToast(`Index "${name}" deleted`, 'bg-success');
+  _currentIndexName = null;
+  showView('dashboard');
+  await loadIndices();
+}
+
+/** Pick a CSV file and import its rows as documents into the current index. */
+function importCsvToIndex() {
+  const name = _currentIndexName;
+  if (!name) return;
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = '.csv,text/csv';
+  inp.onchange = () => { const f = inp.files && inp.files[0]; if (f) doImportCsv(name, f); };
+  inp.click();
+}
+
+async function doImportCsv(indexName, file) {
+  const ok = await uiConfirm(document, {
+    title: `Import into "${indexName}"?`,
+    message: `Add rows from "${file.name}" (${(file.size / 1024).toFixed(1)} KB) as documents. `
+      + 'Rows carrying an _id that already exists are overwritten.',
+    okText: 'Import',
+  });
+  if (!ok) return;
+  showToast(`Importing ${file.name}…`, 'bg-secondary');
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  let res;
+  try {
+    res = await api(`/api/indices/${encodeURIComponent(indexName)}/import`, { method: 'POST', body: fd });
+  } catch (e) {
+    showToast('Import failed: ' + e, 'bg-danger'); return;
+  }
+  if (!res || res.error) { showToast('Import failed: ' + (res?.error || 'unknown'), 'bg-danger'); return; }
+  const msg = `Imported ${res.indexed}/${res.rows} row(s)` + (res.failed ? ` — ${res.failed} failed` : '');
+  showToast(msg, res.failed ? 'bg-warning' : 'bg-success');
+  if (res.failed && Array.isArray(res.errors) && res.errors.length) {
+    console.warn('CSV import errors (first few):', res.errors);
+  }
+  refreshCurrentIndex();
+}
+
 async function showIndexDetail(indexName, preserveFilters = false) {
   _currentIndexName = indexName;
   showView('index');

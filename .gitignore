@@ -12,6 +12,12 @@ env/
 # Environment / secrets
 .env
 
+# TLS material (self-signed certs are generated per host at runtime)
+certs/
+*.crt
+*.key
+*.pem
+
 # Runtime logs
 logs/
 *.log

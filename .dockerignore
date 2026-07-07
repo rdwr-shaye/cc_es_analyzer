@@ -13,6 +13,12 @@ __pycache__/
 logs/
 *.log
 
+# TLS material (generated per host at runtime, never baked into the image)
+certs/
+*.crt
+*.key
+*.pem
+
 # Secrets & local env
 .env
 

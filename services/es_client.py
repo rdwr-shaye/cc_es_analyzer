@@ -53,6 +53,14 @@ class ESHttpClient:
         r.raise_for_status()
         return r.json()
 
+    def delete(self, path: str) -> dict:
+        r = self.session.delete(
+            f"{self.base_url}{path}",
+            auth=self.auth, verify=self.verify, timeout=30,
+        )
+        r.raise_for_status()
+        return r.json()
+
     def bulk(self, ndjson_text: str, refresh: bool = False) -> dict:
         """POST newline-delimited bulk actions to the _bulk endpoint."""
         path = "/_bulk" + ("?refresh=true" if refresh else "")

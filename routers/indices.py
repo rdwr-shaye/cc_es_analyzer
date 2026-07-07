@@ -1,4 +1,9 @@
-from fastapi import APIRouter, Query
+import csv
+import io
+import json
+import re
+
+from fastapi import APIRouter, Query, UploadFile, File
 from pydantic import BaseModel
 from services.es_client import get_client
 from services.cc_indices import CC_INDEX_CATALOG, CATEGORIES, resolve_prefix
@@ -161,6 +166,245 @@ def field_values(req: FieldValuesRequest):
         return {"field": req.field, "values": values, "count": len(values)}
     except Exception as e:
         return {"error": str(e), "values": []}
+
+
+# ── Create / delete indices ─────────────────────────────────────────────────────
+
+class CreateIndexRequest(BaseModel):
+    """Create a new (empty) index."""
+    name:     str
+    shards:   int = 1
+    replicas: int = 0
+
+
+@router.post("/create")
+def create_index(req: CreateIndexRequest):
+    """Create a new empty index with the given name and shard/replica counts."""
+    name = (req.name or "").strip()
+    ok, reason = _valid_index_name(name)
+    if not ok:
+        return {"error": reason}
+    try:
+        es = get_client()
+        body = {"settings": {"index": {
+            "number_of_shards":   max(1, int(req.shards)),
+            "number_of_replicas": max(0, int(req.replicas)),
+        }}}
+        resp = es.put(f"/{name}", body)
+        return {"ok": True, "name": name,
+                "acknowledged": resp.get("acknowledged", True)}
+    except Exception as e:
+        return {"error": _es_error(e)}
+
+
+@router.delete("/{index_name}")
+def delete_index(index_name: str):
+    """Delete an index. Refuses system indices and wildcards for safety."""
+    name = (index_name or "").strip()
+    if not name:
+        return {"error": "index name is required"}
+    if name.startswith("."):
+        return {"error": "refusing to delete a system index (name starts with '.')"}
+    if any(ch in name for ch in "*?,"):
+        return {"error": "wildcards are not allowed when deleting — pass an exact index name"}
+    try:
+        es = get_client()
+        resp = es.delete(f"/{name}")
+        return {"ok": True, "name": name,
+                "acknowledged": resp.get("acknowledged", True)}
+    except Exception as e:
+        return {"error": _es_error(e)}
+
+
+# ── CSV import ──────────────────────────────────────────────────────────────────
+
+@router.post("/{index_name}/import")
+async def import_csv(index_name: str,
+                     file: UploadFile = File(...),
+                     id_column: str = Query(default="_id")):
+    """
+    Bulk-index the rows of an uploaded CSV into ``index_name``.
+
+    The CSV is expected in the same shape the app exports: a header row of
+    column names, ``_id`` / ``_index`` metadata columns (dropped from the doc
+    body), object/array cells JSON-encoded, scalar cells stringified, and empty
+    cells meaning the field was absent. The ``_id`` column (configurable via
+    ``id_column``) sets each document's id; drop/rename it to let ES auto-assign.
+    """
+    name = (index_name or "").strip()
+    if not name:
+        return {"error": "index name is required"}
+    try:
+        raw = await file.read()
+    except Exception as e:
+        return {"error": f"could not read upload: {e}"}
+    if not raw:
+        return {"error": "uploaded file is empty"}
+
+    # utf-8-sig transparently strips a BOM that Excel likes to prepend.
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+
+    reader = csv.reader(io.StringIO(text))
+    try:
+        headers = [h.strip() for h in next(reader)]
+    except StopIteration:
+        return {"error": "uploaded file has no rows"}
+    if not any(headers):
+        return {"error": "uploaded file has no header row"}
+
+    es = get_client()
+    meta_cols = {"_id", "_index"}
+    indexed = failed = rows = 0
+    errors: list[str] = []
+    batch: list[tuple[str, dict]] = []
+    BULK_CHUNK = 1000
+
+    def take_errors(errs: list) -> None:
+        for msg in errs:
+            if len(errors) < 5:
+                errors.append(msg)
+
+    for row in reader:
+        if not row or all(c == "" for c in row):
+            continue                       # skip blank lines
+        rows += 1
+        doc_id = ""
+        source: dict = {}
+        for i, col in enumerate(headers):
+            if not col or i >= len(row):
+                continue
+            cell = row[i]
+            if col == id_column:
+                doc_id = cell.strip()
+            if col in meta_cols:
+                continue                   # metadata, not a document field
+            val = _coerce_cell(cell)
+            if val is not _MISSING:
+                source[col] = val
+        batch.append((doc_id, source))
+        if len(batch) >= BULK_CHUNK:
+            ok, errs = _flush_batch(es, name, batch, refresh=False)
+            indexed += ok
+            failed  += len(errs)
+            take_errors(errs)
+            batch = []
+
+    if batch:
+        # Refresh on the final chunk so the imported docs are visible at once.
+        ok, errs = _flush_batch(es, name, batch, refresh=True)
+        indexed += ok
+        failed  += len(errs)
+        take_errors(errs)
+    elif indexed:
+        try:
+            es.post(f"/{name}/_refresh")
+        except Exception:
+            pass
+
+    return {"ok": failed == 0, "index": name, "rows": rows,
+            "indexed": indexed, "failed": failed, "errors": errors}
+
+
+def _flush_batch(es, index_name: str, batch: list, refresh: bool) -> tuple:
+    """Bulk-index one batch of (doc_id, source) pairs. Returns (ok, [errors])."""
+    lines = []
+    for doc_id, source in batch:
+        action = {"index": {"_index": index_name}}
+        if doc_id:
+            action["index"]["_id"] = doc_id
+        lines.append(json.dumps(action))
+        lines.append(json.dumps(source, default=str))
+    resp = es.bulk("\n".join(lines) + "\n", refresh=refresh)
+    ok, errs = 0, []
+    for item in resp.get("items", []):
+        res = item.get("index") or item.get("create") or {}
+        err = res.get("error")
+        if err:
+            if isinstance(err, dict):
+                errs.append(f"{err.get('type', 'error')}: {err.get('reason', '')}".strip())
+            else:
+                errs.append(str(err))
+        else:
+            ok += 1
+    return ok, errs
+
+
+_MISSING  = object()
+_INT_RE   = re.compile(r"^-?(?:0|[1-9][0-9]*)$")
+_FLOAT_RE = re.compile(r"^-?(?:0|[1-9][0-9]*)\.[0-9]+(?:[eE][-+]?[0-9]+)?$")
+
+
+def _coerce_cell(raw: str):
+    """Turn an exported CSV cell back into a typed JSON value.
+
+    Mirrors the app's CSV export: objects/arrays were JSON-encoded, scalars
+    stringified, and an empty cell meant the field was absent (→ ``_MISSING``,
+    so it is dropped rather than stored as ""). Integers/floats/booleans are
+    coerced back so a re-import into a fresh index gets sensible dynamic types;
+    numbers with leading zeros stay strings to preserve ids.
+    """
+    if raw == "":
+        return _MISSING
+    t = raw.strip()
+    if not t:
+        return raw
+    if t[0] in "{[":
+        try:
+            return json.loads(t)
+        except Exception:
+            return raw
+    low = t.lower()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    if _INT_RE.match(t):
+        try:
+            return int(t)
+        except Exception:
+            return raw
+    if ("." in t or "e" in low) and _FLOAT_RE.match(t):
+        try:
+            return float(t)
+        except Exception:
+            return raw
+    return raw
+
+
+def _valid_index_name(name: str) -> tuple:
+    """Validate an index name against Elasticsearch's naming rules."""
+    if not name:
+        return False, "index name is required"
+    if len(name.encode("utf-8")) > 255:
+        return False, "index name is too long (max 255 bytes)"
+    if name in (".", ".."):
+        return False, "index name cannot be '.' or '..'"
+    if name != name.lower():
+        return False, "index name must be lowercase"
+    if name[0] in "-_+":
+        return False, "index name cannot start with '-', '_' or '+'"
+    bad = sorted(set(name) & set('\\/*?"<>| ,#:'))
+    if bad:
+        return False, "index name contains invalid characters: " + " ".join(bad)
+    return True, ""
+
+
+def _es_error(exc: Exception) -> str:
+    """Extract a human-readable message from a requests/ES error."""
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        try:
+            j = resp.json()
+            err = j.get("error", j)
+            if isinstance(err, dict):
+                return err.get("reason") or err.get("type") or str(j)
+            return str(err)
+        except Exception:
+            return f"HTTP {resp.status_code}: {resp.text[:300]}"
+    return str(exc)
 
 
 

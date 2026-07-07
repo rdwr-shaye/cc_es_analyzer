@@ -84,10 +84,19 @@ if __name__ == "__main__":
     import sys
     reload = "--no-reload" not in sys.argv
 
+    ssl_kwargs = {}
+    if settings.service_ssl:
+        from services.tls import ensure_cert
+        cert, key = ensure_cert(settings.ssl_certfile, settings.ssl_keyfile)
+        ssl_kwargs = {"ssl_certfile": cert, "ssl_keyfile": key}
+        logger.info("Serving HTTPS on https://%s:%s (cert=%s)",
+                    settings.service_host, settings.service_port, cert)
+
     uvicorn.run(
         "main:app",
         host=settings.service_host,
         port=settings.service_port,
         reload=reload,
+        **ssl_kwargs,
     )
 

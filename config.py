@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     service_host: str = Field(default="0.0.0.0", alias="SERVICE_HOST")
     service_port: int = Field(default=8000, alias="SERVICE_PORT")
 
+    # Serve over HTTPS. If enabled without a cert/key, a self-signed pair is
+    # generated at startup (browsers will warn). Mount your own for production.
+    service_ssl:  bool = Field(default=False, alias="SERVICE_SSL")
+    ssl_certfile: str = Field(default="", alias="SSL_CERTFILE")
+    ssl_keyfile:  str = Field(default="", alias="SSL_KEYFILE")
+
     model_config = {"env_file": ".env", "populate_by_name": True}
 
     @property

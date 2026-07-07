@@ -92,9 +92,15 @@
 
       <hr class="border-secondary my-1"/>
       <div class="d-flex align-items-center justify-content-between px-2 mb-1">
-        <p class="text-secondary mb-0" style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.05em">Indices</p>
+        <div class="d-flex align-items-center gap-1">
+          <p class="text-secondary mb-0" style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.05em">Indices</p>
+          <button class="btn btn-outline-success py-0 px-1" onclick="createIndex()" title="Create a new index"
+                  style="font-size:0.7rem;line-height:1.2;">
+            <i class="bi bi-plus-lg"></i>
+          </button>
+        </div>
         <input id="indexSearch" type="text" class="form-control form-control-sm bg-dark text-light border-secondary"
-               placeholder="Filter…" style="width:90px;font-size:0.75rem;padding:2px 6px;"/>
+               placeholder="Filter…" style="width:80px;font-size:0.75rem;padding:2px 6px;"/>
       </div>
       <div id="sidebarIndices">
         <div class="text-secondary small px-2 py-2">Connect to see indices</div>
@@ -475,6 +481,16 @@
           <i class="bi bi-arrow-left"></i>
         </button>
         <h5 class="fw-bold mb-0" id="indexDetailTitle">Index Details</h5>
+        <div class="ms-auto d-flex gap-2">
+          <button class="btn btn-sm btn-outline-primary" onclick="importCsvToIndex()"
+                  title="Import a CSV file (same format as export) as documents into this index">
+            <i class="bi bi-filetype-csv me-1"></i>Import CSV
+          </button>
+          <button class="btn btn-sm btn-outline-danger" onclick="deleteCurrentIndex()"
+                  title="Permanently delete this index">
+            <i class="bi bi-trash me-1"></i>Delete Index
+          </button>
+        </div>
       </div>
       <div class="row g-3 mb-3" id="indexStatCards"></div>
       <div class="card shadow-sm">

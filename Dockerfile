@@ -24,6 +24,7 @@ RUN mkdir -p /app/logs
 
 EXPOSE 8000
 
-# Run a single stable uvicorn process (no reloader inside the container).
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run through main.py (not uvicorn directly) so the __main__ block wires up
+# HTTPS when SERVICE_SSL=true. --no-reload keeps it a single stable process.
+CMD ["python", "main.py", "--no-reload"]
 

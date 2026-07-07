@@ -6,6 +6,8 @@ A Python FastAPI service with a Web UI dashboard for analyzing CyberController (
 
 - **Dashboard** — Cluster health, shard stats, ES version, attack charts (by category + over time)
 - **Index Explorer** — Browse all indices in the sidebar; click any index to see stats + sample documents
+- **Manage Indices** — Create a new index (**+** next to the sidebar "Indices" header) or delete one (**Delete Index** in the detail view, with typed confirmation)
+- **CSV Import/Export** — Export any result set to CSV, then re-import a CSV (same format) back into an index via **Import CSV** in the detail view
 - **CC-Aware** — All known CC index prefixes (`dp-attack-raw-*`, `dp-ts-attack-raw-*`, `dp-traffic-agg-*`, etc.) are annotated with descriptions and grouped by category
 - **Attacks View** — Tabular view of recent DefensePro attacks with status filter
 - **Query Editor** — Run any Elasticsearch DSL query with built-in templates (match_all, active attacks, category aggregation)
@@ -36,7 +38,22 @@ Click **Connect** in the top-right, enter the remote Linux machine's IP and Elas
 
 ## Run in Docker
 
-Build and run locally:
+### Deploy on a Linux host (git + docker)
+
+The simplest way to run it on any Linux machine that has **git** and **docker**:
+
+```bash
+# on the Linux machine (needs git + docker):
+git clone https://github.com/rdwr-shaye/cc_es_analyzer.git
+cd cc_es_analyzer
+docker compose up -d --build     # serves on http://<LINUX-IP>:8801/
+```
+
+Then open `http://<LINUX-IP>:8801/` from a browser and click **Connect** to point it
+at your Elasticsearch host. To use a different host port, set `HOST_PORT` (e.g.
+`HOST_PORT=9000 docker compose up -d --build`).
+
+### Build and run locally
 ```bash
 docker compose up -d --build         # serves on http://localhost:8801
 # or a plain docker run:
@@ -46,6 +63,20 @@ docker run -d --name cc_es_analyzer --restart unless-stopped -p 8801:8000 cc_es_
 
 The container is self-contained (Elasticsearch connection details are entered in the
 UI at runtime). Logs are kept in the `cc_es_analyzer_logs` volume (`/app/logs`).
+
+### Serve over HTTPS
+
+On hosts that don't allow plain HTTP, enable TLS with `SERVICE_SSL=true`. With no
+certificate supplied, a self-signed one is generated on first start (browsers show a
+one-time warning — expected for internal use):
+
+```bash
+SERVICE_SSL=true docker compose up -d --build   # then browse https://<LINUX-IP>:8801/
+```
+
+To mount your own certificate instead of the self-signed one, provide `SSL_CERTFILE`
+and `SSL_KEYFILE` (PEM paths reachable inside the container) alongside `SERVICE_SSL=true`.
+Running directly (no Docker) works the same way: `SERVICE_SSL=true python main.py`.
 
 ## Deploy to a remote Linux host
 
@@ -151,6 +182,9 @@ before login / survives logoff, register a boot-triggered task under the SYSTEM 
 | `GET` | `/api/indices/catalog` | CC index catalog grouped by category |
 | `GET` | `/api/indices/{name}/stats` | Detailed stats for one index |
 | `GET` | `/api/indices/{name}/sample` | Sample documents (latest 10) |
+| `POST` | `/api/indices/create` | Create a new empty index |
+| `DELETE` | `/api/indices/{name}` | Delete an index (refuses system indices/wildcards) |
+| `POST` | `/api/indices/{name}/import` | Bulk-import a CSV file as documents |
 | `POST` | `/api/connect` | Update active ES connection |
 | `POST` | `/api/query` | Generic ES query |
 | `GET` | `/api/cc/attacks` | Recent DP attacks |
