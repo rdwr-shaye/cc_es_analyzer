@@ -94,6 +94,14 @@ docker run -d --name cc_es_analyzer --restart unless-stopped -p 8801:8000 cc_es_
 The container is self-contained (Elasticsearch connection details are entered in the
 UI at runtime). Logs are kept in the `cc_es_analyzer_logs` volume (`/app/logs`).
 
+**Index archives** (Dashboard → check indices → *Export selected* → *Archive on
+server*): the backend scrolls ES and writes one compressed `<index>.csv.gz` per index
+into the `cc_es_analyzer_exports` volume (`/app/exports`; plain runs use
+`<project>/exports/`), so huge indices never stream through the browser. The
+**Archives** panel lists them with job progress, direct download, delete, and
+**Restore** — including uploading an archive exported on another machine to clone an
+index across CC hosts. No root credentials are involved; the app server does the work.
+
 ### Serve over HTTPS
 
 On hosts that don't allow plain HTTP, enable TLS with `SERVICE_SSL=true`. With no

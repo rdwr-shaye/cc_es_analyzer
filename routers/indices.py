@@ -197,6 +197,181 @@ def create_index(req: CreateIndexRequest):
         return {"error": _es_error(e)}
 
 
+class DuplicateIndexRequest(BaseModel):
+    """Duplicate an index, optionally shifting every date field by an offset."""
+    target:          str
+    shift_amount:    int = 0          # 0 = plain copy, no date shifting
+    shift_unit:      str = "days"     # minutes|hours|days|weeks|months (month = fixed 30 days)
+    shift_direction: str = "past"     # "past" | "future"
+
+
+# All shift units are FIXED intervals (a month is always 30 × 24h) so the
+# offset applied to every document is identical and reversible.
+_SHIFT_UNIT_MS = {
+    "minutes": 60_000,
+    "hours":   3_600_000,
+    "days":    86_400_000,
+    "weeks":   7 * 86_400_000,
+    "months":  30 * 86_400_000,
+}
+
+
+@router.post("/{index_name}/duplicate")
+def duplicate_index(index_name: str, req: DuplicateIndexRequest):
+    """
+    Copy ``index_name`` into a NEW index ``req.target``: settings (shards /
+    replicas), mappings, and every document (ids preserved). When
+    ``shift_amount`` is non-zero, every date-type field (per the source
+    mapping) is shifted by the requested offset into the past or future —
+    epoch-millisecond numbers and ISO-8601 strings are both handled; values
+    that can't be parsed are copied unchanged.
+    """
+    from routers.query import _collect_date_fields, _scroll_hits
+
+    source = (index_name or "").strip()
+    target = (req.target or "").strip()
+    if not source:
+        return {"error": "source index name is required"}
+    if any(ch in source for ch in "*?,"):
+        return {"error": "wildcards are not allowed — pass an exact source index name"}
+    ok, reason = _valid_index_name(target)
+    if not ok:
+        return {"error": f"target name: {reason}"}
+    if target == source:
+        return {"error": "target name must differ from the source index"}
+    if req.shift_amount and req.shift_unit not in _SHIFT_UNIT_MS:
+        return {"error": f"unknown shift unit {req.shift_unit!r} "
+                         f"(expected one of {', '.join(_SHIFT_UNIT_MS)})"}
+    if req.shift_direction not in ("past", "future"):
+        return {"error": "shift_direction must be 'past' or 'future'"}
+
+    try:
+        es = get_client()
+
+        # Refuse to overwrite an existing target.
+        try:
+            es.get(f"/{target}/_mapping")
+            return {"error": f"index {target!r} already exists"}
+        except Exception:
+            pass                                   # 404 → good, target is free
+
+        # ── Source mapping → date fields + create body ──────────────────────
+        mapping_resp = es.index_mapping(source)
+        src_map = mapping_resp.get(source) or next(iter(mapping_resp.values()), {})
+        mappings = src_map.get("mappings", {})
+
+        date_fields = {name for name, _sortable in _collect_date_fields(es, source)}
+
+        shards, replicas = _source_shards_replicas(es, source)
+        create_body: dict = {"settings": {"index": {
+            "number_of_shards":   shards,
+            "number_of_replicas": replicas,
+        }}}
+        if mappings:
+            create_body["mappings"] = mappings     # pass through verbatim (ES 1.x & 5+ shapes)
+        es.put(f"/{target}", create_body)
+
+        # ── Copy documents, shifting date fields ────────────────────────────
+        delta_ms = 0
+        if req.shift_amount:
+            delta_ms = req.shift_amount * _SHIFT_UNIT_MS[req.shift_unit]
+            if req.shift_direction == "past":
+                delta_ms = -delta_ms
+
+        copied = failed = 0
+        errors: list[str] = []
+        batch: list[tuple[str, dict]] = []
+        BULK_CHUNK = 1000
+
+        def _flush(last: bool) -> None:
+            nonlocal copied, failed
+            if not batch:
+                return
+            ok_n, errs = _flush_batch(es, target, batch, refresh=last)
+            copied += ok_n
+            failed += len(errs)
+            for msg in errs:
+                if len(errors) < 5:
+                    errors.append(msg)
+            batch.clear()
+
+        for h in _scroll_hits(es, source, {"match_all": {}}):
+            src = h.get("_source") or {}
+            if delta_ms and date_fields:
+                src = _shift_date_values(src, date_fields, delta_ms)
+            batch.append((str(h.get("_id") or ""), src))
+            if len(batch) >= BULK_CHUNK:
+                _flush(last=False)
+        _flush(last=True)
+        if copied and not batch:
+            try:
+                es.post(f"/{target}/_refresh")
+            except Exception:
+                pass
+
+        return {"ok": failed == 0, "source": source, "target": target,
+                "copied": copied, "failed": failed,
+                "shift_ms": delta_ms, "shifted_fields": sorted(date_fields) if delta_ms else [],
+                "errors": errors}
+    except Exception as e:
+        return {"error": _es_error(e)}
+
+
+def _source_shards_replicas(es, index: str) -> tuple:
+    """Read (number_of_shards, number_of_replicas) from an index's settings,
+    tolerating both the nested (ES 5+) and dotted-key (ES 1.x) shapes."""
+    try:
+        resp = es.get(f"/{index}/_settings")
+        st = next(iter(resp.values()), {}).get("settings", {})
+        idx = st.get("index", st)
+        shards   = idx.get("number_of_shards")   or st.get("index.number_of_shards")
+        replicas = idx.get("number_of_replicas") or st.get("index.number_of_replicas")
+        return int(shards or 1), int(replicas or 0)
+    except Exception:
+        return 1, 0
+
+
+def _shift_date_values(node, date_fields: set, delta_ms: int):
+    """Return a copy of *node* with every date field's value shifted by
+    *delta_ms*. Walks nested objects/arrays; a key counts as a date field by
+    its leaf name (matching how the mapping walk collects them). Epoch-ms
+    numbers and ISO-8601 strings are shifted; anything unparsable is kept."""
+    if isinstance(node, list):
+        return [_shift_date_values(v, date_fields, delta_ms) for v in node]
+    if not isinstance(node, dict):
+        return node
+    out = {}
+    for k, v in node.items():
+        if k in date_fields and not isinstance(v, (dict, list)):
+            out[k] = _shift_one_date(v, delta_ms)
+        else:
+            out[k] = _shift_date_values(v, date_fields, delta_ms)
+    return out
+
+
+def _shift_one_date(value, delta_ms: int):
+    """Shift a single date value, preserving its original representation."""
+    from datetime import datetime, timedelta
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        return type(value)(value + delta_ms)
+    if isinstance(value, str):
+        t = value.strip()
+        if _INT_RE.match(t):                     # epoch ms stored as a string
+            return str(int(t) + delta_ms)
+        try:
+            iso = t.replace("Z", "+00:00") if t.endswith("Z") else t
+            dt = datetime.fromisoformat(iso) + timedelta(milliseconds=delta_ms)
+            s = dt.isoformat()
+            if t.endswith("Z") and s.endswith("+00:00"):
+                s = s[:-6] + "Z"
+            return s
+        except ValueError:
+            return value                          # unknown format — copy as-is
+    return value
+
+
 @router.delete("/{index_name}")
 def delete_index(index_name: str):
     """Delete an index. Refuses system indices and wildcards for safety."""

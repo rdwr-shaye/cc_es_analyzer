@@ -23,8 +23,12 @@ services:
       # no cert supplied a self-signed one is generated on first start (browsers
       # warn — expected). Then browse https://<host>:<port>/.
       SERVICE_SSL: "${SERVICE_SSL:-false}"
+      # Server-side index archives (<index>.csv.gz) — kept on a volume so they
+      # survive container rebuilds.
+      EXPORTS_DIR: "/app/exports"
     volumes:
       - cc_es_analyzer_logs:/app/logs
+      - cc_es_analyzer_exports:/app/exports
     networks:
       - cc_es_analyzer_net
 
@@ -35,4 +39,6 @@ networks:
 volumes:
   cc_es_analyzer_logs:
     name: cc_es_analyzer_logs
+  cc_es_analyzer_exports:
+    name: cc_es_analyzer_exports
 

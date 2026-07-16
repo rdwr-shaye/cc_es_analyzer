@@ -283,28 +283,58 @@
       <div class="card shadow-sm">
         <div class="card-header d-flex justify-content-between align-items-center gap-2 flex-wrap">
           <span class="fw-semibold"><i class="bi bi-table me-2 text-info"></i>CC Indices Overview</span>
-          <div class="d-flex align-items-center gap-2 ms-auto">
+          <div class="d-flex align-items-center gap-2 ms-auto flex-wrap">
+            <input id="dashIndexSearch" type="text" class="form-control form-control-sm"
+                   placeholder="Search indices…" style="width:180px;"
+                   oninput="onDashboardIndexSearch(this)"/>
+            <button class="btn btn-sm btn-success py-0 px-2 d-none" id="btnExportSelected"
+                    onclick="exportSelectedIndices()"
+                    title="Export ALL documents of every checked index — one <index-name>.csv per index">
+              <i class="bi bi-cloud-download me-1"></i>Export selected (<span id="expSelCount">0</span>)
+            </button>
+            <button class="btn btn-sm btn-danger py-0 px-2 d-none" id="btnDeleteSelected"
+                    onclick="deleteSelectedIndices()" title="Delete all checked indices">
+              <i class="bi bi-trash me-1"></i>Delete selected (<span id="delSelCount">0</span>)
+            </button>
+            <button class="btn btn-sm btn-outline-info py-0 px-2" onclick="openArchivesPanel()"
+                    title="Server-side index archives — compressed exports, downloads, restore/upload">
+              <i class="bi bi-archive me-1"></i>Archives
+            </button>
             <div class="btn-group btn-group-sm" role="group" aria-label="Indices view">
               <button type="button" class="btn btn-outline-secondary active py-0 px-2" id="iv-table"
                       onclick="setIndicesView('table')">Table</button>
               <button type="button" class="btn btn-outline-secondary py-0 px-2" id="iv-csv"
                       onclick="setIndicesView('csv')">CSV</button>
             </div>
+            <button class="btn btn-sm btn-outline-success py-0 px-2" onclick="createIndex()" title="Create a new index">
+              <i class="bi bi-plus-lg me-1"></i>Add
+            </button>
             <button class="btn btn-sm btn-outline-success py-0 px-2" onclick="downloadIndicesCsv()" title="Download indices as CSV">
               <i class="bi bi-download"></i>
             </button>
-            <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="loadIndices()" title="Refresh">
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="refreshView('dashboard')" title="Refresh">
               <i class="bi bi-arrow-clockwise"></i>
             </button>
+            <select id="autoRefresh-dashboard" class="form-select form-select-sm auto-refresh-select"
+                    style="width:88px;" onchange="onAutoRefreshChanged('dashboard', this)" title="Auto-refresh interval">
+              <option value="0" selected>Auto: off</option>
+              <option value="5">5s</option>
+              <option value="10">10s</option>
+              <option value="30">30s</option>
+              <option value="60">60s</option>
+            </select>
           </div>
         </div>
         <div class="card-body p-0">
           <div id="indicesTableWrap" class="table-responsive">
             <table class="table table-sm table-hover mb-0">
               <thead class="table-dark">
-                <tr><th>Index</th><th>Health</th><th>Docs</th><th>Size</th><th>Category</th><th></th></tr>
+                <tr>
+                  <th style="width:28px;"><input type="checkbox" id="idxSelAll" onclick="toggleAllIndexSel(this)" title="Select all visible"/></th>
+                  <th>Index</th><th>Health</th><th>Docs</th><th>Size</th><th>Category</th><th class="text-end">Actions</th>
+                </tr>
               </thead>
-              <tbody id="indicesTableBody"><tr><td colspan="6" class="text-center text-secondary py-3">Connect to load data</td></tr></tbody>
+              <tbody id="indicesTableBody"><tr><td colspan="7" class="text-center text-secondary py-3">Connect to load data</td></tr></tbody>
             </table>
           </div>
           <pre id="indicesCsv" class="d-none m-0 p-2" style="font-size:0.74rem;white-space:pre;overflow:auto;max-height:420px;">No indices.</pre>
@@ -323,6 +353,14 @@
           <button class="btn btn-sm btn-outline-primary" onclick="loadSummary()">
             <i class="bi bi-arrow-clockwise"></i> Refresh
           </button>
+          <select id="autoRefresh-summary" class="form-select form-select-sm auto-refresh-select"
+                  style="width:96px;" onchange="onAutoRefreshChanged('summary', this)" title="Auto-refresh interval">
+            <option value="0" selected>Auto: off</option>
+            <option value="5">5s</option>
+            <option value="10">10s</option>
+            <option value="30">30s</option>
+            <option value="60">60s</option>
+          </select>
         </div>
       </div>
 
@@ -452,6 +490,14 @@
           <button class="btn btn-sm btn-outline-primary" onclick="loadAttacks()">
             <i class="bi bi-arrow-clockwise"></i> Refresh
           </button>
+          <select id="autoRefresh-attacks" class="form-select form-select-sm auto-refresh-select"
+                  style="width:96px;" onchange="onAutoRefreshChanged('attacks', this)" title="Auto-refresh interval">
+            <option value="0" selected>Auto: off</option>
+            <option value="5">5s</option>
+            <option value="10">10s</option>
+            <option value="30">30s</option>
+            <option value="60">60s</option>
+          </select>
         </div>
       </div>
       <div class="card shadow-sm">
@@ -486,6 +532,10 @@
                   title="Import a CSV file (same format as export) as documents into this index">
             <i class="bi bi-filetype-csv me-1"></i>Import CSV
           </button>
+          <button class="btn btn-sm btn-outline-info" onclick="duplicateIndex(_currentIndexName)"
+                  title="Copy this index to a new name, optionally shifting all date fields">
+            <i class="bi bi-copy me-1"></i>Duplicate
+          </button>
           <button class="btn btn-sm btn-outline-danger" onclick="deleteCurrentIndex()"
                   title="Permanently delete this index">
             <i class="bi bi-trash me-1"></i>Delete Index
@@ -515,6 +565,12 @@
             <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="popOutResults()" title="Open in a separate window">
               <i class="bi bi-box-arrow-up-right"></i>
             </button>
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="openFieldVisibility()" title="Choose which fields (columns) to show">
+              <i class="bi bi-eye me-1"></i>Fields
+            </button>
+            <button class="btn btn-sm btn-outline-warning py-0 px-2" onclick="openAggregateDialog(this)" title="Group this index's docs by selected field(s)">
+              <i class="bi bi-bar-chart me-1"></i>Aggregate
+            </button>
             <span class="border-start ps-2 d-flex align-items-center gap-2">
               <button class="btn btn-sm btn-outline-danger py-0 px-2" id="btnClearFilters" onclick="clearAllFilters()" title="Clear all column filters">
                 <i class="bi bi-x-circle me-1"></i>Clear Filters
@@ -539,6 +595,14 @@
               <button class="btn btn-sm btn-outline-secondary" id="btnRefreshSample" onclick="refreshCurrentIndex()">
                 <i class="bi bi-arrow-clockwise"></i>
               </button>
+              <select id="autoRefresh-index" class="form-select form-select-sm auto-refresh-select"
+                      style="width:88px;" onchange="onAutoRefreshChanged('index', this)" title="Auto-refresh interval">
+                <option value="0" selected>Auto: off</option>
+                <option value="5">5s</option>
+                <option value="10">10s</option>
+                <option value="30">30s</option>
+                <option value="60">60s</option>
+              </select>
             </span>
           </div>
         </div>
@@ -619,33 +683,36 @@
                     <i class="bi bi-chevron-up"></i>
                   </button>
                 </div>
-                <!-- Started At row -->
-                <div class="d-flex align-items-center gap-2 mb-2">
+                <!-- Started At row: optional lower (after) + upper (before) bounds -->
+                <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
                   <label class="small text-secondary mb-0 text-nowrap" style="width:68px;text-align:right;">Started At</label>
-                  <select id="startAtOp" class="form-select form-select-sm"
-                          style="width:115px;font-size:0.78rem;background:#1e1e1e;color:#ddd;border-color:rgba(255,255,255,0.2);">
-                    <option value="gte" selected>After  (≥)</option>
-                    <option value="lte">Before (≤)</option>
-                  </select>
-                  <input type="datetime-local" id="startAtValue"
+                  <span class="small text-secondary">after ≥</span>
+                  <input type="datetime-local" id="startAfterValue"
                          class="form-control form-control-sm flex-grow-1"
-                         style="background:#1e1e1e;color:#e0e0e0;border-color:rgba(255,255,255,0.2);font-size:0.82rem;"
+                         style="background:#1e1e1e;color:#e0e0e0;border-color:rgba(255,255,255,0.2);font-size:0.82rem;min-width:170px;"
+                         onchange="onTimeRangeChanged()"/>
+                  <span class="small text-secondary">before ≤</span>
+                  <input type="datetime-local" id="startBeforeValue"
+                         class="form-control form-control-sm flex-grow-1"
+                         style="background:#1e1e1e;color:#e0e0e0;border-color:rgba(255,255,255,0.2);font-size:0.82rem;min-width:170px;"
                          onchange="onTimeRangeChanged()"/>
                 </div>
-                <!-- Ended At row -->
-                <div class="d-flex align-items-center gap-2">
+                <!-- Ended At row: optional lower (after) + upper (before) bounds -->
+                <div class="d-flex align-items-center gap-2 flex-wrap">
                   <label class="small text-secondary mb-0 text-nowrap" style="width:68px;text-align:right;">Ended At</label>
-                  <select id="endAtOp" class="form-select form-select-sm"
-                          style="width:115px;font-size:0.78rem;background:#1e1e1e;color:#ddd;border-color:rgba(255,255,255,0.2);">
-                    <option value="lte" selected>Before (≤)</option>
-                    <option value="gte">After  (≥)</option>
-                  </select>
-                  <input type="datetime-local" id="endAtValue"
+                  <span class="small text-secondary">after ≥</span>
+                  <input type="datetime-local" id="endAfterValue"
                          class="form-control form-control-sm flex-grow-1"
-                         style="background:#1e1e1e;color:#e0e0e0;border-color:rgba(255,255,255,0.2);font-size:0.82rem;"
+                         style="background:#1e1e1e;color:#e0e0e0;border-color:rgba(255,255,255,0.2);font-size:0.82rem;min-width:170px;"
+                         onchange="onTimeRangeChanged()"/>
+                  <span class="small text-secondary">before ≤</span>
+                  <input type="datetime-local" id="endBeforeValue"
+                         class="form-control form-control-sm flex-grow-1"
+                         style="background:#1e1e1e;color:#e0e0e0;border-color:rgba(255,255,255,0.2);font-size:0.82rem;min-width:170px;"
                          onchange="onTimeRangeChanged()"/>
                 </div>
                 <div id="timeRangeLabel" class="small text-warning mt-2 d-none"></div>
+                <div id="timeRangeError" class="small text-danger mt-1 d-none"></div>
               </div>
 
               <!-- ── Sort by time ── -->
@@ -704,6 +771,10 @@
                 <button class="btn btn-outline-secondary btn-sm" id="btnFormat" onclick="formatQuery()">
                   <i class="bi bi-braces me-1"></i>Format
                 </button>
+                <button class="btn btn-outline-danger btn-sm" id="btnClearQuery" onclick="clearQueryEditor()"
+                        title="Reset the query, free text, types, time range and multi-index plan">
+                  <i class="bi bi-eraser me-1"></i>Clear
+                </button>
               </div>
             </div><!-- /card-body -->
           </div><!-- /card -->
@@ -741,9 +812,31 @@
                       onclick="popOutResults()" title="Open results in a separate window">
                 <i class="bi bi-box-arrow-up-right"></i>
               </button>
+              <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="openFieldVisibility()" title="Choose which fields (columns) to show">
+                <i class="bi bi-eye me-1"></i>Fields
+              </button>
+              <button class="btn btn-sm btn-outline-warning py-0 px-2" onclick="openAggregateDialog(this)" title="Group the matching docs by selected field(s)">
+                <i class="bi bi-bar-chart me-1"></i>Aggregate
+              </button>
               <button class="btn btn-sm btn-outline-danger py-0 px-2" id="btnClearFiltersQuery" onclick="clearAllFilters()" title="Clear all column filters">
                 <i class="bi bi-x-circle me-1"></i>Clear Filters
               </button>
+              <button class="btn btn-sm btn-outline-info py-0 px-2" id="btnQueryFromFiltersQuery" onclick="generateQueryFromFilters()" title="Create ES query from active filters">
+                <i class="bi bi-funnel me-1"></i>Query from Filters
+              </button>
+              <span class="border-start ps-2 d-flex align-items-center gap-2">
+                <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="refreshView('query')" title="Re-run the last query">
+                  <i class="bi bi-arrow-clockwise"></i>
+                </button>
+                <select id="autoRefresh-query" class="form-select form-select-sm auto-refresh-select"
+                        style="width:88px;" onchange="onAutoRefreshChanged('query', this)" title="Auto-refresh interval">
+                  <option value="0" selected>Auto: off</option>
+                  <option value="5">5s</option>
+                  <option value="10">10s</option>
+                  <option value="30">30s</option>
+                  <option value="60">60s</option>
+                </select>
+              </span>
             </div>
             <div class="card-body p-2" style="overflow:auto;">
               <pre id="queryResults" style="font-size:0.78rem;white-space:pre-wrap;word-break:break-all;margin:0;">Run a query to see results here…</pre>

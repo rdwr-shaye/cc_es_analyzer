@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from routers import health, indices, query
+from routers import exports, health, indices, query
 import uvicorn
 import logging
 import logging.handlers
@@ -42,6 +42,7 @@ app = FastAPI(
 app.include_router(health.router)
 app.include_router(indices.router)
 app.include_router(query.router)
+app.include_router(exports.router)
 
 # ── Static files + SPA catch-all ─────────────────────────────────────────────
 app.mount("/static", StaticFiles(directory="frontend/static"), name="static")

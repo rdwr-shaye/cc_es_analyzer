@@ -149,6 +149,58 @@ class QueryRequest(BaseModel):
     size: int = 20
 
 
+def _validate_sort_clause(es, index: str, body: dict) -> str | None:
+    """Ensure every field in body["sort"] exists in *index*'s mapping.
+
+    The default editor template sorts on "startTime", which not every index
+    has — running it unmodified would error out. A missing sort field is
+    replaced with the index's best sortable date field; if the index has no
+    date fields at all, the sort clause is dropped. Returns a human-readable
+    note describing what changed (or None when the sort was left untouched).
+    """
+    sort_clauses = body.get("sort")
+    if not sort_clauses:
+        return None
+    if not isinstance(sort_clauses, list):
+        sort_clauses = [sort_clauses]
+
+    known = set(_collect_all_fields(es, index))
+    if not known:
+        return None      # mapping unavailable — don't second-guess the query
+
+    def _sort_field(clause):
+        if isinstance(clause, str):
+            return clause
+        if isinstance(clause, dict) and clause:
+            return next(iter(clause))
+        return None
+
+    missing = [f for f in (_sort_field(c) for c in sort_clauses)
+               if f and f != "_score" and f not in known]
+    if not missing:
+        return None
+
+    substitute, reason = _resolve_sort_field(es, index, "start")
+    if substitute in known:
+        kept = [c for c in sort_clauses if _sort_field(c) not in missing]
+        # Preserve the order direction of the first replaced clause if present.
+        order = "desc"
+        for c in sort_clauses:
+            f = _sort_field(c)
+            if f in missing and isinstance(c, dict) and isinstance(c.get(f), dict):
+                order = c[f].get("order", "desc")
+                break
+        body["sort"] = kept + [{substitute: {"order": order}}]
+        note = (f"sort field(s) {', '.join(missing)} not in {index!r} — "
+                f"sorted by {substitute!r} instead")
+    else:
+        body.pop("sort", None)
+        note = (f"sort field(s) {', '.join(missing)} not in {index!r} and no "
+                f"date field found — sort removed")
+    logger.info("[query] %s (%s)", note, reason)
+    return note
+
+
 @router.post("/query")
 def generic_query(req: QueryRequest):
     """Execute any Elasticsearch query against the specified index."""
@@ -157,16 +209,24 @@ def generic_query(req: QueryRequest):
         body = req.body
         if "size" not in body:
             body["size"] = req.size
+        try:
+            sort_note = _validate_sort_clause(es, req.index, body)
+        except Exception as exc:                     # validation is best-effort
+            logger.warning("[query] sort validation failed: %s", exc)
+            sort_note = None
         resp = es.search(req.index, body)
         hits = resp.get("hits", {})
         total = hits.get("total")
-        return {
+        result = {
             "total": total.get("value") if isinstance(total, dict) else total,
             "hits": [{"_id": h["_id"], "_index": h["_index"], **h.get("_source", {})}
                      for h in hits.get("hits", [])],
             "took_ms": resp.get("took"),
             "aggregations": resp.get("aggregations"),
         }
+        if sort_note:
+            result["sort_note"] = sort_note
+        return result
     except Exception as e:
         return {"error": str(e)}
 
@@ -571,11 +631,13 @@ class NLQueryRequest(BaseModel):
     index: str = "dp-attack-raw-*"
     attack_types: list[str] = []     # pre-selected attack categories from UI picker
 
-    # Explicit date-range bounds from the UI time-range picker
-    start_at_value: str = ""         # ISO datetime, e.g. "2026-06-28T10:46"
-    start_at_op:    str = "gte"      # "gte" = after / "lte" = before
-    end_at_value:   str = ""         # ISO datetime
-    end_at_op:      str = "lte"      # "gte" = after / "lte" = before
+    # Explicit date-range bounds from the UI time-range picker. Each of the
+    # start/end times can carry BOTH a lower ("after") and an upper ("before")
+    # bound, e.g. started after 09:00 AND before 10:00.
+    start_after:  str = ""           # ISO datetime, e.g. "2026-06-28T10:46"
+    start_before: str = ""
+    end_after:    str = ""
+    end_before:   str = ""
 
     # Sort
     sort_hint:      str = "start"    # "start" | "end" | "" (no sort)
@@ -727,18 +789,31 @@ def translate_nl_query(req: NLQueryRequest):
         interpreted.append("blockingState = Blocking")
 
     # ── Explicit date values from the UI picker ───────────────────────────────
-    start_ms = _parse_datetime_to_ms(req.start_at_value)
-    end_ms   = _parse_datetime_to_ms(req.end_at_value)
+    # Each of start/end carries optional "after" (gte) and "before" (lte) bounds.
+    start_bounds = {"gte": _parse_datetime_to_ms(req.start_after),
+                    "lte": _parse_datetime_to_ms(req.start_before)}
+    end_bounds   = {"gte": _parse_datetime_to_ms(req.end_after),
+                    "lte": _parse_datetime_to_ms(req.end_before)}
+    start_bounds = {k: v for k, v in start_bounds.items() if v is not None}
+    end_bounds   = {k: v for k, v in end_bounds.items() if v is not None}
 
-    if start_ms is not None:
-        lbl = "after" if req.start_at_op == "gte" else "before"
-        interpreted.append(f"started {lbl} {req.start_at_value.replace('T', ' ')}")
-    if end_ms is not None:
-        lbl = "before" if req.end_at_op == "lte" else "after"
-        interpreted.append(f"ended {lbl} {req.end_at_value.replace('T', ' ')}")
+    for label, bounds in (("start", start_bounds), ("end", end_bounds)):
+        if "gte" in bounds and "lte" in bounds and bounds["gte"] > bounds["lte"]:
+            return {"error": f"illegal {label}-time range — 'after' is later than 'before'"}
+
+    def _fmt_bound(v: str) -> str:
+        return v.replace("T", " ")
+    if req.start_after:
+        interpreted.append(f"started after {_fmt_bound(req.start_after)}")
+    if req.start_before:
+        interpreted.append(f"started before {_fmt_bound(req.start_before)}")
+    if req.end_after:
+        interpreted.append(f"ended after {_fmt_bound(req.end_after)}")
+    if req.end_before:
+        interpreted.append(f"ended before {_fmt_bound(req.end_before)}")
 
     # ── NL relative-time phrases (fallback — only when picker is empty) ───────
-    nl_time = _parse_nl_time(req.text) if not (start_ms or end_ms) else None
+    nl_time = _parse_nl_time(req.text) if not (start_bounds or end_bounds) else None
     if nl_time:
         interpreted.append(f"start >= {nl_time['label']}")
 
@@ -831,18 +906,18 @@ def translate_nl_query(req: NLQueryRequest):
                                 [c["field"] for c in cands], why)
 
         # Started-at → field with "start"
-        if start_ms is not None:
+        if start_bounds:
             sf, sf_reason = _pick_date_field_verbose(date_fields, "start")
-            group_must.append({"range": {sf: {req.start_at_op: start_ms}}})
-            logger.info("[translate] %s  START  chosen=%r  reason=%s  op=%s",
-                        group_pattern, sf, sf_reason, req.start_at_op)
+            group_must.append({"range": {sf: dict(start_bounds)}})
+            logger.info("[translate] %s  START  chosen=%r  reason=%s  bounds=%s",
+                        group_pattern, sf, sf_reason, start_bounds)
 
         # Ended-at → field with "end" (or non-"start" fallback)
-        if end_ms is not None:
+        if end_bounds:
             ef, ef_reason = _pick_date_field_verbose(date_fields, "end")
-            group_must.append({"range": {ef: {req.end_at_op: end_ms}}})
-            logger.info("[translate] %s  END    chosen=%r  reason=%s  op=%s",
-                        group_pattern, ef, ef_reason, req.end_at_op)
+            group_must.append({"range": {ef: dict(end_bounds)}})
+            logger.info("[translate] %s  END    chosen=%r  reason=%s  bounds=%s",
+                        group_pattern, ef, ef_reason, end_bounds)
 
         # NL relative time → applied on start field
         if nl_time:
@@ -975,6 +1050,127 @@ def multi_run_query(req: MultiRunRequest):
                     len(all_hits), len(req.per_index_queries), req.sort_direction)
         return {"total_hits": len(all_hits), "hits": all_hits, "per_index_meta": meta}
     except Exception as e:
+        return {"error": str(e)}
+
+
+class AggregateRequest(BaseModel):
+    """Group-by aggregation over one or more per-index queries."""
+    per_index_queries: list[dict]     # [{index, query_body}, ...] — same shape as multi-run
+    group_by: list[str]               # 1+ fields; nested terms aggs in this order
+    metric_field: str = ""            # optional numeric field → stats per group
+    size: int = 100                   # max buckets per group level
+
+
+def _build_nested_terms_aggs(fields: list[str], metric_field: str, size: int) -> dict:
+    """Innermost-out: terms agg per group field, optional stats on the metric."""
+    inner: dict = {}
+    if metric_field:
+        inner = {"m": {"stats": {"field": metric_field}}}
+    aggs = inner
+    for i in range(len(fields) - 1, -1, -1):
+        level = {"terms": {"field": fields[i], "size": size}}
+        if aggs:
+            level = {"terms": level["terms"], "aggs": aggs}
+        aggs = {f"g{i}": level}
+    return aggs
+
+
+def _flatten_agg_buckets(node: dict, fields: list[str], level: int,
+                         key_prefix: tuple, out: dict, size: int) -> bool:
+    """Walk nested terms buckets, accumulating rows into *out* keyed by the
+    group-value tuple. Returns True if any level looked truncated."""
+    truncated = False
+    container = node.get(f"g{level}", {})
+    buckets = container.get("buckets", [])
+    if len(buckets) >= size or container.get("sum_other_doc_count"):
+        truncated = True
+    for b in buckets:
+        key = key_prefix + (str(b.get("key_as_string", b.get("key"))),)
+        if level + 1 < len(fields):
+            if _flatten_agg_buckets(b, fields, level + 1, key, out, size):
+                truncated = True
+            continue
+        row = out.setdefault(key, {"count": 0, "stats": None})
+        row["count"] += b.get("doc_count", 0)
+        st = b.get("m")
+        if st and st.get("count"):
+            # Merge stats exactly: sums/counts add, min/max compare, avg derived.
+            cur = row["stats"] or {"count": 0, "sum": 0.0, "min": None, "max": None}
+            cur["count"] += st.get("count", 0)
+            cur["sum"]   += st.get("sum") or 0.0
+            for k, fn in (("min", min), ("max", max)):
+                v = st.get(k)
+                if v is not None:
+                    cur[k] = v if cur[k] is None else fn(cur[k], v)
+            row["stats"] = cur
+    return truncated
+
+
+@router.post("/query/aggregate")
+def aggregate_query(req: AggregateRequest):
+    """
+    Aggregate the documents matching each per-index query, grouped by one or
+    more fields (nested terms aggs), optionally with numeric stats per group.
+    Buckets from different index groups are merged exactly: counts and sums
+    add up, min/max compare, avg is re-derived from the merged sum/count.
+    """
+    fields = [f.strip() for f in req.group_by if f and f.strip()]
+    if not fields:
+        return {"error": "select at least one field to group by"}
+    items = [it for it in req.per_index_queries if it.get("index")]
+    if not items:
+        return {"error": "no query provided"}
+    size = max(1, min(int(req.size or 100), 1000))
+
+    try:
+        es = get_client()
+        merged: dict = {}
+        truncated = False
+
+        for it in items:
+            index = it["index"]
+            query = (it.get("query_body") or {}).get("query", {"match_all": {}})
+
+            def _run(group_fields: list[str]) -> dict:
+                body = {"size": 0, "query": query,
+                        "aggs": _build_nested_terms_aggs(group_fields, req.metric_field, size)}
+                return es.search(index, body)
+
+            # ES 7+ text fields can't be aggregated directly — retry with the
+            # conventional .keyword sub-fields (same trick as /indices/field-values).
+            try:
+                resp = _run(fields)
+            except Exception as first_err:
+                try:
+                    resp = _run([f if f.endswith(".keyword") or f == "_index"
+                                 else f + ".keyword" for f in fields])
+                except Exception:
+                    raise first_err
+
+            if _flatten_agg_buckets(resp.get("aggregations", {}), fields, 0,
+                                    (), merged, size):
+                truncated = True
+
+        rows = []
+        for key, data in merged.items():
+            row = {fields[i]: key[i] for i in range(len(fields))}
+            row["count"] = data["count"]
+            st = data.get("stats")
+            if st and st.get("count"):
+                row["sum"] = _round(st["sum"])
+                row["avg"] = _round(st["sum"] / st["count"]) if st["count"] else None
+                row["min"] = _round(st.get("min"))
+                row["max"] = _round(st.get("max"))
+            rows.append(row)
+        rows.sort(key=lambda r: -(r.get("count") or 0))
+
+        logger.info("[aggregate] group_by=%s metric=%r groups=%s rows=%s truncated=%s",
+                    fields, req.metric_field, [it["index"] for it in items],
+                    len(rows), truncated)
+        return {"rows": rows[:10_000], "group_by": fields,
+                "metric_field": req.metric_field, "truncated": truncated}
+    except Exception as e:
+        logger.error("[aggregate] error: %s", e)
         return {"error": str(e)}
 
 
@@ -1568,19 +1764,22 @@ def _extract_field_refs(text: str) -> list[dict]:
     field per-index from the mapping — we never assume a field name exists.
     """
     refs: list[dict] = []
-    # Tokenize keeping IPv4 / id-like tokens intact, then a value is either an
-    # always-value token (quoted/IP/id/number/mixed-alnum) or a bare word that
-    # follows a connective ("contains Incorrect", "is blacklist").
+    # Tokenize keeping IPv4 and compound tokens (embedded "-"/"_", e.g. "PO_7_1"
+    # or "26-1781864824") intact — user-typed names/values must never be split
+    # at separators. A value is either an always-value token (quoted/IP/id/
+    # number/mixed-alnum/compound-with-digit) or a bare word that follows a
+    # connective ("contains Incorrect", "is blacklist").
     tokens = re.findall(
-        r'"[^"]*"|\d{1,3}(?:\.\d{1,3}){3}|\d+[-_]\d+|[A-Za-z0-9]+|[^\s]', text)
+        r'"[^"]*"|\d{1,3}(?:\.\d{1,3}){3}|[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+|[A-Za-z0-9]+|[^\s]', text)
 
     for i, tok in enumerate(tokens):
         kind, value = _classify_value(tok)
         if kind is None:
-            # Bare alphabetic word counts as a value only after a connective —
-            # and only if it isn't itself an operator/negation/connective word.
+            # Bare alphabetic word (or alpha-only compound like "web-based")
+            # counts as a value only after a connective — and only if it isn't
+            # itself an operator/negation/connective word.
             low_tok = tok.lower()
-            if (tok.isalpha()
+            if (re.fullmatch(r"[A-Za-z]+(?:[-_][A-Za-z]+)*", tok)
                     and low_tok not in _STOP_VALUE_WORDS
                     and low_tok not in _OP_NEGATE
                     and low_tok not in _OP_CONTAINS
@@ -1632,9 +1831,14 @@ def _classify_value(tok: str) -> tuple[str | None, str | None]:
     if len(tok) >= 2 and tok[0] == '"' and tok[-1] == '"':
         return "str", tok[1:-1]
     if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", tok):                 return "ip", tok
-    if re.fullmatch(r"\d+[-_]\d+", tok):                             return "id", tok
+    if re.fullmatch(r"\d+(?:[-_]\d+)+", tok):                        return "id", tok
     if re.fullmatch(r"\d{2,}", tok):                                 return "num", tok
     if re.fullmatch(r"[A-Za-z]+\d[A-Za-z0-9]*|\d+[A-Za-z][A-Za-z0-9]*", tok):
+        return "str", tok
+    # Compound token containing a digit (e.g. "PO_7_1", "rule-7a") — a value.
+    # Alpha-only compounds ("web-based") stay bare words needing a connective.
+    if ("-" in tok or "_" in tok) and any(ch.isdigit() for ch in tok) \
+            and re.fullmatch(r"[A-Za-z0-9_-]+", tok):
         return "str", tok
     return None, None
 

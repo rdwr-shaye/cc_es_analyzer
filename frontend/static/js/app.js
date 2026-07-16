@@ -32,7 +32,10 @@ let summaryGranularity   = 'day';
 /* ══════════════════════════════════════════════════════════════════════════
    VIEW ROUTING
    ══════════════════════════════════════════════════════════════════════════ */
+let currentView = 'connection';   // which .view-panel is visible (for auto-refresh)
+
 function showView(name) {
+  currentView = name;
   document.querySelectorAll('.view-panel').forEach(p => p.classList.add('d-none'));
   const panel = document.getElementById(`view-${name}`);
   if (panel) panel.classList.remove('d-none');
@@ -52,6 +55,66 @@ function showView(name) {
   if (name === 'attacks'  && isConnected) loadAttacks();
   if (name === 'dashboard'&& isConnected) loadClusterHealth();
   if (name === 'summary'  && isConnected) loadSummary();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   REFRESH + AUTO-REFRESH — every screen can reload its data manually or on a
+   fixed interval (the per-view select persists in localStorage). The interval
+   only fires while its view is the visible one and a connection is active.
+   ══════════════════════════════════════════════════════════════════════════ */
+const LS_AUTOREFRESH = 'cc_es_autorefresh_';
+const _autoTimers = {};   // view name -> setInterval handle
+
+const REFRESHERS = {
+  dashboard: () => { loadClusterHealth(); loadIndices(); },
+  summary:   () => loadSummary(),
+  attacks:   () => loadAttacks(),
+  index:     () => refreshCurrentIndex(),
+  query:     () => refreshQueryResults(),
+};
+
+function refreshView(view, manual = true) {
+  if (view === 'query' && !(_queryBaseItems && _queryBaseItems.length)) {
+    if (manual) showToast('Run a query first — nothing to refresh', 'bg-warning');
+    return;
+  }
+  REFRESHERS[view]?.();
+}
+
+/** Refresh whichever results viewer is active (used by the pop-out window). */
+function refreshActiveViewer() {
+  refreshView(activeViewer === 'index' ? 'index' : 'query');
+}
+
+/** Re-run the last executed Query-Editor query (single or multi-index). */
+function refreshQueryResults() {
+  if (perIndexQueries.length > 1) runMultiQuery(perIndexQueries);
+  else runQuery();
+}
+
+function onAutoRefreshChanged(view, sel) {
+  const secs = parseInt(sel.value) || 0;
+  localStorage.setItem(LS_AUTOREFRESH + view, String(secs));
+  startAutoRefresh(view, secs);
+  showToast(secs ? `Auto-refresh every ${secs}s (while this screen is open)` : 'Auto-refresh off', 'bg-info');
+}
+
+function startAutoRefresh(view, secs) {
+  if (_autoTimers[view]) { clearInterval(_autoTimers[view]); delete _autoTimers[view]; }
+  if (!secs) return;
+  _autoTimers[view] = setInterval(() => {
+    if (currentView === view && isConnected) refreshView(view, false);
+  }, secs * 1000);
+}
+
+/** Restore saved auto-refresh intervals into the selects and start timers. */
+function initAutoRefresh() {
+  document.querySelectorAll('.auto-refresh-select').forEach(sel => {
+    const view  = sel.id.replace('autoRefresh-', '');
+    const saved = parseInt(localStorage.getItem(LS_AUTOREFRESH + view) || '0') || 0;
+    sel.value = String(saved);
+    startAutoRefresh(view, saved);
+  });
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -512,7 +575,7 @@ function fieldVisibilityBannerHtml() {
       <i class="bi bi-eye-slash"></i>
       <span>${summary} hidden</span>
       <button class="btn btn-sm btn-link p-0" onclick="showAllColumns()">Show all</button>
-      <button class="btn btn-sm btn-link p-0" onclick="openFieldVisibility()">Manage fields…</button>
+      <button class="btn btn-sm btn-link p-0" onclick="openFieldVisibility(this)">Manage fields…</button>
     </div>`;
 }
 
@@ -551,11 +614,18 @@ function setAllMappedHidden(hide) {
   renderFieldVisibilityBody();
 }
 
-/** Open the "Field Visibility" picker (from the Mapped Fields stat card). */
-function openFieldVisibility() {
-  const existing = document.querySelector('.rt-modal-overlay.rt-fieldvis');
+/** Document the Field Visibility modal currently lives in (main or pop-out). */
+let _fieldVisDoc = document;
+
+/** Open the "Field Visibility" picker. Pass the clicked element (or nothing)
+ *  — the modal renders in that element's document, so the same button works
+ *  in the main window and in the results pop-out. */
+function openFieldVisibility(el) {
+  const doc = (el && el.ownerDocument) || document;
+  const existing = doc.querySelector('.rt-modal-overlay.rt-fieldvis');
   if (existing) { existing.remove(); return; }
-  const wrap = document.createElement('div');
+  _fieldVisDoc = doc;
+  const wrap = doc.createElement('div');
   wrap.className = 'rt-modal-overlay rt-fieldvis';
   wrap.innerHTML = `<div class="rt-modal rt-modal-fields">
       <div class="rt-modal-title"><i class="bi bi-eye me-1"></i>Field Visibility</div>
@@ -566,10 +636,10 @@ function openFieldVisibility() {
         <button class="btn btn-sm btn-secondary" data-act="close">Close</button>
       </div>
     </div>`;
-  document.body.appendChild(wrap);
-  const done = () => { wrap.remove(); document.removeEventListener('keydown', onKey); };
+  doc.body.appendChild(wrap);
+  const done = () => { wrap.remove(); doc.removeEventListener('keydown', onKey); };
   const onKey = (e) => { if (e.key === 'Escape') done(); };
-  document.addEventListener('keydown', onKey);
+  doc.addEventListener('keydown', onKey);
   wrap.addEventListener('click', (e) => {
     if (e.target === wrap || e.target.dataset.act === 'close') done();
   });
@@ -578,9 +648,10 @@ function openFieldVisibility() {
 
 /** (Re)draw the checklist inside the open Field Visibility modal. */
 function renderFieldVisibilityBody() {
-  const host = document.querySelector('.rt-fieldvis-body');
+  const doc = (_fieldVisDoc && !_fieldVisDoc.defaultView?.closed) ? _fieldVisDoc : document;
+  const host = doc.querySelector('.rt-fieldvis-body');
   if (!host) return;
-  const searchEl = document.querySelector('.rt-fieldvis-search');
+  const searchEl = doc.querySelector('.rt-fieldvis-search');
   const q = (searchEl?.value || '').toLowerCase();
 
   const cols = currentColumns().filter(isColumnPickable);
@@ -627,6 +698,130 @@ function renderFieldVisibilityBody() {
 
 /** _id / _index are structural — keep them out of the picker checklist. */
 function isColumnPickable(c) { return !isMetaColumn(c); }
+
+/* ── Aggregate results by field(s) ────────────────────────────────────────── */
+
+/** Columns whose loaded values look numeric (candidates for the metric). */
+function numericColumns() {
+  const cols = currentColumns().filter(c => c !== '_id' && c !== '_index');
+  return cols.filter(c => lastResultHits.some(h =>
+    typeof h[c] === 'number' && !Number.isNaN(h[c])));
+}
+
+/** Open the group-by aggregation dialog (doc-aware — works in the pop-out). */
+function openAggregateDialog(el) {
+  const doc = (el && el.ownerDocument) || document;
+  doc.querySelector('.rt-modal-overlay.rt-aggregate')?.remove();
+
+  const items = activeContextItems();
+  if (!items) { showToast('Invalid query JSON — cannot aggregate', 'bg-danger'); return; }
+  const cols = currentColumns().filter(c => c !== '_id');
+  if (!cols.length) { showToast('Run a query first — no fields to aggregate', 'bg-warning'); return; }
+  const numeric = numericColumns();
+
+  const wrap = doc.createElement('div');
+  wrap.className = 'rt-modal-overlay rt-aggregate';
+  wrap.innerHTML = `<div class="rt-modal" style="min-width:520px;max-width:860px;">
+      <div class="rt-modal-title"><i class="bi bi-bar-chart me-1"></i>Aggregate results</div>
+      <div class="rt-modal-body">
+        <label class="small text-secondary mb-1">Group by field(s) — nested in the order checked</label>
+        <div class="agg-fields rt-fieldvis-body mb-2" style="max-height:180px;overflow:auto;">
+          ${cols.map(c => `<label class="rt-field-row">
+              <input type="checkbox" value="${esc(c)}"/>
+              <span class="rt-field-name">${esc(c)}</span>
+            </label>`).join('')}
+        </div>
+        <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+          <label class="small text-secondary mb-0">Metric (numeric field)</label>
+          <select class="form-select form-select-sm agg-metric" style="width:200px;">
+            <option value="">— count only —</option>
+            ${numeric.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}
+          </select>
+          <label class="small text-secondary mb-0 ms-2">Max groups</label>
+          <input type="number" class="form-control form-control-sm agg-size" value="100" min="1" max="1000" style="width:90px;"/>
+        </div>
+        <div class="agg-status small text-secondary d-none"></div>
+        <div class="agg-results mt-2" style="max-height:320px;overflow:auto;"></div>
+      </div>
+      <div class="rt-modal-actions">
+        <button class="btn btn-sm btn-primary" data-act="run"><i class="bi bi-play-fill me-1"></i>Aggregate</button>
+        <button class="btn btn-sm btn-outline-success d-none" data-act="csv"><i class="bi bi-download me-1"></i>CSV</button>
+        <button class="btn btn-sm btn-secondary" data-act="close">Close</button>
+      </div>
+    </div>`;
+  doc.body.appendChild(wrap);
+
+  let lastAgg = null;   // {rows, cols} of the last run, for the CSV download
+
+  const done = () => { wrap.remove(); doc.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') done(); };
+  doc.addEventListener('keydown', onKey);
+
+  const status = (msg) => {
+    const s = wrap.querySelector('.agg-status');
+    s.textContent = msg || '';
+    s.classList.toggle('d-none', !msg);
+  };
+
+  async function run() {
+    const groupBy = [...wrap.querySelectorAll('.agg-fields input:checked')].map(b => b.value);
+    if (!groupBy.length) { status('Check at least one field to group by.'); return; }
+    const metric = wrap.querySelector('.agg-metric').value;
+    const size   = Math.max(1, Math.min(1000, parseInt(wrap.querySelector('.agg-size').value) || 100));
+
+    // Aggregate what the user is LOOKING at: base query + active column filters.
+    const filterClauses = buildFilterMustClauses();
+    const merged = items.map(it => ({
+      index: it.index,
+      query_body: { query: mergeQueryWithFilters(
+        (it.query_body || {}).query || { match_all: {} }, filterClauses) },
+    }));
+
+    status('Aggregating…');
+    const res = await api('/api/query/aggregate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ per_index_queries: merged, group_by: groupBy,
+                             metric_field: metric, size }),
+    });
+    if (!res || res.error) { status('✗ ' + (res?.error || 'unknown error')); return; }
+
+    const hasMetric = !!metric && res.rows.some(r => 'sum' in r);
+    const outCols = [...groupBy, 'count', ...(hasMetric ? ['sum', 'avg', 'min', 'max'] : [])];
+    lastAgg = { rows: res.rows, cols: outCols };
+    status(`${res.rows.length.toLocaleString()} group(s)`
+      + (hasMetric ? ` · metric: ${metric}` : '')
+      + (res.truncated ? ' · ⚠ truncated — raise Max groups' : ''));
+    wrap.querySelector('[data-act="csv"]').classList.toggle('d-none', !res.rows.length);
+    wrap.querySelector('.agg-results').innerHTML = res.rows.length
+      ? `<table class="table table-sm table-striped table-hover mb-0" style="white-space:nowrap;font-size:0.78rem;">
+          <thead class="table-dark"><tr>${outCols.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+          <tbody>${res.rows.map(r =>
+            `<tr>${outCols.map(c => `<td>${esc(r[c] ?? '')}</td>`).join('')}</tr>`).join('')}</tbody>
+        </table>`
+      : '<div class="text-secondary p-2">No groups found.</div>';
+  }
+
+  function downloadCsv() {
+    if (!lastAgg || !lastAgg.rows.length) return;
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const blob = new Blob([buildResultsCsv(lastAgg.rows, lastAgg.cols)],
+                          { type: 'text/csv;charset=utf-8' });
+    const a = doc.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `cc_aggregation_${ts}.csv`;
+    doc.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+  }
+
+  wrap.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) { if (e.target === wrap) done(); return; }
+    const act = b.getAttribute('data-act');
+    if (act === 'run') run();
+    else if (act === 'csv') downloadCsv();
+    else if (act === 'close') done();
+  });
+}
 
 
 function renderMainResultsTable() {
@@ -1183,7 +1378,7 @@ async function applyQueryFiltersServerSide() {
     qb.query = mergeQueryWithFilters(qb.query || { match_all: {} }, filterClauses);
     return { index: it.index, query_body: qb };
   });
-  const size = parseInt(document.getElementById('querySize')?.value) || 10;
+  const size = querySizeValue();
   const sortDir = document.querySelector('input[name="sortDir"]:checked')?.value ?? 'desc';
 
   const metaEl = document.getElementById('queryMeta');
@@ -1296,11 +1491,13 @@ function updateFilterButtonState() {
     }
   });
 
-  const queryBtn = document.getElementById('btnQueryFromFilters');
-  if (queryBtn) {
-    queryBtn.classList.toggle('btn-outline-info', !hasFilters);
-    queryBtn.classList.toggle('btn-info', hasFilters);
-  }
+  ['btnQueryFromFilters', 'btnQueryFromFiltersQuery'].forEach(btnId => {
+    const queryBtn = document.getElementById(btnId);
+    if (queryBtn) {
+      queryBtn.classList.toggle('btn-outline-info', !hasFilters);
+      queryBtn.classList.toggle('btn-info', hasFilters);
+    }
+  });
 }
 
 /** Generate ES query from active table filters and populate query editor */
@@ -1330,9 +1527,13 @@ function generateQueryFromFilters() {
       bool: {
         must: mustClauses
       }
-    },
-    sort: [{ timestamp: { order: 'desc' } }]
+    }
   };
+  // Sort by the index's known date field (from the sample response) — never a
+  // hardcoded name that may not exist. The backend also validates sort fields.
+  if (activeViewer === 'index' && _indexSortField) {
+    query.sort = [{ [_indexSortField]: { order: 'desc' } }];
+  }
 
   // Populate the query editor
   const queryBodyEl = document.getElementById('queryBody');
@@ -1342,11 +1543,16 @@ function generateQueryFromFilters() {
     queryBodyEl.value = JSON.stringify(query, null, 2);
   }
 
-  // Set index pattern based on current index
-  if (queryIndexEl && _currentIndexName) {
-    // Convert specific index to pattern (e.g., "adc-network-hourly-ty-...-687" -> "adc-network-hourly-*")
-    const baseName = _currentIndexName.split('-ty-')[0];
-    queryIndexEl.value = baseName + '-*';
+  // Set index pattern from the current context: Index Detail → that index's
+  // pattern; Query Editor → the executed query's index pattern(s).
+  if (queryIndexEl) {
+    if (activeViewer === 'index' && _currentIndexName) {
+      // e.g. "adc-network-hourly-ty-...-687" -> "adc-network-hourly-*"
+      const baseName = _currentIndexName.split('-ty-')[0];
+      queryIndexEl.value = baseName + '-*';
+    } else if (activeViewer === 'query' && _queryBaseItems?.length) {
+      queryIndexEl.value = [...new Set(_queryBaseItems.map(it => it.index).filter(Boolean))].join(',');
+    }
   }
 
   // Switch to query view
@@ -1585,6 +1791,11 @@ function popOutResults() {
       <button class="btn btn-sm btn-outline-success py-0 px-2" onclick="downloadResults()" title="Download shown"><i class="bi bi-download"></i></button>
       <button class="btn btn-sm btn-outline-primary py-0 px-2 js-export-all" onclick="exportAll()" title="Export ALL matching"><i class="bi bi-cloud-download me-1"></i>All</button>
       <button class="btn btn-sm btn-outline-light py-0 px-2" id="po-write" onclick="toggleWriteMode()" title="Toggle edit mode"><i class="bi bi-lock me-1"></i>Read-only</button>
+      <button class="btn btn-sm btn-outline-light py-0 px-2" onclick="openFieldVisibility(this)" title="Choose which fields (columns) to show"><i class="bi bi-eye me-1"></i>Fields</button>
+      <button class="btn btn-sm btn-outline-warning py-0 px-2" onclick="openAggregateDialog(this)" title="Group the matching docs by selected field(s)"><i class="bi bi-bar-chart"></i></button>
+      <button class="btn btn-sm btn-outline-danger py-0 px-2" onclick="clearAllFilters()" title="Clear all column filters"><i class="bi bi-x-circle me-1"></i>Clear Filters</button>
+      <button class="btn btn-sm btn-outline-info py-0 px-2" onclick="generateQueryFromFilters()" title="Create ES query from active filters (opens in the main window)"><i class="bi bi-funnel"></i></button>
+      <button class="btn btn-sm btn-outline-light py-0 px-2" onclick="refreshActiveViewer()" title="Reload the data"><i class="bi bi-arrow-clockwise"></i></button>
     </header>
     <div id="out"><pre>No results yet…</pre></div></body></html>`);
   resultsWindow.document.close();
@@ -1597,7 +1808,10 @@ function popOutResults() {
    'applyColFilter', 'clearColFilter', 'clearSelection', 'deleteSelectedRows',
    'columnFieldOp', 'applySuggestionField', 'dismissSuggestion',
    'setResultView', 'downloadResults', 'exportAll', 'toggleWriteMode',
-   'showJsonCell', 'showJsonModal', 'clearAllFilters', 'generateQueryFromFilters']
+   'showJsonCell', 'showJsonModal', 'clearAllFilters', 'generateQueryFromFilters',
+   'openFieldVisibility', 'renderFieldVisibilityBody', 'setColumnHidden',
+   'setUnmappedHidden', 'setAllMappedHidden', 'showAllColumns', 'refreshActiveViewer',
+   'openAggregateDialog']
     .forEach(fn => { try { resultsWindow[fn] = window[fn]; } catch (_) {} });
 
   // Close filter dropdowns on outside click inside the pop-out.
@@ -1985,21 +2199,540 @@ function renderSidebarIndices(indices) {
   container.innerHTML = html;
 }
 
+/* ── Dashboard indices: search filter + multi-select deletion ─────────────── */
+let _dashboardIndexFilter = '';
+let selectedIndices = new Set();      // index names checked for bulk deletion
+
+function onDashboardIndexSearch(inp) {
+  _dashboardIndexFilter = (inp.value || '').toLowerCase();
+  renderIndicesTable(allIndices);
+}
+
+function toggleIndexSel(name, cb) {
+  if (cb.checked) selectedIndices.add(name); else selectedIndices.delete(name);
+  updateDeleteSelectedBtn();
+}
+
+function toggleAllIndexSel(cb) {
+  for (const idx of _dashboardVisibleIndices(allIndices)) {
+    if (cb.checked) selectedIndices.add(idx.name); else selectedIndices.delete(idx.name);
+  }
+  renderIndicesTable(allIndices);
+}
+
+function updateDeleteSelectedBtn() {
+  const n = selectedIndices.size;
+  for (const [btnId, cntId] of [['btnDeleteSelected', 'delSelCount'],
+                                ['btnExportSelected', 'expSelCount']]) {
+    const cnt = document.getElementById(cntId);
+    if (cnt) cnt.textContent = n;
+    document.getElementById(btnId)?.classList.toggle('d-none', n === 0);
+  }
+}
+
+/** Export the checked indices. Server archive is the default (works for ANY
+ *  size — the backend scrolls ES and gzips the CSV; the browser only downloads
+ *  the finished file). Direct browser download remains for small indices. */
+async function exportSelectedIndices() {
+  const names = [...selectedIndices];
+  if (!names.length) return;
+  const mode = await uiChoice(document, {
+    title: `Export ${names.length} ${names.length > 1 ? 'indices' : 'index'} — all documents`,
+    message: 'Archive on server: the backend writes one compressed <index>.csv.gz per index '
+           + '(recommended — any size, survives browser closes), then you download the finished '
+           + 'files from the Archives panel. Direct download streams through this browser tab — '
+           + 'only for small indices.',
+    buttons: [
+      { value: 'server',  text: 'Archive on server (recommended)', cls: 'btn-info' },
+      { value: 'browser', text: 'Direct browser download', cls: 'btn-outline-primary' },
+      { value: null,      text: 'Cancel', cls: 'btn-outline-secondary' },
+    ],
+  });
+  if (!mode) return;
+  if (mode === 'server') {
+    const res = await api('/api/exports', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ indices: names }),
+    });
+    if (!res || res.error) { showToast('Export failed to start: ' + (res?.error || 'unknown'), 'bg-danger'); return; }
+    showToast(`Archiving ${names.length} ${names.length > 1 ? 'indices' : 'index'} on the server…`, 'bg-info');
+    openArchivesPanel();
+    return;
+  }
+  await exportSelectedIndicesBrowser(names);
+}
+
+/** Direct client-side export (small indices): folder picker where supported,
+ *  otherwise regular downloads named "<index>.csv". */
+async function exportSelectedIndicesBrowser(names) {
+
+  // Ask for the destination folder where supported.
+  let dirHandle = null;
+  if (window.showDirectoryPicker) {
+    try {
+      dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;   // user cancelled the picker
+      dirHandle = null;                           // not permitted → fallback
+    }
+  }
+  if (!dirHandle) {
+    showToast('Folder picker unavailable — files will go to the browser\'s Downloads folder', 'bg-info');
+  }
+
+  let done = 0; const failures = [];
+  for (const name of names) {
+    showToast(`Exporting ${done + failures.length + 1}/${names.length}: ${name}…`, 'bg-secondary');
+    try {
+      const res = await fetch(appUrl('/api/query/export'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          per_index_queries: [{ index: name, query_body: { query: { match_all: {} } } }],
+          format: 'csv',
+          max_rows: 10_000_000,      // "all documents" — effectively uncapped
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 150)}`);
+
+      if (dirHandle) {
+        // Stream the response straight into "<index>.csv" in the chosen folder.
+        const fileHandle = await dirHandle.getFileHandle(`${name}.csv`, { create: true });
+        await res.body.pipeTo(await fileHandle.createWritable());
+      } else {
+        const blob = await res.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${name}.csv`;
+        document.body.appendChild(a); a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+      }
+      done++;
+    } catch (e) {
+      failures.push(`${name}: ${e.message || e}`);
+    }
+  }
+
+  showToast(`Exported ${done}/${names.length} ${names.length === 1 ? 'index' : 'indices'}`
+    + (dirHandle ? ` to "${dirHandle.name}"` : '')
+    + (failures.length ? ` — ${failures.length} failed` : ''),
+    failures.length ? 'bg-warning' : 'bg-success');
+  if (failures.length) console.warn('Index export failures:', failures);
+}
+
+async function deleteSelectedIndices() {
+  const names = [...selectedIndices];
+  if (!names.length) return;
+  const ok = await uiConfirm(document, {
+    title: `Delete ${names.length} ${names.length > 1 ? 'indices' : 'index'}?`,
+    message: 'This permanently deletes: ' + names.join(', '),
+    okText: 'Delete', danger: true,
+  });
+  if (!ok) return;
+  let deleted = 0; const failures = [];
+  for (const name of names) {
+    const res = await api(`/api/indices/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    if (res && !res.error) { deleted++; selectedIndices.delete(name); }
+    else failures.push(`${name}: ${res?.error || 'unknown'}`);
+  }
+  showToast(`Deleted ${deleted} ${deleted === 1 ? 'index' : 'indices'}`
+    + (failures.length ? ` — ${failures.length} failed` : ''),
+    failures.length ? 'bg-warning' : 'bg-success');
+  if (failures.length) console.warn('Bulk index delete failures:', failures);
+  if (names.includes(_currentIndexName)) _currentIndexName = null;
+  await loadIndices();
+}
+
+/* ── Archives panel — server-side exports, downloads, restore/upload ──────── */
+let _archivesTimer = null;
+const _archSelected = new Set();   // archive names checked in the panel
+let _archFilter = '';              // name filter typed in the panel
+let _archLastFiles = [];           // last file list fetched (re-render on filter)
+
+function closeArchivesPanel() {
+  if (_archivesTimer) { clearInterval(_archivesTimer); _archivesTimer = null; }
+  document.querySelector('.rt-modal-overlay.rt-archives')?.remove();
+}
+
+function openArchivesPanel() {
+  closeArchivesPanel();
+  _archSelected.clear();
+  _archFilter = '';
+  _archLastFiles = [];
+  const wrap = document.createElement('div');
+  wrap.className = 'rt-modal-overlay rt-archives';
+  // Resizable (drag the bottom-right corner) and never taller than the
+  // viewport: the body scrolls, the title and footer buttons stay reachable.
+  wrap.innerHTML = `<div class="rt-modal" style="min-width:620px;width:780px;max-width:95vw;
+        max-height:90vh;min-height:260px;display:flex;flex-direction:column;
+        resize:both;overflow:hidden;">
+      <div class="rt-modal-title" style="flex:0 0 auto;"><i class="bi bi-archive me-1"></i>Index Archives (on server)</div>
+      <div class="rt-modal-body" style="flex:1 1 auto;min-height:0;overflow:auto;">
+        <div class="arch-jobs mb-2" style="max-height:45vh;overflow:auto;"></div>
+        <div class="arch-bulk d-flex gap-1 mb-1 align-items-center">
+          <input type="text" class="form-control form-control-sm arch-filter"
+                 placeholder="Filter by name…" style="max-width:200px;">
+          <span class="arch-filtercount small text-secondary me-1"></span>
+          <button class="btn btn-sm btn-outline-success" data-act="dl-sel" disabled>
+            <i class="bi bi-download me-1"></i>Download selected (<span class="arch-selcount">0</span>)</button>
+          <button class="btn btn-sm btn-outline-info" data-act="restore-sel" disabled>
+            <i class="bi bi-box-arrow-in-up me-1"></i>Restore selected</button>
+          <button class="btn btn-sm btn-outline-danger" data-act="del-sel" disabled>
+            <i class="bi bi-trash me-1"></i>Delete selected</button>
+        </div>
+        <div class="arch-files" style="overflow:auto;"></div>
+      </div>
+      <div class="rt-modal-actions" style="flex:0 0 auto;">
+        <button class="btn btn-sm btn-outline-primary" data-act="upload">
+          <i class="bi bi-upload me-1"></i>Upload archive(s)…</button>
+        <button class="btn btn-sm btn-outline-secondary" data-act="refresh">
+          <i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+        <button class="btn btn-sm btn-secondary" data-act="close">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) { if (e.target === wrap) closeArchivesPanel(); return; }
+    const act = b.getAttribute('data-act');
+    if (act === 'close') closeArchivesPanel();
+    else if (act === 'refresh') refreshArchivesPanel();
+    else if (act === 'upload') uploadArchive();
+    else if (act === 'dl-sel') downloadArchives([..._archSelected]);
+    else if (act === 'restore-sel') restoreArchives([..._archSelected]);
+    else if (act === 'del-sel') deleteArchives([..._archSelected]);
+  });
+  // Checkbox selection (delegated so it survives the 2 s table re-render).
+  wrap.addEventListener('change', (e) => {
+    const cb = e.target;
+    if (cb.classList?.contains('arch-sel')) {
+      cb.checked ? _archSelected.add(cb.dataset.name) : _archSelected.delete(cb.dataset.name);
+      _updateArchBulkButtons(wrap);
+    } else if (cb.classList?.contains('arch-sel-all')) {
+      wrap.querySelectorAll('.arch-sel').forEach(x => {
+        x.checked = cb.checked;
+        cb.checked ? _archSelected.add(x.dataset.name) : _archSelected.delete(x.dataset.name);
+      });
+      _updateArchBulkButtons(wrap);
+    }
+  });
+  // Filter box lives in the once-rendered toolbar so typing keeps focus while
+  // the table re-renders (both on input and on the 2 s poll).
+  wrap.querySelector('.arch-filter').addEventListener('input', (e) => {
+    _archFilter = e.target.value.trim().toLowerCase();
+    _renderArchFiles(wrap);
+  });
+  refreshArchivesPanel();
+  _archivesTimer = setInterval(refreshArchivesPanel, 2000);
+}
+
+function _updateArchBulkButtons(wrap) {
+  wrap = wrap || document.querySelector('.rt-modal-overlay.rt-archives');
+  if (!wrap) return;
+  const n = _archSelected.size;
+  wrap.querySelector('.arch-selcount').textContent = n;
+  wrap.querySelectorAll('.arch-bulk button').forEach(b => { b.disabled = !n; });
+  const all = wrap.querySelector('.arch-sel-all');
+  const boxes = [...wrap.querySelectorAll('.arch-sel')];
+  if (all) all.checked = boxes.length > 0 && boxes.every(b => b.checked);
+}
+
+const _fmtBytes = (n) => n >= 1 << 30 ? (n / (1 << 30)).toFixed(2) + ' GB'
+                       : n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + ' MB'
+                       : (n / 1024).toFixed(1) + ' KB';
+
+async function refreshArchivesPanel() {
+  const wrap = document.querySelector('.rt-modal-overlay.rt-archives');
+  if (!wrap) { closeArchivesPanel(); return; }
+  let data;
+  try { data = await api('/api/exports'); } catch (e) { return; }
+  if (!data || data.error) return;
+
+  // ── Jobs (running first) ──────────────────────────────────────────────────
+  const jobsEl = wrap.querySelector('.arch-jobs');
+  const jobs = (data.jobs || []).filter(j =>
+    j.status === 'running' ||
+    (j.finished_at && (Date.now() - Date.parse(j.finished_at)) < 5 * 60_000));
+  jobsEl.innerHTML = jobs.length ? jobs.map(j => {
+    const badge = j.status === 'running'
+      ? '<span class="badge bg-info text-dark">running</span>'
+      : j.status === 'done'
+        ? '<span class="badge bg-success">done</span>'
+        : j.status === 'cancelled'
+          ? '<span class="badge bg-secondary">cancelled</span>'
+          : `<span class="badge bg-danger" title="${esc(j.error || '')}">error</span>`;
+    const cancelBtn = j.status === 'running'
+      ? `<button class="btn btn-sm btn-outline-warning py-0 px-1 ms-auto"
+                 onclick="cancelArchiveJob('${jsq(j.id)}')"
+                 title="Stop this job">Cancel</button>` : '';
+    const items = j.items.map(it => {
+      const pct = it.total ? Math.min(100, Math.round(it.done / it.total * 100)) : null;
+      const label = it.total != null
+        ? `${it.done.toLocaleString()} / ${(it.total ?? 0).toLocaleString()} docs`
+        : `${it.done.toLocaleString()} docs`;
+      return `<div class="small">${esc(it.index)} — ${label}
+          ${pct != null ? `<div class="progress" style="height:5px;">
+            <div class="progress-bar ${j.status === 'error' ? 'bg-danger' : 'bg-info'}" style="width:${pct}%"></div>
+          </div>` : ''}</div>`;
+    }).join('');
+    const err = j.status === 'error' && j.error
+      ? `<div class="small text-danger">${esc(j.error)}</div>` : '';
+    return `<div class="border border-secondary rounded p-2 mb-1">
+        <div class="d-flex align-items-center gap-2">
+          <i class="bi ${j.kind === 'export' ? 'bi-box-arrow-down' : 'bi-box-arrow-in-up'}"></i>
+          <span class="small fw-semibold">${j.kind}</span>${badge}${cancelBtn}
+        </div>${items}${err}</div>`;
+  }).join('') : '';
+
+  // ── Archive files ─────────────────────────────────────────────────────────
+  _archLastFiles = data.files || [];
+  // Drop selections for files that no longer exist on the server.
+  const names = new Set(_archLastFiles.map(f => f.name));
+  for (const n of [..._archSelected]) if (!names.has(n)) _archSelected.delete(n);
+  _renderArchFiles(wrap);
+}
+
+/** Render the archive-files table, applying the name filter. The select-all
+ *  checkbox acts on the VISIBLE (filtered) rows — filter then one click. */
+function _renderArchFiles(wrap) {
+  const filesEl = wrap.querySelector('.arch-files');
+  const files = _archFilter
+    ? _archLastFiles.filter(f => f.name.toLowerCase().includes(_archFilter))
+    : _archLastFiles;
+  wrap.querySelector('.arch-filtercount').textContent =
+    _archFilter ? `${files.length}/${_archLastFiles.length}` : '';
+  filesEl.innerHTML = files.length
+    ? `<table class="table table-sm table-hover mb-0" style="font-size:0.78rem;">
+        <thead class="table-dark"><tr>
+          <th style="width:1.6rem;"><input type="checkbox" class="form-check-input arch-sel-all"
+              title="Select all${_archFilter ? ' filtered results' : ''}"></th>
+          <th>Archive</th><th>Source</th><th class="text-end">Size</th><th>Created (UTC)</th><th class="text-end">Actions</th></tr></thead>
+        <tbody>${files.map(f => `<tr>
+          <td><input type="checkbox" class="form-check-input arch-sel" data-name="${esc(f.name)}"
+                     ${_archSelected.has(f.name) ? 'checked' : ''}></td>
+          <td class="font-monospace">${esc(f.name)}</td>
+          <td title="Machine the data was exported from">${esc(f.source || '—')}</td>
+          <td class="text-end">${_fmtBytes(f.size)}</td>
+          <td>${esc((f.mtime || '').replace('T', ' ').slice(0, 19))}</td>
+          <td class="text-end text-nowrap">
+            <a class="btn btn-sm btn-outline-success py-0 px-1 me-1"
+               href="${appUrl('/api/exports/download/' + encodeURIComponent(f.name))}" download
+               title="Download this archive"><i class="bi bi-download"></i></a>
+            <button class="btn btn-sm btn-outline-info py-0 px-1 me-1"
+                    onclick="restoreArchives(['${jsq(f.name)}'])"
+                    title="Restore into an index on the connected ES"><i class="bi bi-box-arrow-in-up"></i></button>
+            <button class="btn btn-sm btn-outline-danger py-0 px-1"
+                    onclick="deleteArchives(['${jsq(f.name)}'])"
+                    title="Delete this archive from the server"><i class="bi bi-trash"></i></button>
+          </td></tr>`).join('')}</tbody>
+      </table>`
+    : _archLastFiles.length
+      ? `<div class="text-secondary small p-2">No archives match "${esc(_archFilter)}".</div>`
+      : '<div class="text-secondary small p-2">No archives yet — check indices on the dashboard and use "Export selected".</div>';
+  _updateArchBulkButtons(wrap);
+}
+
+/** Ask the backend to stop a running export/restore job. */
+async function cancelArchiveJob(jobId) {
+  const res = await api(`/api/exports/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+  if (!res || res.error) { showToast('Cancel failed: ' + (res?.error || 'unknown'), 'bg-danger'); return; }
+  showToast(res.note || 'Job cancelling — completed archives are kept', 'bg-info');
+  refreshArchivesPanel();
+}
+
+/** Download several archives — one browser download per file (the browser may
+ *  ask to allow multiple downloads from this site; that's expected). */
+async function downloadArchives(names) {
+  for (const name of names) {
+    const a = document.createElement('a');
+    a.href = appUrl('/api/exports/download/' + encodeURIComponent(name));
+    a.download = name;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => a.remove(), 0);
+    await new Promise(r => setTimeout(r, 400));   // let each download register
+  }
+  showToast(`Started ${names.length} download${names.length > 1 ? 's' : ''}`, 'bg-success');
+}
+
+/** Ask for a target index name per archive/file. The default is always the
+ *  file-name stem (archive X.csv.gz → index X). One entry → a plain prompt;
+ *  several → per-file choice with "Keep default for ALL" to skip the rest of
+ *  the prompts. Returns [{i, target}] (skipped entries omitted) or null when
+ *  the whole operation was cancelled. `labels` = [{name, detail?}]. */
+async function _chooseRestoreTargets(labels, okText) {
+  const out = [];
+  let keepAll = false;
+  for (let i = 0; i < labels.length; i++) {
+    const { name, detail } = labels[i];
+    const stem = name.replace(/\.csv(\.gz)?$/, '');
+    let target = stem;
+    if (labels.length === 1) {
+      const t = await uiPrompt(document, {
+        title: `Restore "${name}"${detail || ''} — target index name`,
+        value: stem, okText: okText || 'Restore' });
+      if (t == null || !t.trim()) return null;
+      target = t.trim();
+    } else if (!keepAll) {
+      const choice = await uiChoice(document, {
+        title: `${i + 1}/${labels.length}: ${name}${detail || ''}`,
+        message: `Target index name (from the file name): "${stem}"`,
+        buttons: [
+          { value: 'keep',     text: `Keep "${stem}"`,        cls: 'btn-info' },
+          { value: 'keep-all', text: 'Keep defaults for ALL', cls: 'btn-outline-info' },
+          { value: 'modify',   text: 'Modify…',               cls: 'btn-outline-primary' },
+          { value: 'skip',     text: 'Skip this one',         cls: 'btn-outline-secondary' },
+        ] });
+      if (!choice) return null;                       // Escape/backdrop → abort all
+      if (choice === 'skip') continue;
+      if (choice === 'keep-all') keepAll = true;
+      if (choice === 'modify') {
+        const t = await uiPrompt(document, {
+          title: `Target index for "${name}"`, value: stem, okText: 'OK' });
+        if (t == null || !t.trim()) continue;         // no name → skip this one
+        target = t.trim();
+      }
+    }
+    out.push({ i, target });
+  }
+  return out.length ? out : null;
+}
+
+/** One combined warning for restore targets that already exist in ES. */
+async function _confirmExistingTargets(targets) {
+  const existing = [...new Set(targets.filter(t => allIndices.some(ix => ix.name === t)))];
+  if (!existing.length) return true;
+  return uiConfirm(document, {
+    title: existing.length > 1
+      ? `${existing.length} target indices already exist`
+      : `Index "${existing[0]}" already exists`,
+    message: 'Restored documents will be ADDED to: ' + existing.join(', ')
+           + '. Docs with the same _id are overwritten.',
+    okText: 'Restore anyway' });
+}
+
+/** Restore one or more server-side archives into the connected ES. */
+async function restoreArchives(names) {
+  if (!names.length) return;
+  const chosen = await _chooseRestoreTargets(names.map(n => ({ name: n })));
+  if (!chosen) return;
+  if (!await _confirmExistingTargets(chosen.map(c => c.target))) return;
+  let started = 0; const failures = [];
+  for (const c of chosen) {
+    const fd = new FormData();
+    fd.append('filename', names[c.i]);
+    fd.append('target', c.target);
+    const res = await api('/api/exports/restore', { method: 'POST', body: fd });
+    if (res && !res.error) started++;
+    else failures.push(`${names[c.i]}: ${res?.error || 'unknown'}`);
+  }
+  showToast(`Started ${started} restore${started === 1 ? '' : 's'}`
+    + (failures.length ? ` — ${failures.length} failed` : ''),
+    failures.length ? 'bg-warning' : 'bg-info');
+  if (failures.length) console.warn('Restore failures:', failures);
+  refreshArchivesPanel();
+}
+
+/** Upload one or more .csv/.csv.gz archives (e.g. exported on another machine)
+ *  and restore each into the ES this analyzer is connected to. Default index
+ *  name = the file name stem. */
+function uploadArchive() {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.multiple = true;
+  inp.accept = '.gz,.csv,application/gzip,text/csv';
+  inp.onchange = async () => {
+    const files = [...(inp.files || [])];
+    if (!files.length) return;
+    const chosen = await _chooseRestoreTargets(
+      files.map(f => ({ name: f.name, detail: ` (${_fmtBytes(f.size)})` })),
+      'Upload & Restore');
+    if (!chosen) return;
+    if (!await _confirmExistingTargets(chosen.map(c => c.target))) return;
+    let started = 0; const failures = [];
+    for (const c of chosen) {
+      const f = files[c.i];
+      showToast(`Uploading ${f.name}…`, 'bg-secondary');
+      const fd = new FormData();
+      fd.append('file', f, f.name);
+      fd.append('target', c.target);
+      const res = await api('/api/exports/restore', { method: 'POST', body: fd });
+      if (res && !res.error) started++;
+      else failures.push(`${f.name}: ${res?.error || 'unknown'}`);
+    }
+    showToast(`Started ${started} restore${started === 1 ? '' : 's'}`
+      + (failures.length ? ` — ${failures.length} failed` : ''),
+      failures.length ? 'bg-warning' : 'bg-info');
+    if (failures.length) console.warn('Upload failures:', failures);
+    refreshArchivesPanel();
+  };
+  inp.click();
+}
+
+/** Delete one or more archives from the server (indices are not touched). */
+async function deleteArchives(names) {
+  if (!names.length) return;
+  const ok = await uiConfirm(document, {
+    title: names.length > 1 ? `Delete ${names.length} archives?` : `Delete archive "${names[0]}"?`,
+    message: 'Removes from the server: ' + names.join(', ')
+           + '. Indices in Elasticsearch are not touched.',
+    okText: 'Delete', danger: true });
+  if (!ok) return;
+  let deleted = 0; const failures = [];
+  for (const name of names) {
+    const res = await api(`/api/exports/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    if (res && !res.error) { deleted++; _archSelected.delete(name); }
+    else failures.push(`${name}: ${res?.error || 'unknown'}`);
+  }
+  showToast(`Deleted ${deleted} archive${deleted === 1 ? '' : 's'}`
+    + (failures.length ? ` — ${failures.length} failed` : ''),
+    failures.length ? 'bg-warning' : 'bg-success');
+  if (failures.length) console.warn('Archive delete failures:', failures);
+  refreshArchivesPanel();
+}
+
+/** The rows the dashboard table currently shows (search filter applied). */
+function _dashboardVisibleIndices(indices) {
+  if (!_dashboardIndexFilter) return indices;
+  return indices.filter(i =>
+    i.name.toLowerCase().includes(_dashboardIndexFilter) ||
+    (i.cc_meta?.category || '').toLowerCase().includes(_dashboardIndexFilter));
+}
+
 function renderIndicesTable(indices) {
   const tbody = document.getElementById('indicesTableBody');
-  if (!indices.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-secondary py-3">No indices found</td></tr>';
+  // Drop selections for indices that no longer exist.
+  const known = new Set(indices.map(i => i.name));
+  for (const n of [...selectedIndices]) if (!known.has(n)) selectedIndices.delete(n);
+
+  const visible = _dashboardVisibleIndices(indices);
+  const selAll = document.getElementById('idxSelAll');
+  if (selAll) selAll.checked = visible.length > 0 && visible.every(i => selectedIndices.has(i.name));
+  updateDeleteSelectedBtn();
+
+  if (!visible.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="text-center text-secondary py-3">${
+      indices.length ? 'No indices match the search' : 'No indices found'}</td></tr>`;
   } else {
-    tbody.innerHTML = indices.map(idx => {
+    tbody.innerHTML = visible.map(idx => {
       const hClass = idx.health === 'green' ? 'success' : idx.health === 'yellow' ? 'warning' : 'danger';
       const cat = idx.cc_meta?.category || '<span class="text-secondary">—</span>';
       return `<tr onclick="showIndexDetail('${esc(idx.name)}')">
+        <td onclick="event.stopPropagation()">
+          <input type="checkbox" ${selectedIndices.has(idx.name) ? 'checked' : ''}
+                 onclick="toggleIndexSel('${jsq(idx.name)}', this)"/></td>
         <td class="fw-semibold">${esc(idx.name)}</td>
         <td><span class="badge bg-${hClass}">${idx.health || '?'}</span></td>
         <td>${(idx.docs_count ?? 0).toLocaleString()}</td>
         <td>${idx.store_size || '—'}</td>
         <td>${cat}</td>
-        <td><i class="bi bi-chevron-right text-secondary"></i></td>
+        <td class="text-end text-nowrap">
+          <button class="btn btn-sm btn-outline-info py-0 px-1 me-1"
+                  onclick="event.stopPropagation(); duplicateIndex('${jsq(idx.name)}')"
+                  title="Duplicate this index (optionally shifting dates)"><i class="bi bi-copy"></i></button>
+          <button class="btn btn-sm btn-outline-danger py-0 px-1 me-1"
+                  onclick="event.stopPropagation(); deleteIndexByName('${jsq(idx.name)}')"
+                  title="Delete this index"><i class="bi bi-trash"></i></button>
+          <i class="bi bi-chevron-right text-secondary"></i>
+        </td>
       </tr>`;
     }).join('');
   }
@@ -2087,9 +2820,9 @@ async function createIndex() {
   showIndexDetail(res.name);
 }
 
-/** Delete the index currently shown in the detail view (typed confirmation). */
-async function deleteCurrentIndex() {
-  const name = _currentIndexName;
+/** Delete any index by name (typed confirmation) — used from the detail view
+ *  header and from the dashboard table's per-row action. */
+async function deleteIndexByName(name) {
   if (!name) return;
   const typed = await uiPrompt(document, {
     title: `Delete index — type "${name}" to confirm`,
@@ -2100,9 +2833,178 @@ async function deleteCurrentIndex() {
   const res = await api(`/api/indices/${encodeURIComponent(name)}`, { method: 'DELETE' });
   if (!res || res.error) { showToast('Delete failed: ' + (res?.error || 'unknown'), 'bg-danger'); return; }
   showToast(`Index "${name}" deleted`, 'bg-success');
-  _currentIndexName = null;
-  showView('dashboard');
+  if (_currentIndexName === name) {
+    _currentIndexName = null;
+    showView('dashboard');
+  }
   await loadIndices();
+}
+
+/** Delete the index currently shown in the detail view (typed confirmation). */
+async function deleteCurrentIndex() {
+  await deleteIndexByName(_currentIndexName);
+}
+
+/** Digit sections of an index name: [{start, len, value, context}]. The
+ *  context shows the digits with their surrounding name chunk (e.g. "sid-0"). */
+function indexNameDigitSections(name) {
+  return [...name.matchAll(/\d+/g)].map(m => {
+    const start = m.index, len = m[0].length;
+    const before = name.slice(0, start).match(/[a-z]+[-_.]*$/i)?.[0] || '';
+    return { start, len, value: parseInt(m[0]),
+             context: `${before}${m[0]}` };
+  });
+}
+
+/** Build the target name for copy k: each digit section stepped by step×k
+ *  (clamped at 0). If nothing steps, fall back to "<base>-copy<k>". */
+function buildDuplicateName(sourceName, sections, steps, k) {
+  if (!steps.some(s => s)) return `${sourceName}-copy${k}`;
+  let out = '', pos = 0;
+  sections.forEach((sec, i) => {
+    out += sourceName.slice(pos, sec.start);
+    out += String(Math.max(0, sec.value + (steps[i] || 0) * k));
+    pos = sec.start + sec.len;
+  });
+  return out + sourceName.slice(pos);
+}
+
+/** Modal collecting duplicate options. Resolves to
+ *  {copies, steps[], target, shift_amount, shift_unit, shift_direction} or null. */
+function duplicateIndexDialog(sourceName) {
+  const sections = indexNameDigitSections(sourceName);
+  return new Promise(resolve => {
+    const wrap = document.createElement('div');
+    wrap.className = 'rt-modal-overlay';
+    const sectionRows = sections.map((sec, i) => `
+        <div class="d-flex align-items-center gap-2 mb-1">
+          <span class="badge bg-secondary font-monospace">${esc(sec.context)}</span>
+          <span class="small text-secondary">step per copy</span>
+          <input type="number" class="form-control form-control-sm dup-step" data-i="${i}"
+                 value="0" style="width:90px;" title="Positive = increase, negative = decrease"/>
+        </div>`).join('');
+    wrap.innerHTML = `<div class="rt-modal" style="min-width:480px;max-width:640px;">
+        <div class="rt-modal-title"><i class="bi bi-copy me-1"></i>Duplicate index "${esc(sourceName)}"</div>
+        <div class="rt-modal-body">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <label class="small text-secondary mb-0">Number of copies</label>
+            <input type="number" class="form-control form-control-sm dup-copies" value="1" min="1" max="100" style="width:90px;"/>
+          </div>
+          ${sections.length ? `
+            <label class="small text-secondary mb-1">Step the name's number sections per copy (0 = keep)</label>
+            ${sectionRows}` : ''}
+          <div class="dup-single-name">
+            <label class="small text-secondary mb-1">New index name (lowercase)</label>
+            <input class="form-control form-control-sm mb-2 dup-target" value="${esc(sourceName)}-copy"/>
+          </div>
+          <div class="dup-preview small text-info mb-2 d-none" style="word-break:break-all;"></div>
+          <label class="small text-secondary mb-1">Shift all date fields per copy (0 = exact copy; copy k shifts k × gap)</label>
+          <div class="d-flex gap-2 align-items-center">
+            <input type="number" class="form-control form-control-sm dup-amount" value="0" min="0" style="width:90px;"/>
+            <select class="form-select form-select-sm dup-unit" style="width:110px;">
+              <option value="minutes">minutes</option>
+              <option value="hours">hours</option>
+              <option value="days" selected>days</option>
+              <option value="weeks">weeks</option>
+              <option value="months">months</option>
+            </select>
+            <select class="form-select form-select-sm dup-dir" style="width:110px;">
+              <option value="past" selected>in the past</option>
+              <option value="future">in the future</option>
+            </select>
+          </div>
+          <div class="small text-secondary mt-1">A "month" is a fixed 30 days — every document in a copy shifts by the same offset.</div>
+        </div>
+        <div class="rt-modal-actions">
+          <button class="btn btn-sm btn-info" data-ok="1"><i class="bi bi-copy me-1"></i>Duplicate</button>
+          <button class="btn btn-sm btn-outline-secondary" data-ok="0">Cancel</button>
+        </div></div>`;
+    document.body.appendChild(wrap);
+
+    const readSteps  = () => sections.map((_, i) =>
+      parseInt(wrap.querySelector(`.dup-step[data-i="${i}"]`)?.value) || 0);
+    const readCopies = () => Math.max(1, Math.min(100,
+      parseInt(wrap.querySelector('.dup-copies').value) || 1));
+
+    // Single-name input applies only to the plain 1-copy/no-step case; loop
+    // mode generates names — show a live preview of the first/last instead.
+    const updatePreview = () => {
+      const copies = readCopies(), steps = readSteps();
+      const looping = copies > 1 || steps.some(s => s);
+      wrap.querySelector('.dup-single-name').classList.toggle('d-none', looping);
+      const prev = wrap.querySelector('.dup-preview');
+      prev.classList.toggle('d-none', !looping);
+      if (looping) {
+        const first = buildDuplicateName(sourceName, sections, steps, 1);
+        const last  = buildDuplicateName(sourceName, sections, steps, copies);
+        prev.innerHTML = copies > 1
+          ? `<i class="bi bi-arrow-return-right me-1"></i>${esc(first)} … ${esc(last)} (${copies} copies)`
+          : `<i class="bi bi-arrow-return-right me-1"></i>${esc(first)}`;
+      }
+    };
+    wrap.querySelectorAll('.dup-copies, .dup-step').forEach(el =>
+      el.addEventListener('input', updatePreview));
+    updatePreview();
+
+    const done = (v) => { wrap.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const read = () => ({
+      copies:          readCopies(),
+      steps:           readSteps(),
+      target:          wrap.querySelector('.dup-target').value.trim(),
+      shift_amount:    Math.max(0, parseInt(wrap.querySelector('.dup-amount').value) || 0),
+      shift_unit:      wrap.querySelector('.dup-unit').value,
+      shift_direction: wrap.querySelector('.dup-dir').value,
+    });
+    const onKey = (e) => { if (e.key === 'Escape') done(null); };
+    document.addEventListener('keydown', onKey);
+    wrap.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (b) { done(b.getAttribute('data-ok') === '1' ? read() : null); return; }
+      if (e.target === wrap) done(null);
+    });
+    setTimeout(() => { const inp = wrap.querySelector('.dup-target'); inp?.focus(); inp?.select(); }, 0);
+  });
+}
+
+/** Duplicate an index N times (with per-copy name stepping + cumulative
+ *  date-shift), calling the duplicate endpoint once per copy. */
+async function duplicateIndex(name) {
+  if (!name) return;
+  const opts = await duplicateIndexDialog(name);
+  if (!opts) return;
+
+  const sections = indexNameDigitSections(name);
+  const looping  = opts.copies > 1 || opts.steps.some(s => s);
+  if (!looping && !opts.target) { showToast('Enter a name for the new index', 'bg-warning'); return; }
+
+  let created = 0, lastTarget = '';
+  for (let k = 1; k <= opts.copies; k++) {
+    const target = looping ? buildDuplicateName(name, sections, opts.steps, k) : opts.target;
+    showToast(`Copying ${k}/${opts.copies}: "${name}" → "${target}"…`, 'bg-secondary');
+    const res = await api(`/api/indices/${encodeURIComponent(name)}/duplicate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        target,
+        shift_amount:    opts.shift_amount * k,     // cumulative: copy k = k × gap
+        shift_unit:      opts.shift_unit,
+        shift_direction: opts.shift_direction,
+      }),
+    });
+    if (!res || res.error) {
+      showToast(`Copy ${k}/${opts.copies} ("${target}") failed: ${res?.error || 'unknown'}`
+        + (created ? ` — ${created} cop${created > 1 ? 'ies' : 'y'} already created` : ''), 'bg-danger');
+      break;
+    }
+    created++;
+    lastTarget = res.target;
+    if (res.failed) showToast(`"${target}": ${res.failed} doc(s) failed to index`, 'bg-warning');
+  }
+
+  if (created) {
+    showToast(`Created ${created} cop${created > 1 ? 'ies' : 'y'} of "${name}"`, 'bg-success');
+    await loadIndices();
+    if (created === 1) showIndexDetail(lastTarget);
+  }
 }
 
 /** Pick a CSV file and import its rows as documents into the current index. */
@@ -2555,9 +3457,17 @@ function catColor(cat) {
 }
 
 /* ── Query editor ────────────────────────────────────────────────────────── */
+
+/** Parse the Size input. Unlike `parseInt(...) || 10`, an explicit 0 is kept
+ *  (size 0 = totals/aggregations only) — only empty/invalid falls back. */
+function querySizeValue(dflt = 10) {
+  const n = parseInt(document.getElementById('querySize')?.value);
+  return Number.isNaN(n) ? dflt : Math.max(0, n);
+}
+
 async function runQuery() {
   const index = document.getElementById('queryIndex').value.trim();
-  const size  = parseInt(document.getElementById('querySize').value) || 10;
+  const size  = querySizeValue();
   let body;
   try { body = JSON.parse(document.getElementById('queryBody').value); }
   catch (e) { setQueryResults('✗ Invalid JSON: ' + e.message); return; }
@@ -2575,6 +3485,8 @@ async function runQuery() {
     setQueryResults('✗ Error: ' + data.error);
     return;
   }
+  // The server may have substituted/dropped a sort on a nonexistent field.
+  if (data.sort_note) showToast(data.sort_note, 'bg-info');
   document.getElementById('queryMeta').textContent =
     `${(data.total ?? 0).toLocaleString()} hits · ${data.took_ms ?? '?'} ms`;
   setQueryResults(JSON.stringify(data, null, 2));
@@ -2609,23 +3521,56 @@ let perIndexQueries = [];   // [{index, date_fields, query_body}, ...]
 let _queryBaseItems     = null;  // [{index, query_body}] actually executed
 let _queryTotalMatching = 0;     // sum of real per-index match totals
 
+/** Default query shown in the editor (also what Clear resets to). */
+const DEFAULT_QUERY_BODY = {
+  query: { match_all: {} },
+  sort: [{ startTime: { order: 'desc' } }],
+};
+
+/** Reset the generated-query state: JSON body, multi-index plan, suggestions,
+ *  interpretation line. (Used by the Clear button and by an empty Translate.) */
+function resetGeneratedQuery() {
+  document.getElementById('queryBody').value = JSON.stringify(DEFAULT_QUERY_BODY, null, 2);
+  perIndexQueries = [];
+  renderPerIndexQueries([]);
+  fieldSuggestions = [];
+  renderSuggestions([]);
+  const infoEl = document.getElementById('nlInterpretation');
+  if (infoEl) { infoEl.classList.add('d-none'); infoEl.innerHTML = ''; }
+}
+
+/** Full Query-Editor reset: query JSON, free text, types, time range, plan. */
+function clearQueryEditor() {
+  document.getElementById('nlQueryInput').value = '';
+  resetGeneratedQuery();
+  clearAttackTypeSelection();
+  clearTimeRange();
+  showToast('Query editor cleared', 'bg-info');
+}
+
 async function translateNlQuery() {
   const text   = document.getElementById('nlQueryInput').value.trim();
   const index  = document.getElementById('queryIndex').value.trim() || 'dp-attack-raw-*';
   const infoEl = document.getElementById('nlInterpretation');
   const types  = [...selectedAttackTypes];
 
-  // Time range
-  const startVal = document.getElementById('startAtValue')?.value || '';
-  const startOp  = document.getElementById('startAtOp')?.value   || 'gte';
-  const endVal   = document.getElementById('endAtValue')?.value   || '';
-  const endOp    = document.getElementById('endAtOp')?.value     || 'lte';
+  // Time range — both bounds per Start/End, validated before translating.
+  const t = readTimeRange();
+  const timeErr = timeRangeError();
+  if (timeErr) { showToast(timeErr, 'bg-danger'); showTimeRangePicker(); return; }
+  const hasTime = !!(t.startAfter || t.startBefore || t.endAfter || t.endBefore);
 
   // Sort
   const sortHint = document.getElementById('sortHint')?.value     ?? 'start';
   const sortDir  = document.querySelector('input[name="sortDir"]:checked')?.value ?? 'desc';
 
-  if (!text && !types.length && !startVal && !endVal) return;
+  // Nothing to translate from → clear the generated query instead of keeping
+  // a stale one (the user emptied the free text and hit Translate).
+  if (!text && !types.length && !hasTime) {
+    resetGeneratedQuery();
+    showToast('Nothing to translate — query reset to default', 'bg-info');
+    return;
+  }
 
   infoEl.className = 'small text-secondary px-1';
   infoEl.textContent = '⏳ Translating…';
@@ -2639,10 +3584,10 @@ async function translateNlQuery() {
         text,
         index,
         attack_types:    types,
-        start_at_value:  startVal,
-        start_at_op:     startOp,
-        end_at_value:    endVal,
-        end_at_op:       endOp,
+        start_after:     t.startAfter,
+        start_before:    t.startBefore,
+        end_after:       t.endAfter,
+        end_before:      t.endBefore,
         sort_hint:       sortHint,
         sort_direction:  sortDir,
       }),
@@ -2845,7 +3790,7 @@ function renderSuggestions(list) {
 
 async function runMultiQuery(queries) {
   if (!queries || !queries.length) return;
-  const size = parseInt(document.getElementById('querySize').value) || 10;
+  const size = querySizeValue();
   const metaEl = document.getElementById('queryMeta');
   setQueryResults(`⏳ Running ${queries.length} index queries…`);
   metaEl.textContent = '';
@@ -2904,44 +3849,73 @@ function toggleTimeRangePicker() {
   else hideTimeRangePicker();
 }
 
-function clearTimeRange() {
-  ['startAtValue', 'endAtValue'].forEach(id => {
+const TIME_RANGE_IDS = ['startAfterValue', 'startBeforeValue', 'endAfterValue', 'endBeforeValue'];
+
+/** Read the four time-range bounds { startAfter, startBefore, endAfter, endBefore }. */
+function readTimeRange() {
+  const v = (id) => document.getElementById(id)?.value || '';
+  return { startAfter: v('startAfterValue'), startBefore: v('startBeforeValue'),
+           endAfter:   v('endAfterValue'),   endBefore:   v('endBeforeValue') };
+}
+
+/** Validate the bounds: within each row, "after" must not exceed "before".
+ *  Returns an error string, or '' when legal. datetime-local values compare
+ *  correctly as strings (ISO format). Also paints the offending inputs red. */
+function timeRangeError() {
+  const t = readTimeRange();
+  const mark = (ids, bad) => ids.forEach(id => {
     const el = document.getElementById(id);
-    if (el) el.value = '';
+    if (el) el.classList.toggle('is-invalid', bad);
   });
-  const lbl = document.getElementById('timeRangeLabel');
-  if (lbl) lbl.classList.add('d-none');
+  let err = '';
+  const startBad = !!(t.startAfter && t.startBefore && t.startAfter > t.startBefore);
+  const endBad   = !!(t.endAfter   && t.endBefore   && t.endAfter   > t.endBefore);
+  mark(['startAfterValue', 'startBeforeValue'], startBad);
+  mark(['endAfterValue', 'endBeforeValue'], endBad);
+  if (startBad) err = 'Illegal Started-At range — "after" is later than "before".';
+  else if (endBad) err = 'Illegal Ended-At range — "after" is later than "before".';
+  return err;
+}
+
+function clearTimeRange() {
+  TIME_RANGE_IDS.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.value = ''; el.classList.remove('is-invalid'); }
+  });
+  document.getElementById('timeRangeLabel')?.classList.add('d-none');
+  document.getElementById('timeRangeError')?.classList.add('d-none');
   _updateTimeRangeBtn();
 }
 
 function onTimeRangeChanged() {
-  const startVal = document.getElementById('startAtValue')?.value || '';
-  const startOp  = document.getElementById('startAtOp')?.value   || 'gte';
-  const endVal   = document.getElementById('endAtValue')?.value   || '';
-  const endOp    = document.getElementById('endAtOp')?.value     || 'lte';
-  const label    = document.getElementById('timeRangeLabel');
+  const t     = readTimeRange();
+  const label = document.getElementById('timeRangeLabel');
+  const errEl = document.getElementById('timeRangeError');
 
-  if (!label) return;
-  const parts = [];
-  if (startVal) {
-    const sym = startOp === 'gte' ? '≥' : '≤';
-    parts.push(`Started ${sym} ${startVal.replace('T', ' ')}`);
+  const err = timeRangeError();
+  if (errEl) {
+    errEl.textContent = err;
+    errEl.classList.toggle('d-none', !err);
   }
-  if (endVal) {
-    const sym = endOp === 'lte' ? '≤' : '≥';
-    parts.push(`Ended ${sym} ${endVal.replace('T', ' ')}`);
+
+  if (label) {
+    const fmt = (v) => v.replace('T', ' ');
+    const parts = [];
+    if (t.startAfter)  parts.push(`Started ≥ ${fmt(t.startAfter)}`);
+    if (t.startBefore) parts.push(`Started ≤ ${fmt(t.startBefore)}`);
+    if (t.endAfter)    parts.push(`Ended ≥ ${fmt(t.endAfter)}`);
+    if (t.endBefore)   parts.push(`Ended ≤ ${fmt(t.endBefore)}`);
+    if (parts.length && !err) { label.textContent = parts.join('  ·  '); label.classList.remove('d-none'); }
+    else                      { label.classList.add('d-none'); }
   }
-  if (parts.length) { label.textContent = parts.join('  ·  '); label.classList.remove('d-none'); }
-  else              { label.classList.add('d-none'); }
   _updateTimeRangeBtn();
 }
 
 function _updateTimeRangeBtn() {
-  const startVal = document.getElementById('startAtValue')?.value || '';
-  const endVal   = document.getElementById('endAtValue')?.value   || '';
-  const btn      = document.getElementById('btnTimeRange');
+  const t   = readTimeRange();
+  const btn = document.getElementById('btnTimeRange');
   if (!btn) return;
-  const active = !!(startVal || endVal);
+  const active = !!(t.startAfter || t.startBefore || t.endAfter || t.endBefore);
   btn.innerHTML = active
     ? `<i class="bi bi-calendar-check-fill me-1 text-warning"></i>Time`
     : `<i class="bi bi-calendar-range me-1"></i>Time`;
@@ -3111,6 +4085,7 @@ function esc(s) {
 (async function init() {
   initUiPrefs();
   initQuerySplitter();
+  initAutoRefresh();
   renderProfiles();
 
   // Try to restore last-used connection

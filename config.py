@@ -1,3 +1,5 @@
+import os
+
 from pydantic_settings import BaseSettings
 from pydantic import Field
 
@@ -18,6 +20,12 @@ class Settings(BaseSettings):
     service_ssl:  bool = Field(default=False, alias="SERVICE_SSL")
     ssl_certfile: str = Field(default="", alias="SSL_CERTFILE")
     ssl_keyfile:  str = Field(default="", alias="SSL_KEYFILE")
+
+    # Where server-side index archives (<index>.csv.gz) are stored. In Docker
+    # this is a mounted volume so archives survive container rebuilds.
+    exports_dir: str = Field(
+        default=os.path.join(os.path.dirname(__file__), "exports"),
+        alias="EXPORTS_DIR")
 
     model_config = {"env_file": ".env", "populate_by_name": True}
 
