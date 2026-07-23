@@ -482,10 +482,9 @@
       <div class="d-flex justify-content-between align-items-center mb-3">
         <h5 class="fw-bold mb-0"><i class="bi bi-shield-exclamation me-2 text-danger"></i>Recent Attacks</h5>
         <div class="d-flex gap-2">
-          <select id="attackStatusFilter" class="form-select form-select-sm" style="width:140px;" onchange="loadAttacks()">
+          <select id="attackStatusFilter" class="form-select form-select-sm" style="width:140px;"
+                  onchange="loadAttacks()" title="Statuses found in the loaded attacks">
             <option value="">All Statuses</option>
-            <option value="active">Active</option>
-            <option value="closed">Closed</option>
           </select>
           <button class="btn btn-sm btn-outline-primary" onclick="loadAttacks()">
             <i class="bi bi-arrow-clockwise"></i> Refresh
@@ -507,12 +506,11 @@
               <thead class="table-dark">
                 <tr>
                   <th>Attack ID</th><th>Type</th><th>Start Time</th><th>End Time</th>
-                  <th>Blocking</th><th>Device IP</th><th>Protection</th>
-                  <th>Destination IP</th><th>Total BW (kbps)</th><th>Total Pkts</th><th>Records</th>
+                  <th>Device IP</th><th>Status</th>
                 </tr>
               </thead>
               <tbody id="attacksTableBody">
-                <tr><td colspan="11" class="text-center text-secondary py-3">Connect to load data</td></tr>
+                <tr><td colspan="6" class="text-center text-secondary py-3">Connect to load data</td></tr>
               </tbody>
             </table>
           </div>
@@ -528,6 +526,10 @@
         </button>
         <h5 class="fw-bold mb-0" id="indexDetailTitle">Index Details</h5>
         <div class="ms-auto d-flex gap-2">
+          <button class="btn btn-sm btn-outline-warning" onclick="createArtificialData(_currentIndexName)"
+                  title="Generate synthetic documents into this index (slice-aware, skips existing data)">
+            <i class="bi bi-magic me-1"></i>Artificial data
+          </button>
           <button class="btn btn-sm btn-outline-primary" onclick="importCsvToIndex()"
                   title="Import a CSV file (same format as export) as documents into this index">
             <i class="bi bi-filetype-csv me-1"></i>Import CSV

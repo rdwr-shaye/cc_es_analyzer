@@ -38,3 +38,6 @@ dist/
 build/
 
 exports/
+
+# Remembered SSH credentials (encrypted) + key
+data/

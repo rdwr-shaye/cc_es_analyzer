@@ -102,6 +102,18 @@ into the `cc_es_analyzer_exports` volume (`/app/exports`; plain runs use
 **Restore** — including uploading an archive exported on another machine to clone an
 index across CC hosts. No root credentials are involved; the app server does the work.
 
+**Snapshot archives** (fast path, recommended above ~10K docs): *Export selected* →
+*Snapshot archive* takes a native ES/OpenSearch snapshot named by you (e.g.
+`belnet_recovery`), zips the repository directory on the ES machine
+(`/opt/radware/tmp/es/<name>`, seen by the ES container as
+`/usr/share/opensearch/backup/<name>` — override with `SNAP_HOST_DIR`/`SNAP_ES_DIR`),
+pulls `<name>.zip` into the archives storage and deletes the snapshot from the source.
+Restoring a `.zip` reverses this on the machine of the currently-connected ES using the
+native `_restore` API (original index names). These flows move files on the ES machines
+over SSH as **root**; credentials are prompted once per machine and remembered
+encrypted in the `cc_es_analyzer_data` volume (delete via
+`DELETE /api/exports/ssh-creds/<host>`).
+
 ### Serve over HTTPS
 
 On hosts that don't allow plain HTTP, enable TLS with `SERVICE_SSL=true`. With no

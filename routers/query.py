@@ -233,6 +233,13 @@ def generic_query(req: QueryRequest):
 
 # ── CC-specific convenience endpoints ────────────────────────────────────────
 
+def _log_es_query(api: str, index: str, body: dict) -> None:
+    """Log the exact ES query an API endpoint sends — the API name comes first
+    so log lines are easy to attribute when debugging."""
+    logger.info("[%s] ES query → POST /%s/_search\n%s",
+                api, index, json.dumps(body, indent=2, ensure_ascii=False))
+
+
 @router.get("/cc/attacks")
 def latest_attacks(size: int = 50, status: str = ""):
     """
@@ -246,11 +253,13 @@ def latest_attacks(size: int = 50, status: str = ""):
         es = get_client()
 
         # ── Phase 1: canonical attack list from dp-attack-raw-* ──────────────
-        raw_resp = es.search("dp-attack-raw-*", {
+        raw_body = {
             "size": size,
             "sort": [{"startTime": {"order": "desc"}}],
             "query": {"match_all": {}},
-        })
+        }
+        _log_es_query("/api/cc/attacks — phase 1 (attack list)", "dp-attack-raw-*", raw_body)
+        raw_resp = es.search("dp-attack-raw-*", raw_body)
         raw_hits = raw_resp.get("hits", {}).get("hits", [])
         total_raw = raw_resp.get("hits", {}).get("total")
 
@@ -270,13 +279,15 @@ def latest_attacks(size: int = 50, status: str = ""):
                 "endTime":       src.get("endTime"),
                 "duration":      src.get("duration"),
                 "attackType":    _extract_attack_type(h.get("_index", "")),
+                "status":        _val(src.get("status")),
+                "deviceIp":      _val(src.get("deviceIp")),
                 "blockingState": _val(chars.get("blockingState") or src.get("latestBlockingState")),
                 "actionType":    _val(chars.get("actionType")),
             }
 
         # ── Phase 2: aggregated stats from attack-data-* ─────────────────────
         under_ids = list(raw_by_under.keys())
-        stats_resp = es.search("attack-data-*", {
+        stats_body = {
             "size": 0,
             "query": {"terms": {"attackIpsId": under_ids}},
             "aggs": {
@@ -293,7 +304,9 @@ def latest_attacks(size: int = 50, status: str = ""):
                     },
                 }
             },
-        })
+        }
+        _log_es_query("/api/cc/attacks — phase 2 (traffic stats)", "attack-data-*", stats_body)
+        stats_resp = es.search("attack-data-*", stats_body)
         stats_buckets = stats_resp.get("aggregations", {}).get("by_attack", {}).get("buckets", [])
 
         stats_by_under = {}
@@ -314,12 +327,56 @@ def latest_attacks(size: int = 50, status: str = ""):
         attacks = []
         for aid_under, base in raw_by_under.items():
             stats = stats_by_under.get(aid_under, {})
-            attacks.append({**base, **stats})
+            merged = {**base, **stats}
+            if base.get("deviceIp"):          # raw doc beats aggregated top-device
+                merged["deviceIp"] = base["deviceIp"]
+            attacks.append(merged)
 
         return {
             "total_records":        total_raw.get("value") if isinstance(total_raw, dict) else total_raw,
             "total_unique_attacks": len(attacks),
             "attacks":              attacks,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.get("/cc/attacks/{attack_id}/details")
+def attack_details(attack_id: str, size: int = 300):
+    """
+    Everything ES knows about one attack: search every index whose name
+    contains "dp-" or "attack-data" for the attack ID, in BOTH delimiter
+    forms (dp-attack-raw stores '3-1781601338', attack-data '3_1781601338'),
+    and return the matching documents grouped per index.
+    """
+    try:
+        es = get_client()
+        dash  = attack_id.replace("_", "-", 1)
+        under = attack_id.replace("-", "_", 1)
+        pattern = "*dp-*,*attack-data*"
+        body = {
+            "size": max(1, min(size, 1000)),
+            "query": {"bool": {
+                "should": [{"match": {"attackIpsId": v}} for v in {dash, under}],
+                "minimum_should_match": 1,
+            }},
+        }
+        _log_es_query(f"/api/cc/attacks/{attack_id}/details", pattern, body)
+        resp = es.post(f"/{pattern}/_search?ignore_unavailable=true&allow_no_indices=true",
+                       body)
+        hits  = resp.get("hits", {}).get("hits", [])
+        total = resp.get("hits", {}).get("total")
+        by_index: dict = {}
+        for h in hits:
+            by_index.setdefault(h.get("_index", "?"), []).append(
+                {"_id": h.get("_id"), **h.get("_source", {})})
+        return {
+            "attack_id": attack_id,
+            "id_forms":  sorted({dash, under}),
+            "total":     total.get("value") if isinstance(total, dict) else total,
+            "returned":  len(hits),
+            "indices":   [{"index": k, "count": len(v), "docs": v}
+                          for k, v in sorted(by_index.items())],
         }
     except Exception as e:
         return {"error": str(e)}
@@ -340,6 +397,7 @@ def attacks_summary():
                 },
             },
         }
+        _log_es_query("/api/cc/attacks/summary", "attack-data-*", body)
         resp = es.search("attack-data-*", body)
         aggs = resp.get("aggregations", {})
         hits_total = resp.get("hits", {}).get("total")
@@ -367,7 +425,7 @@ def cc_summary():
         es = get_client()
 
         # ── 1. Attack aggregations from dp-attack-raw-* ───────────────────────
-        ar = es.search("dp-attack-raw-*", {
+        attack_body = {
             "size": 0,
             "aggs": {
                 "by_day":   {"date_histogram": {"field": "startTime", "interval": "1d"}},
@@ -389,18 +447,22 @@ def cc_summary():
                 "avg_bw_bps":    {"avg": {"field": "averageAttackRateBps"}},
                 "max_bw_bps":    {"max": {"field": "maxAttackRateBps"}},
             },
-        })
+        }
+        _log_es_query("/api/cc/summary — 1 (attack aggregations)", "dp-attack-raw-*", attack_body)
+        ar = es.search("dp-attack-raw-*", attack_body)
         a_aggs = ar.get("aggregations", {})
         total_raw = ar.get("hits", {}).get("total")
         total_attacks = total_raw.get("value") if isinstance(total_raw, dict) else total_raw
 
         # ── 2. Inter-attack gap calculation (fetch up to 2000 sorted timestamps) ─
-        gap_resp = es.search("dp-attack-raw-*", {
+        gap_body = {
             "size": 2000,
             "sort": [{"startTime": {"order": "asc"}}],
             "_source": ["startTime", "category"],
             "query": {"match_all": {}},
-        })
+        }
+        _log_es_query("/api/cc/summary — 2 (inter-attack gaps)", "dp-attack-raw-*", gap_body)
+        gap_resp = es.search("dp-attack-raw-*", gap_body)
         gap_data = [
             (h["_source"].get("startTime"), h["_source"].get("category", "Unknown"))
             for h in gap_resp.get("hits", {}).get("hits", [])
@@ -421,7 +483,7 @@ def cc_summary():
                                       params={"format": "json", "h": "index"})
             traffic_idx_names = [i.get("index", "") for i in traffic_idxs_raw if i.get("index")]
             if traffic_idx_names:
-                tr = es.search(",".join(traffic_idx_names), {
+                traffic_body = {
                     "size": 0,
                     "aggs": {
                         "total_bps": {"sum": {"field": "trafficValue"}},
@@ -437,7 +499,10 @@ def cc_summary():
                         "by_direction": {"terms": {"field": "direction", "size": 5}},
                         "by_device":    {"terms": {"field": "deviceIp",  "size": 10}},
                     },
-                })
+                }
+                _log_es_query("/api/cc/summary — 3 (traffic aggregation)",
+                              ",".join(traffic_idx_names), traffic_body)
+                tr = es.search(",".join(traffic_idx_names), traffic_body)
                 t_aggs = tr.get("aggregations", {})
                 t_total = tr.get("hits", {}).get("total")
                 traffic_result = {
@@ -447,7 +512,9 @@ def cc_summary():
                     "max_bps":       _round(t_aggs.get("max_bps",   {}).get("value")),
                     "by_day": [
                         {
-                            "date":    b.get("key"),
+                            # key_as_string when ES provides it; else epoch ms → ISO
+                            # (a raw number here crashed the frontend's .slice()).
+                            "date":    b.get("key_as_string") or _epoch_to_iso(b.get("key")),
                             "avg_bps": _round(b.get("avg_bps", {}).get("value")),
                             "max_bps": _round(b.get("max_bps", {}).get("value")),
                         }
@@ -1552,6 +1619,7 @@ def traffic_summary():
                 },
             },
         }
+        _log_es_query("/api/cc/traffic", "dp-traffic-agg-*", body)
         resp = es.search("dp-traffic-agg-*", body)
         aggs = resp.get("aggregations", {})
         hits_total = resp.get("hits", {}).get("total")

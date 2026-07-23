@@ -29,6 +29,8 @@ services:
     volumes:
       - cc_es_analyzer_logs:/app/logs
       - cc_es_analyzer_exports:/app/exports
+      # Remembered SSH credentials (encrypted) for snapshot archives.
+      - cc_es_analyzer_data:/app/data
     networks:
       - cc_es_analyzer_net
 
@@ -41,4 +43,6 @@ volumes:
     name: cc_es_analyzer_logs
   cc_es_analyzer_exports:
     name: cc_es_analyzer_exports
+  cc_es_analyzer_data:
+    name: cc_es_analyzer_data
 

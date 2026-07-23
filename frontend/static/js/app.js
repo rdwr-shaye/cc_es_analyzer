@@ -2236,19 +2236,29 @@ function updateDeleteSelectedBtn() {
 async function exportSelectedIndices() {
   const names = [...selectedIndices];
   if (!names.length) return;
+  // Snapshot (native ES, fast) is recommended for big selections; CSV for small.
+  const totalDocs = names.reduce((s, n) =>
+    s + (allIndices.find(i => i.name === n)?.docs_count || 0), 0);
+  const snapRec = totalDocs > 10_000;
   const mode = await uiChoice(document, {
-    title: `Export ${names.length} ${names.length > 1 ? 'indices' : 'index'} — all documents`,
-    message: 'Archive on server: the backend writes one compressed <index>.csv.gz per index '
-           + '(recommended — any size, survives browser closes), then you download the finished '
-           + 'files from the Archives panel. Direct download streams through this browser tab — '
-           + 'only for small indices.',
+    title: `Export ${names.length} ${names.length > 1 ? 'indices' : 'index'} `
+         + `— ${totalDocs.toLocaleString()} docs`,
+    message: 'Snapshot archive: native ES snapshot on the ES machine, zipped and pulled to '
+           + 'this server — fastest for large data; needs root SSH to the ES machine. '
+           + 'CSV archive: the backend scrolls every document into <index>.csv.gz — '
+           + 'universal, no SSH, but slow for millions of docs. '
+           + 'Direct download streams through this browser tab — small indices only.',
     buttons: [
-      { value: 'server',  text: 'Archive on server (recommended)', cls: 'btn-info' },
-      { value: 'browser', text: 'Direct browser download', cls: 'btn-outline-primary' },
-      { value: null,      text: 'Cancel', cls: 'btn-outline-secondary' },
+      { value: 'snapshot', text: 'Snapshot archive' + (snapRec ? ' (recommended for this size)' : ''),
+        cls: snapRec ? 'btn-info' : 'btn-outline-info' },
+      { value: 'server',   text: 'CSV archive on server' + (snapRec ? '' : ' (recommended)'),
+        cls: snapRec ? 'btn-outline-info' : 'btn-info' },
+      { value: 'browser',  text: 'Direct browser download', cls: 'btn-outline-primary' },
+      { value: null,       text: 'Cancel', cls: 'btn-outline-secondary' },
     ],
   });
   if (!mode) return;
+  if (mode === 'snapshot') { await snapshotSelectedIndices(names); return; }
   if (mode === 'server') {
     const res = await api('/api/exports', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2260,6 +2270,114 @@ async function exportSelectedIndices() {
     return;
   }
   await exportSelectedIndicesBrowser(names);
+}
+
+/* ── Snapshot archives (native ES snapshots over SSH) ─────────────────────── */
+
+/** Modal asking for the ES machine's SSH credentials.
+ *  Resolves to {user, password, remember} or null. */
+function sshCredsModal(host, why) {
+  return new Promise(resolve => {
+    const wrap = document.createElement('div');
+    wrap.className = 'rt-modal-overlay';
+    wrap.innerHTML = `<div class="rt-modal" style="min-width:420px;">
+        <div class="rt-modal-title"><i class="bi bi-key me-1"></i>SSH login to ${esc(host)}</div>
+        <div class="rt-modal-body">
+          <div class="small text-secondary mb-2">${esc(why || 'Snapshot archives move files on the ES machine — a root login is required.')}</div>
+          <label class="form-label small mb-0">User</label>
+          <input class="form-control form-control-sm mb-2 ssh-user" value="root">
+          <label class="form-label small mb-0">Password</label>
+          <input type="password" class="form-control form-control-sm mb-2 ssh-pass">
+          <div class="form-check">
+            <input type="checkbox" class="form-check-input ssh-remember" id="sshRemember" checked>
+            <label class="form-check-label small" for="sshRemember">Remember on this server (encrypted)</label>
+          </div>
+        </div>
+        <div class="rt-modal-actions">
+          <button class="btn btn-sm btn-primary" data-ok="1">Connect</button>
+          <button class="btn btn-sm btn-outline-secondary" data-ok="0">Cancel</button>
+        </div></div>`;
+    document.body.appendChild(wrap);
+    const done = (v) => { wrap.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const grab = () => ({
+      user: wrap.querySelector('.ssh-user').value.trim() || 'root',
+      password: wrap.querySelector('.ssh-pass').value,
+      remember: wrap.querySelector('.ssh-remember').checked,
+    });
+    const onKey = (e) => { if (e.key === 'Escape') done(null); else if (e.key === 'Enter') done(grab()); };
+    document.addEventListener('keydown', onKey);
+    wrap.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (b) { done(b.getAttribute('data-ok') === '1' ? grab() : null); return; }
+      if (e.target === wrap) done(null);
+    });
+    setTimeout(() => wrap.querySelector('.ssh-pass').focus(), 0);
+  });
+}
+
+/** POST to a snapshot endpoint, handling the need-credentials handshake
+ *  (prompt → retry with ssh creds). Returns the final response or null. */
+async function _snapshotApiWithCreds(url, payload) {
+  let res = await api(url, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  while (res && res.need_credentials) {
+    const creds = await sshCredsModal(res.host, res.error);
+    if (!creds) return null;
+    res = await api(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, ssh: creds }),
+    });
+  }
+  return res;
+}
+
+/** Snapshot-archive the given indices under a user-chosen significant name. */
+async function snapshotSelectedIndices(names) {
+  let snapName = null;
+  for (;;) {
+    snapName = await uiPrompt(document, {
+      title: 'Snapshot archive name (e.g. belnet_recovery)',
+      value: snapName || '', okText: 'Create snapshot' });
+    if (snapName == null) return;
+    snapName = snapName.trim();
+    if (/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(snapName)) break;
+    showToast('Name must be letters/digits/-/_ (max 64, start with letter or digit)', 'bg-warning');
+  }
+  const res = await _snapshotApiWithCreds('/api/exports/snapshot',
+    { indices: names, name: snapName });
+  if (!res) return;
+  if (res.error) { showToast('Snapshot failed to start: ' + res.error, 'bg-danger'); return; }
+  showToast(`Snapshotting ${names.length} ${names.length > 1 ? 'indices' : 'index'} as "${snapName}"…`, 'bg-info');
+  openArchivesPanel();
+}
+
+/** Restore a snapshot archive (.zip) into the machine of the connected ES:
+ *  shows the embedded index list, warns about ones that already exist. */
+async function snapshotRestoreFlow(name) {
+  const info = await api(`/api/exports/meta/${encodeURIComponent(name)}`);
+  const meta = info?.meta || {};
+  const indices = meta.indices || [];
+  const existing = indices.filter(ix => allIndices.some(i => i.name === ix));
+  const msg = (indices.length
+      ? `Restores ${indices.length} ${indices.length > 1 ? 'indices' : 'index'} with their original names: `
+        + indices.join(', ') + '. '
+      : 'Index list unknown (no embedded metadata). ')
+    + (meta.source ? `Taken from ${meta.source}. ` : '')
+    + (existing.length
+      ? `WARNING: already exist here and will FAIL to restore (delete or rename them first): ${existing.join(', ')}.`
+      : '');
+  const ok = await uiConfirm(document, {
+    title: `Restore snapshot "${name}" on the connected ES machine?`,
+    message: msg, okText: 'Restore' });
+  if (!ok) return false;
+  const res = await _snapshotApiWithCreds('/api/exports/snapshot/restore', { filename: name });
+  if (!res) return false;
+  if (res.error) { showToast('Snapshot restore failed to start: ' + res.error, 'bg-danger'); return false; }
+  showToast(`Restoring snapshot "${name}"…`, 'bg-info');
+  refreshArchivesPanel();
+  return true;
 }
 
 /** Direct client-side export (small indices): folder picker where supported,
@@ -2345,8 +2463,9 @@ async function deleteSelectedIndices() {
 /* ── Archives panel — server-side exports, downloads, restore/upload ──────── */
 let _archivesTimer = null;
 const _archSelected = new Set();   // archive names checked in the panel
-let _archFilter = '';              // name filter typed in the panel
+let _archFilter = '';              // filter typed in the panel (name/type/source)
 let _archLastFiles = [];           // last file list fetched (re-render on filter)
+let _archSort = { key: 'name', dir: 1 };   // clickable column-header sort
 
 function closeArchivesPanel() {
   if (_archivesTimer) { clearInterval(_archivesTimer); _archivesTimer = null; }
@@ -2370,7 +2489,8 @@ function openArchivesPanel() {
         <div class="arch-jobs mb-2" style="max-height:45vh;overflow:auto;"></div>
         <div class="arch-bulk d-flex gap-1 mb-1 align-items-center">
           <input type="text" class="form-control form-control-sm arch-filter"
-                 placeholder="Filter by name…" style="max-width:200px;">
+                 placeholder="Filter name / type / source…" style="max-width:200px;"
+                 title="Matches archive name, type (snap/csv) and source machine">
           <span class="arch-filtercount small text-secondary me-1"></span>
           <button class="btn btn-sm btn-outline-success" data-act="dl-sel" disabled>
             <i class="bi bi-download me-1"></i>Download selected (<span class="arch-selcount">0</span>)</button>
@@ -2384,18 +2504,22 @@ function openArchivesPanel() {
       <div class="rt-modal-actions" style="flex:0 0 auto;">
         <button class="btn btn-sm btn-outline-primary" data-act="upload">
           <i class="bi bi-upload me-1"></i>Upload archive(s)…</button>
-        <button class="btn btn-sm btn-outline-secondary" data-act="refresh">
-          <i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
         <button class="btn btn-sm btn-secondary" data-act="close">Close</button>
       </div>
     </div>`;
   document.body.appendChild(wrap);
   wrap.addEventListener('click', (e) => {
+    const th = e.target.closest('th[data-sort]');
+    if (th) {                                  // toggle column sort (same col → flip)
+      const key = th.getAttribute('data-sort');
+      _archSort = { key, dir: _archSort.key === key ? -_archSort.dir : 1 };
+      _renderArchFiles(wrap);
+      return;
+    }
     const b = e.target.closest('button');
     if (!b) { if (e.target === wrap) closeArchivesPanel(); return; }
     const act = b.getAttribute('data-act');
     if (act === 'close') closeArchivesPanel();
-    else if (act === 'refresh') refreshArchivesPanel();
     else if (act === 'upload') uploadArchive();
     else if (act === 'dl-sel') downloadArchives([..._archSelected]);
     else if (act === 'restore-sel') restoreArchives([..._archSelected]);
@@ -2449,8 +2573,10 @@ async function refreshArchivesPanel() {
 
   // ── Jobs (running first) ──────────────────────────────────────────────────
   const jobsEl = wrap.querySelector('.arch-jobs');
+  // Errors stay visible until the user dismisses them (acknowledge);
+  // done/cancelled cards auto-hide after 5 min (or on dismiss).
   const jobs = (data.jobs || []).filter(j =>
-    j.status === 'running' ||
+    j.status === 'running' || j.status === 'error' ||
     (j.finished_at && (Date.now() - Date.parse(j.finished_at)) < 5 * 60_000));
   jobsEl.innerHTML = jobs.length ? jobs.map(j => {
     const badge = j.status === 'running'
@@ -2463,12 +2589,25 @@ async function refreshArchivesPanel() {
     const cancelBtn = j.status === 'running'
       ? `<button class="btn btn-sm btn-outline-warning py-0 px-1 ms-auto"
                  onclick="cancelArchiveJob('${jsq(j.id)}')"
-                 title="Stop this job">Cancel</button>` : '';
+                 title="Stop this job">Cancel</button>`
+      : `<button class="btn btn-sm btn-outline-secondary py-0 px-1 ms-auto"
+                 onclick="ackArchiveJob('${jsq(j.id)}')"
+                 title="Dismiss this ${j.status === 'error' ? 'error ' : ''}message">✕</button>`;
     const items = j.items.map(it => {
       const pct = it.total ? Math.min(100, Math.round(it.done / it.total * 100)) : null;
-      const label = it.total != null
-        ? `${it.done.toLocaleString()} / ${(it.total ?? 0).toLocaleString()} docs`
-        : `${it.done.toLocaleString()} docs`;
+      let label;
+      if (it.phase) {                        // snapshot jobs: phase + typed progress
+        const prog = it.unit === 'bytes'
+          ? (it.total ? `${_fmtBytes(it.done)} / ${_fmtBytes(it.total)}` : _fmtBytes(it.done))
+          : it.total != null
+            ? `${it.done.toLocaleString()} / ${it.total.toLocaleString()} ${it.unit || ''}`
+            : '';
+        label = `<span class="badge bg-dark border">${esc(it.phase)}</span> ${prog}`.trim();
+      } else {
+        label = it.total != null
+          ? `${it.done.toLocaleString()} / ${(it.total ?? 0).toLocaleString()} docs`
+          : `${it.done.toLocaleString()} docs`;
+      }
       return `<div class="small">${esc(it.index)} — ${label}
           ${pct != null ? `<div class="progress" style="height:5px;">
             <div class="progress-bar ${j.status === 'error' ? 'bg-danger' : 'bg-info'}" style="width:${pct}%"></div>
@@ -2478,7 +2617,9 @@ async function refreshArchivesPanel() {
       ? `<div class="small text-danger">${esc(j.error)}</div>` : '';
     return `<div class="border border-secondary rounded p-2 mb-1">
         <div class="d-flex align-items-center gap-2">
-          <i class="bi ${j.kind === 'export' ? 'bi-box-arrow-down' : 'bi-box-arrow-in-up'}"></i>
+          <i class="bi ${j.kind === 'snapshot' ? 'bi-camera'
+                       : j.kind === 'snap-restore' ? 'bi-camera-reels'
+                       : j.kind === 'export' ? 'bi-box-arrow-down' : 'bi-box-arrow-in-up'}"></i>
           <span class="small fw-semibold">${j.kind}</span>${badge}${cancelBtn}
         </div>${items}${err}</div>`;
   }).join('') : '';
@@ -2491,24 +2632,48 @@ async function refreshArchivesPanel() {
   _renderArchFiles(wrap);
 }
 
-/** Render the archive-files table, applying the name filter. The select-all
- *  checkbox acts on the VISIBLE (filtered) rows — filter then one click. */
+/** Render the archive-files table, applying the filter (matches name, type
+ *  and source) and the clickable-header sort. The select-all checkbox acts on
+ *  the VISIBLE (filtered) rows — filter then one click. */
 function _renderArchFiles(wrap) {
   const filesEl = wrap.querySelector('.arch-files');
-  const files = _archFilter
-    ? _archLastFiles.filter(f => f.name.toLowerCase().includes(_archFilter))
-    : _archLastFiles;
+  const typeLabel = (f) => f.type === 'snapshot' ? 'snap' : 'csv';
+  let files = _archFilter
+    ? _archLastFiles.filter(f =>
+        f.name.toLowerCase().includes(_archFilter) ||
+        typeLabel(f).includes(_archFilter) || (f.type || '').includes(_archFilter) ||
+        (f.source || '').toLowerCase().includes(_archFilter))
+    : [..._archLastFiles];
+  const { key, dir } = _archSort;
+  files.sort((a, b) => {
+    const av = key === 'size' ? (a.size || 0)
+             : key === 'type' ? typeLabel(a)
+             : (a[key] || '').toLowerCase();
+    const bv = key === 'size' ? (b.size || 0)
+             : key === 'type' ? typeLabel(b)
+             : (b[key] || '').toLowerCase();
+    return (av < bv ? -1 : av > bv ? 1 : 0) * dir;
+  });
   wrap.querySelector('.arch-filtercount').textContent =
     _archFilter ? `${files.length}/${_archLastFiles.length}` : '';
+  const sortTh = (k, label, cls = '') =>
+    `<th data-sort="${k}" class="${cls}" style="cursor:pointer;user-select:none;"
+         title="Sort by ${label.toLowerCase()}">${label}${
+         key === k ? (dir === 1 ? ' ▲' : ' ▼') : ''}</th>`;
   filesEl.innerHTML = files.length
     ? `<table class="table table-sm table-hover mb-0" style="font-size:0.78rem;">
         <thead class="table-dark"><tr>
           <th style="width:1.6rem;"><input type="checkbox" class="form-check-input arch-sel-all"
               title="Select all${_archFilter ? ' filtered results' : ''}"></th>
-          <th>Archive</th><th>Source</th><th class="text-end">Size</th><th>Created (UTC)</th><th class="text-end">Actions</th></tr></thead>
+          ${sortTh('type', 'Type')}${sortTh('name', 'Archive')}${sortTh('source', 'Source')}
+          ${sortTh('size', 'Size', 'text-end')}${sortTh('mtime', 'Created (UTC)')}
+          <th class="text-end">Actions</th></tr></thead>
         <tbody>${files.map(f => `<tr>
           <td><input type="checkbox" class="form-check-input arch-sel" data-name="${esc(f.name)}"
                      ${_archSelected.has(f.name) ? 'checked' : ''}></td>
+          <td><span class="badge ${f.type === 'snapshot' ? 'bg-warning text-dark' : 'bg-secondary'}"
+                  title="${f.type === 'snapshot' ? 'Native ES snapshot archive' : 'Document (CSV) archive'}"
+                  >${f.type === 'snapshot' ? 'SNAP' : 'CSV'}</span></td>
           <td class="font-monospace">${esc(f.name)}</td>
           <td title="Machine the data was exported from">${esc(f.source || '—')}</td>
           <td class="text-end">${_fmtBytes(f.size)}</td>
@@ -2536,6 +2701,13 @@ async function cancelArchiveJob(jobId) {
   const res = await api(`/api/exports/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
   if (!res || res.error) { showToast('Cancel failed: ' + (res?.error || 'unknown'), 'bg-danger'); return; }
   showToast(res.note || 'Job cancelling — completed archives are kept', 'bg-info');
+  refreshArchivesPanel();
+}
+
+/** Acknowledge (dismiss) a finished job card — errors stay until dismissed. */
+async function ackArchiveJob(jobId) {
+  const res = await api(`/api/exports/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' });
+  if (!res || res.error) { showToast('Dismiss failed: ' + (res?.error || 'unknown'), 'bg-danger'); return; }
   refreshArchivesPanel();
 }
 
@@ -2609,8 +2781,16 @@ async function _confirmExistingTargets(targets) {
     okText: 'Restore anyway' });
 }
 
-/** Restore one or more server-side archives into the connected ES. */
+/** Restore one or more server-side archives into the connected ES.
+ *  Snapshot (.zip) archives use the native flow (original index names, SSH);
+ *  CSV archives prompt for target index names as before. */
 async function restoreArchives(names) {
+  if (!names.length) return;
+  const zips = names.filter(n => n.endsWith('.zip'));
+  names = names.filter(n => !n.endsWith('.zip'));
+  for (const z of zips) {
+    if (!await snapshotRestoreFlow(z)) break;   // cancelled → stop the batch
+  }
   if (!names.length) return;
   const chosen = await _chooseRestoreTargets(names.map(n => ({ name: n })));
   if (!chosen) return;
@@ -2638,9 +2818,23 @@ function uploadArchive() {
   const inp = document.createElement('input');
   inp.type = 'file';
   inp.multiple = true;
-  inp.accept = '.gz,.csv,application/gzip,text/csv';
+  inp.accept = '.gz,.csv,.zip,application/gzip,text/csv,application/zip';
   inp.onchange = async () => {
-    const files = [...(inp.files || [])];
+    let files = [...(inp.files || [])];
+    if (!files.length) return;
+    // Snapshot zips: upload (save) first, then run the native restore flow —
+    // no target-name prompt (a snapshot restores its original index names).
+    const zipFiles = files.filter(f => f.name.endsWith('.zip'));
+    files = files.filter(f => !f.name.endsWith('.zip'));
+    for (const f of zipFiles) {
+      showToast(`Uploading ${f.name}…`, 'bg-secondary');
+      const fd = new FormData();
+      fd.append('file', f, f.name);
+      const res = await api('/api/exports/restore', { method: 'POST', body: fd });
+      if (!res || res.error) { showToast(`Upload of ${f.name} failed: ` + (res?.error || 'unknown'), 'bg-danger'); continue; }
+      refreshArchivesPanel();
+      if (!await snapshotRestoreFlow(res.saved || f.name)) break;
+    }
     if (!files.length) return;
     const chosen = await _chooseRestoreTargets(
       files.map(f => ({ name: f.name, detail: ` (${_fmtBytes(f.size)})` })),
@@ -3044,6 +3238,326 @@ async function doImportCsv(indexName, file) {
   refreshCurrentIndex();
 }
 
+/* ── Artificial data generator ───────────────────────────────────────────── */
+const _AD_UNIT_S = { seconds: 1, minutes: 60, hours: 3600, days: 86400, weeks: 604800 };
+let _adJobTimer = null;
+
+function _adUnitOptions(selected) {
+  return Object.keys(_AD_UNIT_S).map(u =>
+    `<option value="${u}"${u === selected ? ' selected' : ''}>${u}</option>`).join('');
+}
+
+/** Slice-aware synthetic-data wizard: granularity (+round), main/other date
+ *  fields with gaps, time span, per-field value lists (cartesian product),
+ *  existence-skip on insert, and confirmation before spilling into
+ *  neighbouring "-sl-N" indices. */
+async function createArtificialData(indexName) {
+  if (!indexName) return;
+  const info = await api('/api/artificial/info/' + encodeURIComponent(indexName));
+  if (!info || info.error) {
+    showToast('Artificial data: ' + (info?.error || 'request failed'), 'bg-danger');
+    return;
+  }
+  const sl = info.slice;
+  const dateFields = info.date_fields || [];
+  const mainGuess = info.main_field_guess || dateFields[0] || '';
+  const gsec = info.granularity_seconds || 3600;
+  const bestUnit = gsec % 604800 === 0 ? 'weeks' : gsec % 86400 === 0 ? 'days'
+                 : gsec % 3600 === 0 ? 'hours' : gsec % 60 === 0 ? 'minutes' : 'seconds';
+  const fmtIso = (iso) => (iso || '').replace('T', ' ').slice(0, 16) + ' UTC';
+
+  if (_adJobTimer) { clearInterval(_adJobTimer); _adJobTimer = null; }
+  document.querySelector('.rt-modal-overlay.rt-artificial')?.remove();
+  const wrap = document.createElement('div');
+  wrap.className = 'rt-modal-overlay rt-artificial';
+  wrap.innerHTML = `<div class="rt-modal" style="min-width:640px;width:820px;max-width:95vw;
+        max-height:92vh;min-height:300px;display:flex;flex-direction:column;
+        resize:both;overflow:hidden;">
+      <div class="rt-modal-title" style="flex:0 0 auto;">
+        <i class="bi bi-magic me-1"></i>Create artificial data — <span class="font-monospace">${esc(indexName)}</span></div>
+      <div class="rt-modal-body ad-body" style="flex:1 1 auto;min-height:0;overflow:auto;"></div>
+      <div class="rt-modal-actions" style="flex:0 0 auto;">
+        <span class="ad-estimate small text-info me-auto"></span>
+        <button class="btn btn-sm btn-warning" data-act="run"><i class="bi bi-magic me-1"></i>Create data</button>
+        <button class="btn btn-sm btn-secondary" data-act="close">Close</button>
+      </div></div>`;
+
+  const sliceLine = sl
+    ? `Slice <b>${sl.number}</b> (${esc(sl.portion_label)}): ${fmtIso(sl.start_iso)} → ${fmtIso(sl.end_iso)}`
+    : 'No "-sl-N" suffix detected — all data goes into this index.';
+
+  const body = wrap.querySelector('.ad-body');
+  body.innerHTML = `
+    <div class="small text-secondary mb-2">${sliceLine}
+      ${info.docs_count != null ? ` · ${info.docs_count.toLocaleString()} docs now` : ''}</div>
+
+    <div class="d-flex gap-2 align-items-center mb-2 flex-wrap">
+      <span class="small fw-semibold" style="min-width:110px;">Granularity</span>
+      <input type="number" min="1" class="form-control form-control-sm ad-gran-n" value="${gsec / _AD_UNIT_S[bestUnit]}" style="width:5.5rem;">
+      <select class="form-select form-select-sm ad-gran-u" style="width:8rem;">${_adUnitOptions(bestUnit)}</select>
+      <label class="small d-flex align-items-center gap-1 ms-2" title="Align timestamps to unit boundaries (1:00, 2:00 / :00, :15 …)">
+        <input type="checkbox" class="form-check-input ad-round" checked> round time</label>
+    </div>
+
+    <div class="d-flex gap-2 align-items-center mb-1 flex-wrap">
+      <span class="small fw-semibold" style="min-width:110px;">Main date field</span>
+      ${dateFields.length
+        ? `<select class="form-select form-select-sm ad-main" style="width:16rem;">
+            ${dateFields.map(f => `<option value="${esc(f)}"${f === mainGuess ? ' selected' : ''}>${esc(f)}</option>`).join('')}
+          </select>`
+        : `<input type="text" class="form-control form-control-sm ad-main" value="timestamp"
+                  style="width:16rem;" title="No date fields in the mapping yet — type the field name">`}
+    </div>
+    <div class="ad-others ms-4 mb-2"></div>
+
+    <div class="mb-2">
+      <span class="small fw-semibold d-block mb-1">Time span</span>
+      <div class="ms-3">
+        <label class="small d-flex gap-1 align-items-center">
+          <input type="radio" name="ad-span" value="slice" ${sl ? 'checked' : 'disabled'}>
+          Now → beginning of the slice window${sl ? ` (${fmtIso(sl.start_iso)})` : ' (needs a -sl-N index)'}
+        </label>
+        <label class="small d-flex gap-1 align-items-center flex-wrap">
+          <input type="radio" name="ad-span" value="relative" ${sl ? '' : 'checked'}>
+          Now → <input type="number" min="1" class="form-control form-control-sm ad-rel-n" value="1" style="width:4.5rem;">
+          <select class="form-select form-select-sm ad-rel-u" style="width:8rem;">${_adUnitOptions('days')}</select> ago
+        </label>
+        <label class="small d-flex gap-1 align-items-center flex-wrap">
+          <input type="radio" name="ad-span" value="absolute"> Absolute (UTC):
+          <input type="datetime-local" class="form-control form-control-sm ad-abs-from" style="width:14rem;"> →
+          <input type="datetime-local" class="form-control form-control-sm ad-abs-to" style="width:14rem;">
+        </label>
+      </div>
+    </div>
+
+    <div class="d-flex gap-2 align-items-center mb-1">
+      <span class="small fw-semibold">Field values</span>
+      <input type="text" class="form-control form-control-sm ad-field-filter" placeholder="Filter fields…" style="max-width:180px;">
+      <button class="btn btn-sm btn-outline-secondary py-0" data-act="add-field"
+              title="Add a field that is not in the mapping yet">+ Add field</button>
+      <span class="small text-secondary">comma-separated → one doc per combination per time step; blank = field omitted</span>
+    </div>
+    <div class="ad-fields border border-secondary rounded" style="max-height:38vh;overflow:auto;">
+      <table class="table table-sm mb-0" style="font-size:0.78rem;">
+        <thead class="table-dark"><tr><th style="width:34%;">Field</th><th style="width:14%;">Type</th><th>Values</th></tr></thead>
+        <tbody>${(info.fields || []).map(f => `<tr class="ad-frow" data-field="${esc(f.name)}">
+          <td class="font-monospace">${esc(f.name)}</td>
+          <td class="text-secondary">${esc(f.type || '')}</td>
+          <td><input type="text" class="form-control form-control-sm ad-vals" data-field="${esc(f.name)}"
+                     placeholder="e.g. TCP, UDP"></td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>`;
+  document.body.appendChild(wrap);
+
+  const renderOthers = () => {
+    const main = wrap.querySelector('.ad-main').value;
+    const box = wrap.querySelector('.ad-others');
+    const others = dateFields.filter(f => f !== main);
+    // Preserve previous inputs when the main field changes.
+    const prev = {};
+    box.querySelectorAll('.ad-other-row').forEach(r => {
+      prev[r.dataset.field] = {
+        on: r.querySelector('.ad-other-on').checked,
+        n: r.querySelector('.ad-gap-n').value,
+        u: r.querySelector('.ad-gap-u').value,
+      };
+    });
+    box.innerHTML = others.map(f => {
+      const p = prev[f] || { on: true, n: 0, u: 'seconds' };
+      return `<div class="ad-other-row d-flex gap-2 align-items-center mb-1" data-field="${esc(f)}">
+        <label class="small d-flex gap-1 align-items-center" style="min-width:14rem;">
+          <input type="checkbox" class="form-check-input ad-other-on" ${p.on ? 'checked' : ''}>
+          <span class="font-monospace">${esc(f)}</span></label>
+        <span class="small text-secondary">= main +</span>
+        <input type="number" class="form-control form-control-sm ad-gap-n" value="${p.n}" style="width:5.5rem;">
+        <select class="form-select form-select-sm ad-gap-u" style="width:8rem;">${_adUnitOptions(p.u)}</select>
+      </div>`;
+    }).join('') || '<div class="small text-secondary">no other date fields</div>';
+  };
+  renderOthers();
+
+  const granSeconds = () =>
+    (parseFloat(wrap.querySelector('.ad-gran-n').value) || 0) *
+    _AD_UNIT_S[wrap.querySelector('.ad-gran-u').value];
+
+  const spanSeconds = () => {
+    const mode = wrap.querySelector('input[name="ad-span"]:checked')?.value;
+    if (mode === 'slice' && sl) {
+      return Math.max(0, Math.min(Date.now() / 1000, sl.end) - sl.start);
+    }
+    if (mode === 'relative') {
+      return (parseFloat(wrap.querySelector('.ad-rel-n').value) || 0) *
+             _AD_UNIT_S[wrap.querySelector('.ad-rel-u').value];
+    }
+    const f = Date.parse(wrap.querySelector('.ad-abs-from').value + ':00Z');
+    const t = Date.parse(wrap.querySelector('.ad-abs-to').value + ':00Z');
+    return (isNaN(f) || isNaN(t)) ? 0 : Math.max(0, (t - f) / 1000);
+  };
+
+  const valueLists = () => [...wrap.querySelectorAll('.ad-vals')]
+    .map(inp => ({ field: inp.dataset.field ||
+                          inp.closest('tr')?.querySelector('.ad-fname')?.value.trim() || '',
+                   values: inp.value.split(',').map(s => s.trim()).filter(Boolean) }))
+    .filter(fv => fv.field && fv.values.length);
+
+  const updateEstimate = () => {
+    const g = granSeconds();
+    const steps = g > 0 ? Math.floor(spanSeconds() / g) : 0;
+    const combos = valueLists().reduce((p, fv) => p * fv.values.length, 1);
+    wrap.querySelector('.ad-estimate').textContent =
+      `≈ ${steps.toLocaleString()} steps × ${combos.toLocaleString()} combo(s) = ` +
+      `${(steps * combos).toLocaleString()} docs`;
+  };
+  updateEstimate();
+
+  // Editing a span sub-input auto-selects ITS radio, so the value the user
+  // types actually takes effect. Without this, typing "8 days" in the relative
+  // row while the "slice window" radio stayed selected silently clipped the
+  // span to the current slice (no spill into neighbouring indices).
+  const selectSpan = (mode) => {
+    const r = wrap.querySelector(`input[name="ad-span"][value="${mode}"]`);
+    if (r && !r.disabled && !r.checked) { r.checked = true; updateEstimate(); }
+  };
+  wrap.addEventListener('focusin', (e) => {
+    const c = e.target.classList;
+    if (c?.contains('ad-rel-n') || c?.contains('ad-rel-u')) selectSpan('relative');
+    else if (c?.contains('ad-abs-from') || c?.contains('ad-abs-to')) selectSpan('absolute');
+  });
+
+  wrap.addEventListener('input', (e) => {
+    const c = e.target.classList;
+    if (c?.contains('ad-field-filter')) {
+      const q = e.target.value.trim().toLowerCase();
+      wrap.querySelectorAll('.ad-frow').forEach(r => {
+        r.style.display = !q || r.dataset.field.toLowerCase().includes(q) ? '' : 'none';
+      });
+      return;
+    }
+    if (c?.contains('ad-rel-n') || c?.contains('ad-rel-u')) selectSpan('relative');
+    else if (c?.contains('ad-abs-from') || c?.contains('ad-abs-to')) selectSpan('absolute');
+    updateEstimate();
+  });
+  wrap.addEventListener('change', (e) => {
+    const c = e.target.classList;
+    if (c?.contains('ad-main')) renderOthers();
+    if (c?.contains('ad-rel-u')) selectSpan('relative');
+    updateEstimate();
+  });
+
+  const close = () => {
+    if (_adJobTimer) { clearInterval(_adJobTimer); _adJobTimer = null; }
+    wrap.remove();
+  };
+  wrap.addEventListener('click', async (e) => {
+    if (e.target === wrap) { close(); return; }
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.act === 'close') close();
+    else if (b.dataset.act === 'run') submitArtificial(false);
+    else if (b.dataset.act === 'add-field') {
+      wrap.querySelector('.ad-fields tbody')?.insertAdjacentHTML('beforeend',
+        `<tr class="ad-frow" data-field="">
+          <td><input type="text" class="form-control form-control-sm ad-fname" placeholder="field name"></td>
+          <td class="text-secondary">custom</td>
+          <td><input type="text" class="form-control form-control-sm ad-vals" placeholder="e.g. TCP, UDP"></td>
+        </tr>`);
+    }
+    else if (b.dataset.act === 'cancel-job' && b.dataset.job) {
+      await api(`/api/exports/jobs/${encodeURIComponent(b.dataset.job)}/cancel`, { method: 'POST' });
+    }
+  });
+
+  async function submitArtificial(confirmSpill) {
+    const g = granSeconds();
+    if (!g || g < 1) { showToast('Granularity must be at least 1 second', 'bg-danger'); return; }
+    const mode = wrap.querySelector('input[name="ad-span"]:checked')?.value || 'relative';
+    const payload = {
+      index: indexName,
+      main_field: wrap.querySelector('.ad-main').value,
+      granularity_seconds: g,
+      round_time: wrap.querySelector('.ad-round').checked,
+      other_dates: [...wrap.querySelectorAll('.ad-other-row')]
+        .filter(r => r.querySelector('.ad-other-on').checked)
+        .map(r => ({ field: r.dataset.field,
+                     gap_seconds: (parseFloat(r.querySelector('.ad-gap-n').value) || 0) *
+                                  _AD_UNIT_S[r.querySelector('.ad-gap-u').value] })),
+      span_mode: mode,
+      span_seconds: mode === 'relative'
+        ? (parseFloat(wrap.querySelector('.ad-rel-n').value) || 0) *
+          _AD_UNIT_S[wrap.querySelector('.ad-rel-u').value]
+        : 0,
+      span_from: wrap.querySelector('.ad-abs-from').value,
+      span_to: wrap.querySelector('.ad-abs-to').value,
+      fields: valueLists(),
+      confirm_spill: confirmSpill,
+    };
+    const res = await api('/api/artificial', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res || res.error) { showToast('Artificial data: ' + (res?.error || 'failed'), 'bg-danger'); return; }
+
+    if (res.needs_confirm) {
+      const rows = res.targets.map(t =>
+        `<tr><td class="font-monospace">${esc(t.index)}</td>
+             <td class="text-end">${t.docs.toLocaleString()}</td>
+             <td>${t.exists ? '<span class="badge bg-success">exists</span>'
+                            : '<span class="badge bg-warning text-dark">will be CREATED</span>'}</td></tr>`).join('');
+      body.insertAdjacentHTML('afterbegin', `<div class="ad-confirm border border-warning rounded p-2 mb-2">
+          <div class="small fw-semibold text-warning mb-1">
+            <i class="bi bi-exclamation-triangle me-1"></i>The time span extends beyond this index's slice window</div>
+          <table class="table table-sm mb-2" style="font-size:0.78rem;">
+            <thead><tr><th>Target index</th><th class="text-end">Docs</th><th></th></tr></thead>
+            <tbody>${rows}</tbody></table>
+          <button class="btn btn-sm btn-warning me-1" data-act="confirm-spill">Insert into all listed indices</button>
+          <button class="btn btn-sm btn-outline-secondary" data-act="drop-confirm">Back</button>
+        </div>`);
+      const conf = body.querySelector('.ad-confirm');
+      conf.querySelector('[data-act="confirm-spill"]').onclick = () => { conf.remove(); submitArtificial(true); };
+      conf.querySelector('[data-act="drop-confirm"]').onclick = () => conf.remove();
+      return;
+    }
+
+    // ── Job started — switch to progress view ────────────────────────────────
+    const jobId = res.job_id;
+    body.innerHTML = `<div class="small mb-2">Job <span class="font-monospace">${esc(jobId)}</span> —
+        ${res.planned.toLocaleString()} document(s) planned.</div>
+      <div class="ad-progress"></div>`;
+    wrap.querySelector('[data-act="run"]').outerHTML =
+      `<button class="btn btn-sm btn-outline-warning" data-act="cancel-job" data-job="${esc(jobId)}">Cancel job</button>`;
+    const prog = body.querySelector('.ad-progress');
+    const poll = async () => {
+      const j = await api(`/api/exports/jobs/${encodeURIComponent(jobId)}`);
+      if (!j || j.error) return;
+      prog.innerHTML = j.items.map(it => {
+        const pct = it.total ? Math.min(100, Math.round(it.done / it.total * 100)) : 0;
+        return `<div class="border border-secondary rounded p-2 mb-1 small">
+          <div class="d-flex gap-2 align-items-center">
+            <span class="font-monospace">${esc(it.index)}</span>
+            <span class="badge bg-dark border">${esc(it.phase || '')}</span>
+            <span class="ms-auto">${it.inserted.toLocaleString()} inserted ·
+              ${it.skipped.toLocaleString()} skipped${it.failed ? ` · <span class="text-danger">${it.failed} failed</span>` : ''}
+              · ${it.done.toLocaleString()}/${(it.total ?? 0).toLocaleString()}</span></div>
+          <div class="progress mt-1" style="height:5px;">
+            <div class="progress-bar ${j.status === 'error' ? 'bg-danger' : 'bg-warning'}" style="width:${pct}%"></div>
+          </div></div>`;
+      }).join('');
+      if (j.status !== 'running') {
+        clearInterval(_adJobTimer); _adJobTimer = null;
+        const badge = j.status === 'done' ? 'bg-success' : j.status === 'cancelled' ? 'bg-secondary' : 'bg-danger';
+        prog.insertAdjacentHTML('beforeend',
+          `<div class="mt-2"><span class="badge ${badge}">${esc(j.status)}</span>
+             ${j.error ? `<span class="small text-danger ms-2">${esc(j.error)}</span>` : ''}</div>`);
+        wrap.querySelector('[data-act="cancel-job"]')?.remove();
+        if (typeof refreshCurrentIndex === 'function' && _currentIndexName === indexName) refreshCurrentIndex();
+      }
+    };
+    _adJobTimer = setInterval(poll, 1000);
+    poll();
+  }
+}
+
 async function showIndexDetail(indexName, preserveFilters = false) {
   _currentIndexName = indexName;
   showView('index');
@@ -3168,7 +3682,7 @@ function renderTimelineChart(buckets) {
   chartTimeline = new Chart(ctx, {
     type: 'bar',
     data: {
-      labels: buckets.map(b => b.date?.slice(0, 10) || ''),
+      labels: buckets.map(b => _dayStr(b.date)),
       datasets: [{ label: 'Attacks', data: buckets.map(b => b.count),
         backgroundColor: 'rgba(220,53,69,.6)', borderColor: '#dc3545', borderWidth: 1 }],
     },
@@ -3179,21 +3693,29 @@ function renderTimelineChart(buckets) {
 }
 
 /* ── Attacks view ────────────────────────────────────────────────────────── */
+// The table shows only GENERIC fields common to every attack type (ID, type,
+// start/end, device IP, status); clicking a row opens the full drill-down
+// across all "dp-" / "attack-data" indices for that attack ID.
 async function loadAttacks() {
-  const status = document.getElementById('attackStatusFilter').value;
-  const params = new URLSearchParams({ size: 50 });
-  if (status) params.set('status', status);
-  const data  = await api(`/api/cc/attacks?${params}`);
+  const data  = await api('/api/cc/attacks?size=50');
   const tbody = document.getElementById('attacksTableBody');
   if (data.error) {
-    tbody.innerHTML = `<tr><td colspan="11" class="text-center text-danger">${esc(data.error)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="text-center text-danger">${esc(data.error)}</td></tr>`;
     return;
   }
   const attacks = data.attacks || [];
   if (!attacks.length) {
-    tbody.innerHTML = '<tr><td colspan="11" class="text-center text-secondary py-3">No attacks found</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-secondary py-3">No attacks found</td></tr>';
     return;
   }
+
+  // Status filter options come from the data itself (Terminated/Ongoing/…).
+  const sel = document.getElementById('attackStatusFilter');
+  const chosen = sel.value;
+  const statuses = [...new Set(attacks.map(a => a.status).filter(Boolean))].sort();
+  sel.innerHTML = '<option value="">All Statuses</option>' +
+    statuses.map(s => `<option value="${esc(s)}"${s === chosen ? ' selected' : ''}>${esc(s)}</option>`).join('');
+  const shown = chosen ? attacks.filter(a => a.status === chosen) : attacks;
 
   // Update header badge
   const hdr = document.querySelector('#view-attacks h5');
@@ -3204,30 +3726,87 @@ async function loadAttacks() {
       ` <span class="badge bg-secondary ms-1">${(data.total_records ?? 0).toLocaleString()} raw records</span>`;
   }
 
-  tbody.innerHTML = attacks.map(a => {
-    const bwFmt  = a.totalBw       != null ? Number(a.totalBw).toFixed(1)       : '—';
-    const pktFmt = a.totalPackets  != null ? Number(a.totalPackets).toLocaleString() : '—';
-    const recFmt = a.recordCount   != null ? a.recordCount.toLocaleString()      : '—';
-    const blkBadge = a.blockingState
-      ? `<span class="badge ${a.blockingState === 'Blocking' ? 'bg-danger' : 'bg-warning text-dark'}">${esc(a.blockingState)}</span>`
-      : '<span class="text-secondary">—</span>';
+  if (!shown.length) {
+    tbody.innerHTML = `<tr><td colspan="6" class="text-center text-secondary py-3">No attacks with status "${esc(chosen)}"</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = shown.map(a => {
     const typeBadge = a.attackType
       ? `<span class="badge bg-info text-dark">${esc(a.attackType)}</span>`
       : '—';
-    return `<tr>
+    const stBadge = a.status
+      ? `<span class="badge ${a.status === 'Ongoing' ? 'bg-danger'
+                            : a.status === 'Terminated' ? 'bg-secondary'
+                            : 'bg-warning text-dark'}">${esc(a.status)}</span>`
+      : '<span class="text-secondary">—</span>';
+    return `<tr style="cursor:pointer;" onclick="showAttackDetails('${jsq(a.attackIpsId || '')}')"
+                title="Click for all data recorded for this attack">
       <td class="font-monospace small">${esc(a.attackIpsId || '—')}</td>
       <td>${typeBadge}</td>
       <td class="text-nowrap">${fmtTime(a.startTime)}</td>
       <td class="text-nowrap">${fmtTime(a.endTime)}</td>
-      <td>${blkBadge}</td>
-      <td>${esc(a.deviceIp     || '—')}</td>
-      <td>${esc(a.protection   || '—')}</td>
-      <td>${esc(a.destinationIp|| '—')}</td>
-      <td class="text-end">${bwFmt}</td>
-      <td class="text-end">${pktFmt}</td>
-      <td class="text-center"><span class="badge bg-secondary">${recFmt}</span></td>
+      <td>${esc(a.deviceIp || '—')}</td>
+      <td>${stBadge}</td>
     </tr>`;
   }).join('');
+}
+
+/** Drill-down: every document about one attack ID, searched across all
+ *  indices whose names contain "dp-" or "attack-data", grouped per index. */
+async function showAttackDetails(attackId) {
+  if (!attackId) return;
+  document.querySelector('.rt-modal-overlay.rt-attack-details')?.remove();
+  const wrap = document.createElement('div');
+  wrap.className = 'rt-modal-overlay rt-attack-details';
+  wrap.innerHTML = `<div class="rt-modal" style="min-width:640px;width:860px;max-width:95vw;
+        max-height:90vh;min-height:220px;display:flex;flex-direction:column;
+        resize:both;overflow:hidden;">
+      <div class="rt-modal-title" style="flex:0 0 auto;">
+        <i class="bi bi-crosshair me-1"></i>Attack <span class="font-monospace">${esc(attackId)}</span> — full record</div>
+      <div class="rt-modal-body atk-body" style="flex:1 1 auto;min-height:0;overflow:auto;">
+        <div class="text-center py-4 text-secondary">
+          <span class="spinner-border spinner-border-sm me-2"></span>
+          Searching "dp-" and "attack-data" indices…</div>
+      </div>
+      <div class="rt-modal-actions" style="flex:0 0 auto;">
+        <button class="btn btn-sm btn-secondary" data-act="close">Close</button>
+      </div></div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener('click', (e) => {
+    if (e.target === wrap || e.target.closest('button')?.dataset.act === 'close') wrap.remove();
+  });
+
+  const data = await api('/api/cc/attacks/' + encodeURIComponent(attackId) + '/details');
+  const body = wrap.querySelector('.atk-body');
+  if (!body) return;                       // modal closed while loading
+  if (!data || data.error) {
+    body.innerHTML = `<div class="text-danger small p-2">${esc(data?.error || 'request failed')}</div>`;
+    return;
+  }
+  if (!data.indices?.length) {
+    body.innerHTML = `<div class="text-secondary small p-2">No documents found for
+      ${data.id_forms.map(f => `<code>${esc(f)}</code>`).join(' / ')}
+      in any "dp-" / "attack-data" index.</div>`;
+    return;
+  }
+  const fmtVal = (v) => v === null || v === undefined ? '—'
+    : typeof v === 'object' ? JSON.stringify(v) : String(v);
+  body.innerHTML = `
+    <div class="small text-secondary mb-2">Found <b>${data.returned}</b>${
+      data.total > data.returned ? ` of ${data.total.toLocaleString()}` : ''} document(s)
+      for ID forms ${data.id_forms.map(f => `<code>${esc(f)}</code>`).join(' / ')}
+      in ${data.indices.length} ${data.indices.length > 1 ? 'indices' : 'index'}.</div>` +
+    data.indices.map(g => `
+      <details class="mb-2 border border-secondary rounded p-2" ${data.indices.length === 1 ? 'open' : ''}>
+        <summary class="small fw-semibold" style="cursor:pointer;">${esc(g.index)}
+          <span class="badge bg-info text-dark ms-1">${g.count} doc${g.count > 1 ? 's' : ''}</span></summary>
+        ${g.docs.map(d => `<table class="table table-sm mb-2 mt-2" style="font-size:0.75rem;">
+            <tbody>${Object.entries(d).map(([k, v]) => `<tr>
+              <td class="text-secondary" style="width:30%;">${esc(k)}</td>
+              <td class="font-monospace" style="word-break:break-all;">${esc(fmtVal(v))}</td>
+            </tr>`).join('')}</tbody>
+          </table>`).join('<hr class="my-1">')}
+      </details>`).join('');
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -3238,6 +3817,13 @@ const CAT_COLORS = [
   '#e74c3c','#e67e22','#f1c40f','#2ecc71','#3498db',
   '#9b59b6','#1abc9c','#e91e63','#607d8b','#00bcd4','#ff5722',
 ];
+
+/** Histogram-bucket date → 'YYYY-MM-DD'. Tolerates epoch-ms numbers (older
+ *  ES versions omit key_as_string) — a raw number used to crash rendering. */
+function _dayStr(d) {
+  if (typeof d === 'number') { try { return new Date(d).toISOString().slice(0, 10); } catch { return String(d); } }
+  return String(d || '').slice(0, 10);
+}
 
 async function downloadSummaryJson() {
   const btn = document.getElementById('btnDownloadJson');
@@ -3291,15 +3877,27 @@ async function loadSummary() {  const data = await api('/api/cc/summary');
   const tr = data.traffic || {};
   setText('s-trafficAvg', tr.avg_bps != null ? fmtBps(tr.avg_bps) : '—');
 
+  // Each widget renders independently — one bad payload must not blank the
+  // rest of the page (a traffic-date crash once emptied 5 widgets at once).
+  const _widget = (label, fn) => {
+    try { fn(); }
+    catch (e) { console.error(`summary widget "${label}" failed:`, e);
+                showToast(`Summary widget "${label}" failed: ${e.message}`, 'bg-danger'); }
+  };
+
   // ── Charts ──────────────────────────────────────────────────────────────
-  renderSummaryTimeline(data);
-  renderSummaryCategory(data.by_category || []);
-  renderSummaryTraffic(tr.by_day || []);
+  _widget('attacks over time', () => renderSummaryTimeline(data));
+  _widget('attack categories', () => renderSummaryCategory(data.by_category || []));
+  _widget('traffic over time', () => renderSummaryTraffic(tr.by_day || []));
 
   // ── Risk / Status mini-lists ─────────────────────────────────────────────
-  renderKeyValueList('summaryRiskList',   data.by_risk   || [], 'risk');
-  renderKeyValueList('summaryStatusList', data.by_status || [], 'status');
+  _widget('by risk',   () => renderKeyValueList('summaryRiskList',   data.by_risk   || [], 'risk'));
+  _widget('by status', () => renderKeyValueList('summaryStatusList', data.by_status || [], 'status'));
 
+  _widget('duration + gap tables', () => renderSummaryTables(data));
+}
+
+function renderSummaryTables(data) {
   // ── Duration table ────────────────────────────────────────────────────────
   const tbody1 = document.getElementById('durationByCatBody');
   if (!data.duration_by_cat?.length) {
@@ -3361,7 +3959,7 @@ function renderSummaryTimeline(data) {
   chartSummaryTimeline = new Chart(ctx, {
     type: 'bar',
     data: {
-      labels: buckets.map(b => (b.date || '').slice(0, 10)),
+      labels: buckets.map(b => _dayStr(b.date)),
       datasets: [{
         label: 'Attacks',
         data: buckets.map(b => b.count),
@@ -3405,7 +4003,7 @@ function renderSummaryTraffic(byDay) {
   chartSummaryTraffic = new Chart(ctx, {
     type: 'line',
     data: {
-      labels: byDay.map(b => (b.date || '').slice(0, 10)),
+      labels: byDay.map(b => _dayStr(b.date)),
       datasets: [{
         label: 'Avg bps',
         data: byDay.map(b => b.avg_bps || 0),

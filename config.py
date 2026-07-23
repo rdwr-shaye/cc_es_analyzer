@@ -27,6 +27,13 @@ class Settings(BaseSettings):
         default=os.path.join(os.path.dirname(__file__), "exports"),
         alias="EXPORTS_DIR")
 
+    # Snapshot archives: where ES/OpenSearch fs-repository files live on the ES
+    # MACHINE. snap_host_dir is the path on the host (SSH/zip side); snap_es_dir
+    # is the same directory as the ES process sees it (its Docker mount) — this
+    # is what goes into the repository "location" setting. CC defaults below.
+    snap_host_dir: str = Field(default="/opt/radware/tmp/es", alias="SNAP_HOST_DIR")
+    snap_es_dir: str = Field(default="/usr/share/opensearch/backup", alias="SNAP_ES_DIR")
+
     model_config = {"env_file": ".env", "populate_by_name": True}
 
     @property
