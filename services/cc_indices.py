@@ -215,6 +215,13 @@ CC_INDEX_CATALOG = {
     },
 
     # ── EAAF indices ──────────────────────────────────────────────────────
+    "eaaf-attack-data": {
+        "display": "EAAF Attack Data (Raw)",
+        "category": "EAAF",
+        "color": "#1abc9c",
+        "description": "Raw per-attack EAAF (Enhanced Attack Analysis & Forensics) data samples — the base index the hourly/daily rollups are built from.",
+        "key_fields": ["deviceIp", "startTime", "category"],
+    },
     "eaaf-attack-hourly-data": {
         "display": "EAAF Attack Data Hourly",
         "category": "EAAF",

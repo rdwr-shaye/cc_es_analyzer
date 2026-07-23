@@ -842,7 +842,9 @@ def translate_nl_query(req: NLQueryRequest):
     _OP_LABEL = {"eq": "=", "contains": "contains", "neq": "≠", "ncontains": "not-contains"}
     for ref in field_refs:
         label = " ".join(ref["words"]) or ref["kind"]
-        interpreted.append(f"{label} {_OP_LABEL[ref['op']]} {ref['value']}")
+        vals  = ref["values"]
+        shown = vals[0] if len(vals) == 1 else "[" + ", ".join(map(str, vals)) + "]"
+        interpreted.append(f"{label} {_OP_LABEL[ref['op']]} {shown}")
 
     # Field-existence predicates ("footprint field exists", "no vlan", ...)
     existence_refs = _extract_existence_refs(consumed)
@@ -917,31 +919,40 @@ def translate_nl_query(req: NLQueryRequest):
             for ref in field_refs:
                 words = ref["words"] or (["ip"] if ref["kind"] == "ip" else [])
                 fld, score, total, why = _resolve_field_scored(words, all_fields)
+                vals = ref["values"]
                 if not fld:
-                    logger.info("[translate] %s  FIELD  words=%s value=%r -> UNRESOLVED (%s)",
-                                group_pattern, ref["words"], ref["value"], why)
+                    logger.info("[translate] %s  FIELD  words=%s values=%r -> UNRESOLVED (%s)",
+                                group_pattern, ref["words"], vals, why)
                     continue
                 op = ref["op"]
                 where = "must_not" if op in ("neq", "ncontains") else "must"
+                # eq → match (1 value) / terms (many); contains → wildcard,
+                # OR-combined via a should for multi-value refs.
                 if op in ("contains", "ncontains"):
-                    clause = {"wildcard": {fld: f"*{ref['value']}*"}}
+                    if len(vals) == 1:
+                        clause = {"wildcard": {fld: f"*{vals[0]}*"}}
+                    else:
+                        clause = {"bool": {"should": [{"wildcard": {fld: f"*{v}*"}} for v in vals],
+                                           "minimum_should_match": 1}}
+                elif len(vals) == 1:
+                    clause = {"match": {fld: vals[0]}}
                 else:
-                    clause = {"match": {fld: ref["value"]}}
+                    clause = {"terms": {fld: vals}}
 
                 if score >= total:                      # confident — apply
                     (group_must_not if where == "must_not" else group_must).append(clause)
-                    logger.info("[translate] %s  FIELD  words=%s op=%s value=%r -> %r (%s)",
-                                group_pattern, ref["words"], op, ref["value"], fld, why)
+                    logger.info("[translate] %s  FIELD  words=%s op=%s values=%r -> %r (%s)",
+                                group_pattern, ref["words"], op, vals, fld, why)
                 else:                                   # partial — suggest candidates
                     cands = _candidate_fields(words, all_fields)
                     suggestions.append({
                         "index": group_pattern, "kind": "field",
                         "label": " ".join(ref["words"]) or ref["kind"],
-                        "op": op, "value": ref["value"], "where": where,
+                        "op": op, "value": vals[0], "values": vals, "where": where,
                         "total": total, "candidates": cands,
                     })
-                    logger.info("[translate] %s  FIELD  words=%s value=%r -> SUGGEST %s (%s)",
-                                group_pattern, ref["words"], ref["value"],
+                    logger.info("[translate] %s  FIELD  words=%s values=%r -> SUGGEST %s (%s)",
+                                group_pattern, ref["words"], vals,
                                 [c["field"] for c in cands], why)
 
         # Field-existence predicates → bare `exists` clause routed to must / must_not.
@@ -1819,17 +1830,50 @@ def _word_matches_tokens(word: str, tokens: list[str]) -> bool:
     return False
 
 
+# Words that OR two values of the SAME field together ("A or B", "A nor B").
+_OR_WORDS = {"or", "nor"}
+
+
+def _is_or_continuation(tokens: list[str], prev_i: int, i: int) -> bool:
+    """True if the value at *i* is another OR-ed value for the SAME field as the
+    value at *prev_i* — i.e. the only things between them are OR connectives
+    and/or commas (no "and", no new descriptor word, no boundary). This lets
+    "sourceIp is A or B or C" (or "A, B or C") collapse into one terms clause,
+    while "... and policyName is X" stays a separate field clause."""
+    saw_or = saw_comma = False
+    for t in tokens[prev_i + 1:i]:
+        low = t.lower()
+        if low in _OR_WORDS:
+            saw_or = True
+            continue
+        if t in (",", ";"):
+            saw_comma = True
+            continue
+        if low == "and":                 # hard boundary between distinct fields
+            return False
+        if t.isalpha():                  # a new descriptor word → new field clause
+            return False
+        # other punctuation ("=", ":", "(", ...) is ignored between OR-ed values
+    return saw_or or saw_comma
+
+
 def _extract_field_refs(text: str) -> list[dict]:
     """
-    Pull "<descriptor words> [operator] <value>" references out of free text.
+    Pull "<descriptor words> [operator] <value(s)>" references out of free text.
 
-    e.g. "attack ID 26-1781864824"    -> words=["attack","id"], value="26-1781864824", op="eq"
-         "name contains \"flood\""     -> words=["name"],        value="flood",          op="contains"
-         "category not BehavioralDOS"  -> words=["category"],    value="...",            op="neq"
+    e.g. "attack ID 26-1781864824"    -> words=["attack","id"], values=["26-1781864824"], op="eq"
+         "name contains \"flood\""     -> words=["name"],        values=["flood"],          op="contains"
+         "category not BehavioralDOS"  -> words=["category"],    values=["..."],            op="neq"
 
-    `op` is one of: "eq" (match), "contains" (wildcard *v*), "neq" (must_not match),
-    "ncontains" (must_not wildcard). The descriptor words are resolved to a real
-    field per-index from the mapping — we never assume a field name exists.
+    Consecutive values joined by OR for the SAME field ("A or B or C", "A, B or
+    C") are merged into ONE ref carrying multiple `values` — so they become a
+    single terms/should clause (OR within a field). Distinct fields separated by
+    "and" stay separate refs (AND across fields).
+
+    `op` is one of: "eq" (match/terms), "contains" (wildcard *v*), "neq"
+    (must_not match/terms), "ncontains" (must_not wildcard). The descriptor words
+    are resolved to a real field per-index from the mapping — we never assume a
+    field name exists.
     """
     refs: list[dict] = []
     # Tokenize keeping IPv4 and compound tokens (embedded "-"/"_", e.g. "PO_7_1"
@@ -1840,12 +1884,22 @@ def _extract_field_refs(text: str) -> list[dict]:
     tokens = re.findall(
         r'"[^"]*"|\d{1,3}(?:\.\d{1,3}){3}|[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+|[A-Za-z0-9]+|[^\s]', text)
 
+    prev_val_i: int | None = None      # token index of the last emitted value
+
     for i, tok in enumerate(tokens):
+        # OR-continuation: this value belongs to the previous ref's field (only
+        # OR connectives / commas sit between them). Inherits that ref's
+        # descriptor words + operator instead of re-deriving them — walking back
+        # would break at the "or" boundary and lose the field.
+        or_cont = (bool(refs) and prev_val_i is not None
+                   and _is_or_continuation(tokens, prev_val_i, i))
+
         kind, value = _classify_value(tok)
         if kind is None:
             # Bare alphabetic word (or alpha-only compound like "web-based")
-            # counts as a value only after a connective — and only if it isn't
-            # itself an operator/negation/connective word.
+            # counts as a value only after a connective — or as another OR-ed
+            # value for the current field ("contains flood or storm") — and only
+            # if it isn't itself an operator/negation/connective word.
             low_tok = tok.lower()
             if (re.fullmatch(r"[A-Za-z]+(?:[-_][A-Za-z]+)*", tok)
                     and low_tok not in _STOP_VALUE_WORDS
@@ -1854,10 +1908,16 @@ def _extract_field_refs(text: str) -> list[dict]:
                     and low_tok not in _CONNECTIVE_WORDS
                     and low_tok not in _REF_FILLER
                     and low_tok not in _REF_BOUNDARY
-                    and _gated_by_connective(tokens, i)):
+                    and (or_cont or _gated_by_connective(tokens, i))):
                 kind, value = "str", tok
             else:
                 continue
+
+        if or_cont:
+            if value not in refs[-1]["values"]:
+                refs[-1]["values"].append(value)
+            prev_val_i = i
+            continue
 
         # Walk back over preceding tokens to collect descriptor words and ops.
         words: list[str] = []
@@ -1890,7 +1950,8 @@ def _extract_field_refs(text: str) -> list[dict]:
         op = ("ncontains" if contains and negate else
               "contains"  if contains else
               "neq"       if negate else "eq")
-        refs.append({"words": words, "value": value, "kind": kind, "op": op})
+        refs.append({"words": words, "values": [value], "kind": kind, "op": op})
+        prev_val_i = i
     return refs
 
 
@@ -2017,6 +2078,20 @@ def _resolve_field_scored(words: list[str], field_names: list[str]) -> tuple[str
         return None, 0, 0, "no descriptor words"
 
     total   = len(words)
+
+    # Fast path: the descriptor(s) spell out a field name exactly once separators
+    # and case are ignored — e.g. the user types the real field name as one
+    # camelCase token ("sourceIp", "attackIpsId", "policyName") or space-split
+    # ("attack ips id"). Token-by-token matching misses this because a single
+    # concatenated word never equals the field's individual tokens. Treat an
+    # exact normalized-name hit as a confident full match.
+    joined = _norm_field("".join(words))
+    if joined:
+        exact = [f for f in field_names if _norm_field(f) == joined]
+        if exact:
+            exact.sort(key=len)          # prefer the shortest/base name on ties
+            return exact[0], total, total, f"exact field-name match -> '{exact[0]}'"
+
     nearest = words[-1]
     best, best_score, best_len = None, -1, 1_000_000
 

@@ -72,6 +72,7 @@ def index_stats(index_name: str):
             "search_total":   primaries.get("search", {}).get("query_total", 0),
             "mapping_fields": _count_mapping_fields(mapping),
             "mapping_field_names": _top_level_field_names(mapping),
+            "mapping_date_fields": _date_field_names(mapping),
         }
     except Exception as e:
         return {"error": str(e)}
@@ -139,6 +140,20 @@ def field_values(req: FieldValuesRequest):
         target     = ",".join(idx_list)
         base_query = req.query or {"match_all": {}}
 
+        # Date fields store epoch-millis in _source, but a terms aggregation's
+        # key_as_string is the FORMATTED date. Returning the formatted string
+        # would never match the raw cell value the table holds (the filter would
+        # select a value that matches zero rows). So for date-typed fields we
+        # return the raw epoch `key`; the UI formats it for display. Other types
+        # keep key_as_string (e.g. booleans → "true"/"false").
+        date_fields: set = set()
+        try:
+            mp = es.index_mapping(idx_list[0])
+            date_fields = set(_date_field_names(mp))
+        except Exception:
+            pass
+        field_is_date = req.field in date_fields
+
         def _agg(field_name: str) -> list:
             body = {
                 "size": 0,
@@ -160,10 +175,19 @@ def field_values(req: FieldValuesRequest):
 
         values = []
         for b in buckets:
-            k = b.get("key_as_string", b.get("key"))
+            k = b.get("key") if field_is_date else b.get("key_as_string", b.get("key"))
+            if k is None:
+                k = b.get("key")
             if k is not None:
                 values.append(str(k))
-        return {"field": req.field, "values": values, "count": len(values)}
+        # Distinct: two epoch-ms keys can format to the same second, so raw keys
+        # avoid the "same date shown twice" the formatted output produced.
+        seen, uniq = set(), []
+        for v in values:
+            if v not in seen:
+                seen.add(v); uniq.append(v)
+        return {"field": req.field, "values": uniq, "count": len(uniq),
+                "is_date": field_is_date}
     except Exception as e:
         return {"error": str(e), "values": []}
 
@@ -616,5 +640,21 @@ def _top_level_field_names(mapping: dict) -> list:
         props = idx_map.get("mappings", {}).get("properties", {})
         if isinstance(props, dict):
             names.update(props.keys())
+    return sorted(names)
+
+
+def _date_field_names(mapping: dict) -> list:
+    """Top-level property names whose mapping type is ``date``.
+
+    The UI uses this to render epoch-millis date columns human-readable while
+    keeping the raw value for filtering/matching (CC stores dates as epoch ms).
+    """
+    names = set()
+    for idx_map in mapping.values():
+        props = idx_map.get("mappings", {}).get("properties", {})
+        if isinstance(props, dict):
+            for fname, fmeta in props.items():
+                if isinstance(fmeta, dict) and fmeta.get("type") == "date":
+                    names.add(fname)
     return sorted(names)
 

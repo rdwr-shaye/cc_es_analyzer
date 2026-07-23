@@ -186,6 +186,44 @@ body.qedit-resizing { cursor: col-resize; user-select: none; }
 .health-yellow { color: #ffc107; }
 .health-red { color: #dc3545; }
 
+/* ── Health explanation popover (hover a non-green status / unassigned card) ── */
+.health-card-active {
+  cursor: help;
+  outline: 1px dashed rgba(255, 193, 7, .6);
+  outline-offset: 2px;
+}
+.health-card-active::after {
+  content: "\F431";            /* bi-info-circle glyph */
+  font-family: "bootstrap-icons";
+  position: absolute; top: 4px; right: 6px;
+  font-size: .7rem; color: #ffc107;
+}
+.health-card-active { position: relative; }
+
+.health-popover {
+  position: absolute; z-index: 1090;
+  min-width: 320px; max-width: 520px;
+  background: #1f2933; color: #e9ecef;
+  border: 1px solid #ffc107; border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .4);
+}
+.health-popover-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 10px; border-bottom: 1px solid #343a40;
+  font-size: .78rem; font-weight: 600; color: #ffc107;
+}
+.health-copy {
+  background: transparent; border: 1px solid #6c757d; color: #dee2e6;
+  border-radius: 5px; font-size: .72rem; padding: 1px 8px; cursor: pointer;
+}
+.health-copy:hover { border-color: #ffc107; color: #ffc107; }
+.health-popover-body {
+  margin: 0; padding: 8px 10px; max-height: 45vh; overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .74rem; line-height: 1.35; white-space: pre-wrap; word-break: break-word;
+  color: #e9ecef; user-select: text;
+}
+
 /* ── Cards ───────────────────────────────────────────────────────────── */
 .card { border: none; border-radius: 10px; }
 .card-header {
@@ -198,6 +236,80 @@ body.qedit-resizing { cursor: col-resize; user-select: none; }
 /* ── Tables ──────────────────────────────────────────────────────────── */
 .table { font-size: 0.82rem; }
 .table-hover tbody tr:hover { background: #f8f9fa; cursor: pointer; }
+
+/* ── Sticky headers for the main data tables (dashboard, summary, attacks) ──
+   The header row stays pinned while the rows scroll inside a bounded
+   container — same pattern as the rich results table. */
+.table-responsive.sticky-head { max-height: 70vh; overflow: auto; }
+.table-responsive.sticky-head thead th {
+  position: sticky; top: 0; z-index: 2;
+  background: #212529; color: #fff;   /* opaque so rows never show through */
+}
+/* Archive list inside the (already-scrolling) Archives modal body. */
+.arch-files thead th {
+  position: sticky; top: 0; z-index: 2;
+  background: #212529; color: #fff;
+}
+
+/* ── Index detail: the Sample-Documents card fills the remaining viewport
+   height so the table reaches the bottom of the screen instead of leaving an
+   empty gap below it. The card body scrolls; header + meta stay put. Falls
+   back to a scrollable MAIN when the header stack is taller than the viewport
+   (e.g. very narrow widths where the stat cards wrap). */
+#view-index {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+#view-index > .card {
+  flex: 1 1 auto;
+  min-height: 260px;
+  display: flex;
+  flex-direction: column;
+}
+#view-index > .card > .card-body {
+  flex: 1 1 auto;
+  min-height: 0;            /* let the body shrink so it scrolls, not grow the card */
+}
+
+/* ── Attacks view: same fill-to-bottom behaviour. The scroller here is the
+   inner .table-responsive (sticky-head), so we flex through the card + body
+   and lift its global 70vh cap so the table reaches the bottom of the screen. */
+#view-attacks {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+#view-attacks > .card {
+  flex: 1 1 auto;
+  min-height: 260px;
+  display: flex;
+  flex-direction: column;
+}
+#view-attacks > .card > .card-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#view-attacks .table-responsive.sticky-head {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;         /* override the global 70vh cap so it fills instead */
+}
+
+/* ── Summary Analytics: the stat-card ribbon sticks to the top of the view
+   while the rest of the summary scrolls underneath it. Opaque background so
+   scrolled content never shows through the gaps between cards. */
+.summary-sticky-ribbon {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: var(--bs-secondary-bg, #e9ecef);
+  padding-top: .6rem;
+  padding-bottom: .5rem;
+  box-shadow: 0 6px 8px -6px rgba(0, 0, 0, .25);
+}
 
 /* ── JSON doc display ────────────────────────────────────────────────── */
 .doc-card {
@@ -424,10 +536,14 @@ body.qedit-resizing { cursor: col-resize; user-select: none; }
 }
 .rt-field-master {
   display: flex; align-items: center; gap: 8px;
-  font-weight: 600; font-size: 0.8rem; padding: 3px 2px;
-  margin-bottom: 2px; cursor: pointer;
-  position: sticky; top: 0; background: #2b3035; z-index: 1;
+  font-weight: 700; font-size: 0.8rem; padding: 4px 6px;
+  margin-bottom: 2px; cursor: pointer; border-radius: 4px;
+  /* Group header sits on the WHITE picker modal — light strip, dark text
+     (was #2b3035 bg with inherited dark text = unreadable dark-on-dark). */
+  position: sticky; top: 0; z-index: 1;
+  background: #eef1f4; color: #212529;
 }
+.rt-field-name { color: #212529; }
 .rt-field-row {
   display: flex; align-items: center; gap: 8px;
   font-size: 0.78rem; padding: 2px 2px 2px 18px; cursor: pointer;

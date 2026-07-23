@@ -272,10 +272,10 @@
       <h5 class="fw-bold mb-3"><i class="bi bi-speedometer2 me-2 text-warning"></i>Cluster Dashboard</h5>
 
       <div class="row g-3 mb-3" id="clusterCards">
-        <div class="col-auto"><div class="stat-card text-center"><div class="stat-value" id="c-status">—</div><div class="stat-label">Status</div></div></div>
+        <div class="col-auto"><div class="stat-card text-center health-card" id="statusCard"><div class="stat-value" id="c-status">—</div><div class="stat-label">Status</div></div></div>
         <div class="col-auto"><div class="stat-card text-center"><div class="stat-value" id="c-nodes">—</div><div class="stat-label">Nodes</div></div></div>
         <div class="col-auto"><div class="stat-card text-center"><div class="stat-value" id="c-shards">—</div><div class="stat-label">Active Shards</div></div></div>
-        <div class="col-auto"><div class="stat-card text-center"><div class="stat-value text-danger" id="c-unassigned">—</div><div class="stat-label">Unassigned Shards</div></div></div>
+        <div class="col-auto"><div class="stat-card text-center health-card" id="unassignedCard"><div class="stat-value text-danger" id="c-unassigned">—</div><div class="stat-label">Unassigned Shards</div></div></div>
         <div class="col-auto"><div class="stat-card text-center"><div class="stat-value text-info" id="c-version">—</div><div class="stat-label">ES Version</div></div></div>
       </div>
 
@@ -326,7 +326,7 @@
           </div>
         </div>
         <div class="card-body p-0">
-          <div id="indicesTableWrap" class="table-responsive">
+          <div id="indicesTableWrap" class="table-responsive sticky-head">
             <table class="table table-sm table-hover mb-0">
               <thead class="table-dark">
                 <tr>
@@ -364,8 +364,8 @@
         </div>
       </div>
 
-      <!-- Stat cards row -->
-      <div class="row g-2 mb-3" id="summaryStatCards">
+      <!-- Stat cards row (sticks to the top while scrolling the summary view) -->
+      <div class="row g-2 mb-3 summary-sticky-ribbon" id="summaryStatCards">
         <div class="col-auto"><div class="stat-card"><div class="stat-value" id="s-totalAttacks">—</div><div class="stat-label">Total Attacks</div></div></div>
         <div class="col-auto"><div class="stat-card"><div class="stat-value text-warning" id="s-avgDur">—</div><div class="stat-label">Avg Duration (s)</div></div></div>
         <div class="col-auto"><div class="stat-card"><div class="stat-value text-danger" id="s-maxDur">—</div><div class="stat-label">Max Duration (s)</div></div></div>
@@ -435,7 +435,7 @@
               <i class="bi bi-stopwatch me-2 text-warning"></i>Duration Stats per Attack Category (seconds)
             </div>
             <div class="card-body p-0">
-              <div class="table-responsive">
+              <div class="table-responsive sticky-head">
                 <table class="table table-sm table-hover mb-0">
                   <thead class="table-dark">
                     <tr>
@@ -460,7 +460,7 @@
               <i class="bi bi-clock-history me-2 text-info"></i>Inter-Attack Gap Stats — Time Between Consecutive Attacks (seconds)
             </div>
             <div class="card-body p-0">
-              <div class="table-responsive">
+              <div class="table-responsive sticky-head">
                 <table class="table table-sm table-hover mb-0">
                   <thead class="table-dark">
                     <tr>
@@ -501,7 +501,7 @@
       </div>
       <div class="card shadow-sm">
         <div class="card-body p-0">
-          <div class="table-responsive">
+          <div class="table-responsive sticky-head">
             <table class="table table-sm table-hover mb-0">
               <thead class="table-dark">
                 <tr>
@@ -609,7 +609,7 @@
           </div>
         </div>
         <span id="idxMeta" class="text-secondary small px-3 pt-1 d-block"></span>
-        <div class="card-body p-2" style="max-height:520px;overflow:auto;">
+        <div class="card-body p-2" style="overflow:auto;">
           <pre id="idxResults" style="font-size:0.78rem;white-space:pre-wrap;word-break:break-all;margin:0;">Loading…</pre>
           <div id="idxResultsTable" class="d-none" style="font-size:0.74rem;"></div>
           <pre id="idxResultsCsv" class="d-none" style="font-size:0.74rem;white-space:pre;margin:0;">No rows.</pre>

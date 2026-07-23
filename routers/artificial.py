@@ -27,7 +27,7 @@ import math
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -233,6 +233,62 @@ def _key(ts_ms, values) -> tuple:
     return (ts_ms, tuple(str(v) for v in values))
 
 
+# ── Derived / dependent fields ───────────────────────────────────────────────
+# Fields whose value is COMPUTED from a document's timestamp (a "dependency
+# rule"), e.g. day-of-week and hour-of-day. Rule ids are stable API values;
+# labels drive the dialog. All parts are read in UTC, optionally shifted by a
+# whole-timezone offset (minutes) so a customer whose day/hour are local can
+# match them.
+_DERIVE_RULES = [
+    {"id": "weekday_iso",   "label": "Day of week (Mon=1 … Sun=7)"},
+    {"id": "weekday_sun0",  "label": "Day of week (Sun=0 … Sat=6)"},
+    {"id": "weekday_sun1",  "label": "Day of week (Sun=1 … Sat=7)"},
+    {"id": "weekday_mon0",  "label": "Day of week (Mon=0 … Sun=6)"},
+    {"id": "hour",          "label": "Hour of day (0–23)"},
+    {"id": "minute",        "label": "Minute of hour (0–59)"},
+    {"id": "second",        "label": "Second (0–59)"},
+    {"id": "minute_of_day", "label": "Minute of day (0–1439)"},
+    {"id": "day_of_month",  "label": "Day of month (1–31)"},
+    {"id": "month",         "label": "Month (1–12)"},
+    {"id": "month0",        "label": "Month (0–11)"},
+    {"id": "quarter",       "label": "Quarter (1–4)"},
+    {"id": "year",          "label": "Year"},
+    {"id": "day_of_year",   "label": "Day of year (1–366)"},
+    {"id": "week_of_year",  "label": "ISO week of year (1–53)"},
+    {"id": "epoch_seconds", "label": "Epoch seconds"},
+    {"id": "epoch_millis",  "label": "Epoch milliseconds"},
+]
+_DERIVE_IDS = {r["id"] for r in _DERIVE_RULES}
+
+
+def _derive(rule: str, ts_ms: int, tz_offset_min: int = 0):
+    """Compute a derived value from an epoch-millis timestamp. Date parts are
+    read at UTC + tz_offset_min (so day/hour reflect the chosen timezone)."""
+    if rule == "epoch_millis":
+        return int(ts_ms)
+    if rule == "epoch_seconds":
+        return int(ts_ms) // 1000
+    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+    if tz_offset_min:
+        dt = dt + timedelta(minutes=tz_offset_min)   # tzinfo stays UTC → parts shift
+    if rule == "weekday_iso":   return dt.isoweekday()          # Mon=1 … Sun=7
+    if rule == "weekday_mon0":  return dt.weekday()             # Mon=0 … Sun=6
+    if rule == "weekday_sun0":  return dt.isoweekday() % 7      # Sun=0 … Sat=6
+    if rule == "weekday_sun1":  return dt.isoweekday() % 7 + 1  # Sun=1 … Sat=7
+    if rule == "hour":          return dt.hour
+    if rule == "minute":        return dt.minute
+    if rule == "second":        return dt.second
+    if rule == "minute_of_day": return dt.hour * 60 + dt.minute
+    if rule == "day_of_month":  return dt.day
+    if rule == "month":         return dt.month
+    if rule == "month0":        return dt.month - 1
+    if rule == "quarter":       return (dt.month - 1) // 3 + 1
+    if rule == "year":          return dt.year
+    if rule == "day_of_year":   return dt.timetuple().tm_yday
+    if rule == "week_of_year":  return dt.isocalendar()[1]
+    return None
+
+
 # ── Info endpoint (drives the dialog) ────────────────────────────────────────
 
 @router.get("/info/{index_name}")
@@ -264,6 +320,7 @@ def artificial_info(index_name: str):
             "date_fields": date_fields,
             "main_field_guess": main_guess,
             "fields": [f for f in all_fields if f["name"] not in date_fields],
+            "derive_rules": _DERIVE_RULES,
             "docs_count": docs,
         }
     except Exception as e:
@@ -282,6 +339,12 @@ class FieldValues(BaseModel):
     values: list                       # 1+ values → cartesian product across fields
 
 
+class DerivedField(BaseModel):
+    field: str                         # target field to fill
+    rule: str                          # one of _DERIVE_RULES ids
+    source: str = ""                   # date field to derive from (default: main)
+
+
 class ArtificialRequest(BaseModel):
     index: str
     main_field: str
@@ -293,6 +356,8 @@ class ArtificialRequest(BaseModel):
     span_from: str = ""                # for absolute mode (ISO, UTC)
     span_to: str = ""
     fields: list[FieldValues] = []
+    derived: list[DerivedField] = []   # dependency rules (day-of-week, hour, …)
+    tz_offset_minutes: int = 0         # timezone for derived date parts (0 = UTC)
     confirm_spill: bool = False        # user approved writing beyond the slice
 
 
@@ -394,13 +459,30 @@ def start_artificial(req: ArtificialRequest):
                        "listed",
         }
 
+    other_dates = [(d.field.strip(), float(d.gap_seconds))
+                   for d in req.other_dates
+                   if d.field.strip() and d.field.strip() != main]
+    gap_by_field = {f: g for f, g in other_dates}
+
+    # Derived (dependency) fields: value computed from a source date field's
+    # timestamp. source defaults to the main field; if source is one of the
+    # other date fields, apply that field's gap so the derivation matches the
+    # value actually stored there.
+    derived = []
+    for d in req.derived:
+        f, rule, src = d.field.strip(), d.rule.strip(), d.source.strip()
+        if not f or rule not in _DERIVE_IDS:
+            continue
+        gap_ms = int(gap_by_field.get(src, 0.0) * 1000) if src and src != main else 0
+        derived.append((f, rule, gap_ms))
+
     plan = {
         "main_field": main,
         "field_names": field_names,
         "combos": combos,
-        "other_dates": [(d.field.strip(), float(d.gap_seconds))
-                        for d in req.other_dates
-                        if d.field.strip() and d.field.strip() != main],
+        "other_dates": other_dates,
+        "derived": derived,
+        "tz_offset": int(req.tz_offset_minutes or 0),
         "targets": targets,
         "mappings": _source_mappings(es, index),
     }
@@ -412,10 +494,11 @@ def start_artificial(req: ArtificialRequest):
     threading.Thread(target=_run_artificial_job, args=(job, es, plan),
                      daemon=True, name=f"artificial-{job['id']}").start()
     logger.info("[artificial] job %s: %s docs planned (%s steps × %s combos) "
-                "into %s — main=%r gaps=%s fields=%s",
+                "into %s — main=%r gaps=%s fields=%s derived=%s tz=%s",
                 job["id"], planned, len(steps), len(combos),
                 [idx for idx, _ in targets], main,
-                plan["other_dates"], field_names)
+                plan["other_dates"], field_names,
+                [(f, r) for f, r, _ in derived], plan["tz_offset"])
     return {"job_id": job["id"], "planned": planned,
             "targets": [{"index": idx, "docs": len(ts) * len(combos)}
                         for idx, ts in targets]}
@@ -494,6 +577,10 @@ def _run_artificial_job(job: dict, es, plan: dict) -> None:
                         _dset(doc, f, ts + int(gap * 1000))
                     for f, v in zip(fields, combo):
                         _dset(doc, f, v)
+                    # Dependency rules — computed from the (possibly gap-shifted)
+                    # source timestamp; applied last so they always win.
+                    for f, rule, gap_ms in plan["derived"]:
+                        _dset(doc, f, _derive(rule, ts + gap_ms, plan["tz_offset"]))
                     buf.append(json.dumps({"index": {"_index": idx}}))
                     buf.append(json.dumps(doc, default=str))
                     if len(buf) >= _BULK_LINES:

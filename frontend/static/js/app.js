@@ -294,6 +294,47 @@ function cellValue(v) {
   return String(v);
 }
 
+/* ── Date columns: display human-readable, match on the raw epoch value ─────
+ * CC stores dates as epoch-millis. We keep the RAW value everywhere it's used
+ * for matching/filtering/sending to ES, and only format it for DISPLAY (table
+ * cells, filter labels, CSV view). */
+let mappedDateFields = new Set();   // date-typed fields of the index-detail index
+
+/** Date column names for the active viewer. Index viewer → the index mapping's
+ *  date fields; Query editor → the union of each executed group's date_fields. */
+function activeDateColumns() {
+  if (activeViewer === 'index') return mappedDateFields;
+  if (activeViewer === 'query' && Array.isArray(perIndexQueries)) {
+    const s = new Set();
+    for (const q of perIndexQueries) for (const f of (q.date_fields || [])) s.add(f);
+    return s;
+  }
+  return new Set();
+}
+
+/** Format an epoch-millis (or 10-digit epoch-seconds) value as UTC
+ *  'YYYY-MM-DD HH:mm:ss UTC'. Returns null when v isn't a usable epoch. */
+function fmtEpochDisplay(v) {
+  if (v == null || v === '') return null;
+  const s = String(v).trim();
+  if (!/^\d{10,}$/.test(s)) return null;       // not a bare epoch number
+  let n = Number(s);
+  if (!Number.isFinite(n)) return null;
+  if (n < 1e12) n *= 1000;                       // 10-digit seconds → millis
+  const d = new Date(n);
+  if (isNaN(d.getTime())) return null;
+  const p = (x) => String(x).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} `
+       + `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
+}
+
+/** Display string for a cell: date columns are formatted human-readable,
+ *  everything else uses cellValue. `isDate` is precomputed by the caller. */
+function displayCell(v, isDate) {
+  if (isDate) { const s = fmtEpochDisplay(v); if (s != null) return s; }
+  return cellValue(v);
+}
+
 /** Return a parsed object/array if the value is (or encodes) JSON, else null. */
 function asJsonObject(v) {
   if (v && typeof v === 'object') return v;
@@ -312,9 +353,10 @@ function asJsonObject(v) {
 function buildResultsCsv(hits, cols) {
   if (!hits.length) return '';
   cols = cols || resultColumns(hits);
+  const dateCols = activeDateColumns();     // dates human-readable in the CSV view
   const esc = (s) => /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   const lines = [cols.map(esc).join(',')];
-  for (const h of hits) lines.push(cols.map(c => esc(cellValue(h[c]))).join(','));
+  for (const h of hits) lines.push(cols.map(c => esc(displayCell(h[c], dateCols.has(c)))).join(','));
   return lines.join('\r\n');
 }
 
@@ -332,10 +374,11 @@ function setResultView(mode) {
 function resultsTableHtml(hits) {
   if (!hits.length) return '<div class="text-secondary p-2">No rows to display.</div>';
   const cols = resultColumns(hits);
+  const dateCols = activeDateColumns();
   return `<table class="table table-sm table-striped table-hover mb-0" style="white-space:nowrap;">
       <thead class="table-dark"><tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead>
       <tbody>${hits.map(h =>
-        `<tr>${cols.map(c => `<td>${esc(cellValue(h[c]))}</td>`).join('')}</tr>`).join('')}</tbody>
+        `<tr>${cols.map(c => `<td>${esc(displayCell(h[c], dateCols.has(c)))}</td>`).join('')}</tr>`).join('')}</tbody>
     </table>`;
 }
 
@@ -487,6 +530,7 @@ function buildInteractiveTableHtml() {
   const cols = currentColumns();          // frozen order — deleting a field won't reorder
   const shownCols = cols.filter(c => !hiddenColumns.has(c));   // display-only visibility
   const rows = tableDisplayRows();
+  const dateCols = activeDateColumns();   // date columns → human-readable display
   const editable = (c) => c !== '_id' && c !== '_index';
   const sel = writeMode;   // selection/edit UI only in write mode
 
@@ -504,8 +548,11 @@ function buildInteractiveTableHtml() {
       ? `<input type="checkbox" class="rt-colsel" ${selectedCols.has(c) ? 'checked' : ''}
            onclick="toggleColSel('${jsq(c)}', this)" title="Select column"/>` : '';
     // Active-filter summary shown on its OWN line below the name so it can never hide it.
+    // Date columns are shown human-readable (raw epoch is kept for matching).
+    const filterSummary = filtered
+      ? [...tableFilters[c]].map(v => displayCell(v, dateCols.has(c))).join(', ') : '';
     const filterInfo = filtered
-      ? `<div class="rt-th-filterval" title="Filtered to: ${esc([...tableFilters[c]].join(', '))}">= ${esc([...tableFilters[c]].join(', '))}</div>`
+      ? `<div class="rt-th-filterval" title="Filtered to: ${esc(filterSummary)}">= ${esc(filterSummary)}</div>`
       : '';
     return `<th class="rt-th${filtered ? ' filtered' : ''}">
         <div class="rt-th-row">
@@ -528,7 +575,7 @@ function buildInteractiveTableHtml() {
       ? `<td class="rt-selcol"><input type="checkbox" ${selectedRows.has(key) ? 'checked' : ''}
            onclick="toggleRowSel('${jsq(key)}', this)"/></td>` : '';
     return '<tr>' + rowChk + shownCols.map(c => {
-      if (!editable(c)) return `<td>${esc(cellValue(r[c]))}</td>`;
+      if (!editable(c)) return `<td>${esc(displayCell(r[c], dateCols.has(c)))}</td>`;
 
       // Field absent from this document → red-gray cell with tooltip + "add" control.
       if (!(c in r)) {
@@ -540,7 +587,7 @@ function buildInteractiveTableHtml() {
       }
 
       const isJson = asJsonObject(r[c]) !== null;
-      const val = esc(cellValue(r[c]));
+      const val = esc(displayCell(r[c], dateCols.has(c)));
       let ctrlBtns = '';
       if (isJson) {
         ctrlBtns += `<button onclick="showJsonCell(${ri},'${jsq(c)}', this)" title="View as pretty JSON"><i class="bi bi-braces"></i></button>`;
@@ -892,19 +939,65 @@ async function deleteSelectedRows(el) {
   const doc = el ? el.ownerDocument : document;
   const docs = [...selectedRows].map(k => { const [index, id] = k.split(ROWSEP); return { index, id }; });
   if (!docs.length) return;
-  if (!await uiConfirm(doc, { title: `Delete ${docs.length} document(s) from Elasticsearch?`,
-    message: 'This permanently deletes the selected documents and cannot be undone.',
-    okText: 'Delete', danger: true })) return;
-  const res = await api('/api/docs/bulk-delete', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ scope: 'selected', docs }),
-  });
+
+  // When a column filter is active and more docs match the same filter
+  // server-side than are loaded here (Show limit smaller than the match total),
+  // offer a choice: delete just the selected rows, or every doc matching the
+  // filter (scrolled server-side). Mirrors the download flow.
+  const hasFilters    = Object.keys(tableFilters).some(k => tableFilters[k]?.size);
+  const loaded        = lastResultHits.length;
+  const totalMatching = lastResultTotal || loaded;
+  const moreOnServer  = hasFilters && loaded < totalMatching && !!_currentIndexName;
+
+  let scope = 'selected';
+  if (moreOnServer) {
+    const choice = await uiChoice(doc, {
+      title: 'Delete filtered documents',
+      message: `${docs.length.toLocaleString()} doc(s) are selected here, but `
+             + `${totalMatching.toLocaleString()} docs match the same filter server-side `
+             + `(only ${loaded.toLocaleString()} are loaded). This permanently deletes `
+             + `documents and cannot be undone. What do you want to delete?`,
+      buttons: [
+        { value: 'selected', text: `Selected only (${docs.length.toLocaleString()})`,     cls: 'btn-danger' },
+        { value: 'all',      text: `All matching filter (${totalMatching.toLocaleString()})`, cls: 'btn-danger' },
+        { value: null,       text: 'Cancel', cls: 'btn-outline-secondary' },
+      ],
+    });
+    if (choice == null) return;
+    scope = choice;
+  } else if (!await uiConfirm(doc, { title: `Delete ${docs.length} document(s) from Elasticsearch?`,
+      message: 'This permanently deletes the selected documents and cannot be undone.',
+      okText: 'Delete', danger: true })) {
+    return;
+  }
+
+  let res;
+  if (scope === 'all') {
+    const must = buildFilterMustClauses();
+    const query_body = must.length ? { query: { bool: { must } } } : { query: { match_all: {} } };
+    res = await api('/api/docs/bulk-delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'all', per_index_queries: [{ index: _currentIndexName, query_body }] }),
+    });
+  } else {
+    res = await api('/api/docs/bulk-delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'selected', docs }),
+    });
+  }
   if (!res || res.error) { showToast('Delete failed: ' + (res?.error || 'unknown'), 'bg-danger'); return; }
-  const keyset = new Set(selectedRows);
-  lastResultHits = lastResultHits.filter(r => !keyset.has(rowKey(r)));
-  selectedRows.clear();
-  renderResultViews();
-  showToast(`Deleted ${res.deleted} document(s)`, 'bg-success');
+
+  if (scope === 'all') {
+    selectedRows.clear();
+    showToast(`Deleted ${res.deleted} document(s) matching the filter`, 'bg-success');
+    if (typeof refreshCurrentIndex === 'function') refreshCurrentIndex();   // loaded slice is now stale
+  } else {
+    const keyset = new Set(selectedRows);
+    lastResultHits = lastResultHits.filter(r => !keyset.has(rowKey(r)));
+    selectedRows.clear();
+    renderResultViews();
+    showToast(`Deleted ${res.deleted} document(s)`, 'bg-success');
+  }
 }
 
 /* ── Doc-aware modals (render in the window the user is working in) ────────── */
@@ -1231,12 +1324,16 @@ function toggleTableSort(col) {
   refreshTables();
 }
 
-/** One `<label>` per value for the filter list, checked per the selection. */
-function _filterListHtml(uniques, sel) {
+/** One `<label>` per value for the filter list, checked per the selection.
+ *  Checkbox VALUE is always the raw value (used for matching); the visible
+ *  label is human-readable for date columns. */
+function _filterListHtml(col, uniques, sel) {
   const all = !sel;
+  const isDate = activeDateColumns().has(col);
   return uniques.map(v => {
     const checked = (all || sel.has(v)) ? 'checked' : '';
-    return `<label><input type="checkbox" value="${esc(v)}" ${checked}/><span>${esc(v === '' ? '(empty)' : v)}</span></label>`;
+    const label = v === '' ? '(empty)' : displayCell(v, isDate);
+    return `<label><input type="checkbox" value="${esc(v)}" ${checked}/><span>${esc(label)}</span></label>`;
   }).join('');
 }
 
@@ -1261,7 +1358,7 @@ async function toggleColFilter(ev, col) {
     <div class="rt-filter-loading text-secondary" style="font-size:.68rem;padding:2px 6px;">
       <span class="spinner-border spinner-border-sm" style="width:.7rem;height:.7rem;"></span> loading all values…
     </div>
-    <div class="rt-filter-list">${_filterListHtml(loaded, sel)}</div>
+    <div class="rt-filter-list">${_filterListHtml(col, loaded, sel)}</div>
     <div class="rt-filter-actions">
       <button class="btn btn-sm btn-primary py-0" onclick="applyColFilter('${jsq(col)}', this)">Apply</button>
       <button class="btn btn-sm btn-outline-light py-0" onclick="clearColFilter('${jsq(col)}')">Clear</button>
@@ -1284,9 +1381,11 @@ async function toggleColFilter(ev, col) {
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   const selNow = tableFilters[col];
   const allNow = !selNow;
+  const isDateCol = activeDateColumns().has(col);
   listEl.innerHTML = merged.map(v => {
     const isChecked = allNow ? true : (selNow.has(v) || currentlyChecked.has(v));
-    return `<label><input type="checkbox" value="${esc(v)}" ${isChecked ? 'checked' : ''}/><span>${esc(v === '' ? '(empty)' : v)}</span></label>`;
+    const label = v === '' ? '(empty)' : displayCell(v, isDateCol);
+    return `<label><input type="checkbox" value="${esc(v)}" ${isChecked ? 'checked' : ''}/><span>${esc(label)}</span></label>`;
   }).join('');
   // Re-apply any active search term to the freshly rendered list.
   const search = panel.querySelector('.rt-filter-search');
@@ -1555,6 +1654,21 @@ function generateQueryFromFilters() {
     }
   }
 
+  // This query comes entirely from the table filters — drop any leftover NL
+  // context (free-text prompt, its interpretation, the translated multi-index
+  // plan, suggestions, attack-type picks, time range) so nothing stale lingers
+  // or gets run instead of the filter-derived query.
+  const nlInput = document.getElementById('nlQueryInput');
+  if (nlInput) nlInput.value = '';
+  const infoEl = document.getElementById('nlInterpretation');
+  if (infoEl) { infoEl.classList.add('d-none'); infoEl.innerHTML = ''; }
+  perIndexQueries = [];
+  renderPerIndexQueries([]);           // shows the single textarea (keeps queryBody)
+  fieldSuggestions = [];
+  renderSuggestions([]);
+  if (typeof clearAttackTypeSelection === 'function') clearAttackTypeSelection();
+  if (typeof clearTimeRange === 'function') clearTimeRange();
+
   // Switch to query view
   showView('query');
   showToast(`Query generated with ${activeFilters.length} filter(s). Edit indices and run.`, 'bg-success');
@@ -1665,10 +1779,15 @@ function downloadRowsLocally(rows) {
  *  "Query from Filters"): single value → term, multiple values → terms.
  *  Pass `exceptCol` to omit one column (used for cascading value lists). */
 function buildFilterMustClauses(exceptCol) {
+  const dateCols = activeDateColumns();
   return Object.entries(tableFilters)
     .filter(([col, v]) => col !== exceptCol && v?.size > 0)
     .map(([field, values]) => {
-      const arr = [...values];
+      // Date columns hold raw epoch-millis strings — send them as NUMBERS so
+      // ES matches the date field reliably (string terms can miss on ES 1.x).
+      const coerce = dateCols.has(field)
+        ? (s) => (/^\d{10,}$/.test(String(s)) ? Number(s) : s) : (s) => s;
+      const arr = [...values].map(coerce);
       return arr.length === 1 ? { term: { [field]: arr[0] } } : { terms: { [field]: arr } };
     });
 }
@@ -2135,7 +2254,108 @@ async function loadClusterHealth() {
     setText('c-shards',     data.active_shards      ?? '—');
     setText('c-unassigned', data.unassigned_shards  ?? '—');
     setText('c-version',    data.es_version         ?? '—');
+
+    // ── Explain a non-green status / unassigned shards in a COPYABLE popover ──
+    const notGreen = data.status && data.status !== 'green';
+    _setHealthPopover('statusCard', notGreen, () => _statusReasonText(data));
+    const hasUnassigned = (data.unassigned_shards || 0) > 0 ||
+                          (data.unassigned_detail || []).length > 0;
+    _setHealthPopover('unassignedCard', hasUnassigned, () => _unassignedReasonText(data));
   } catch (_) {}
+}
+
+/** Human-readable "why is the cluster not green" text (copyable). */
+function _statusReasonText(d) {
+  const lines = [`Cluster status: ${(d.status || '?').toUpperCase()}`
+                 + (d.cluster_name ? `  (cluster: ${d.cluster_name})` : '')];
+  const idx = d.unhealthy_indices || [];
+  if (!idx.length) {
+    lines.push('', 'No per-index detail reported by Elasticsearch.');
+  } else {
+    lines.push('', `${idx.length} index(es) not green:`);
+    for (const i of idx) {
+      lines.push(`  • ${i.index} — ${(i.status || '').toUpperCase()}`
+        + ` (unassigned ${i.unassigned_shards ?? 0}, active ${i.active_shards ?? 0}`
+        + `${i.initializing_shards ? `, initializing ${i.initializing_shards}` : ''}`
+        + `${i.relocating_shards ? `, relocating ${i.relocating_shards}` : ''})`);
+    }
+  }
+  const det = d.unassigned_detail || [];
+  if (det.length) {
+    lines.push('', 'Unassigned/relocating shards:');
+    for (const s of det) lines.push(`  • ${s.index} [shard ${s.shard} ${s.type}]`
+      + ` ${s.state}${s.reason ? ` — ${s.reason}` : ''}`);
+  }
+  return lines.join('\n');
+}
+
+/** Everything about the unassigned shards (copyable). */
+function _unassignedReasonText(d) {
+  const det = d.unassigned_detail || [];
+  const lines = [`Unassigned shards: ${d.unassigned_shards ?? det.length}`];
+  if (!det.length) { lines.push('', 'No per-shard detail reported.'); return lines.join('\n'); }
+  lines.push('');
+  for (const s of det) {
+    lines.push(`• ${s.index}`);
+    lines.push(`    shard ${s.shard} · ${s.type} · ${s.state}`);
+    if (s.reason) lines.push(`    reason: ${s.reason}`);
+    if (s.node)   lines.push(`    node: ${s.node}`);
+  }
+  const replicaOnly = det.every(s => s.type === 'replica');
+  if (replicaOnly) {
+    lines.push('', 'All unassigned shards are REPLICAS — common on a single-node',
+                   'cluster (no second node to hold the copy). Data is fully',
+                   'available; the cluster is yellow rather than red.');
+  }
+  return lines.join('\n');
+}
+
+/** Attach (or remove) a hover popover on a stat card. `active` gates it so a
+ *  green cluster shows nothing. `textFn` builds the copyable text lazily. */
+function _setHealthPopover(cardId, active, textFn) {
+  const card = document.getElementById(cardId);
+  if (!card) return;
+  card._healthText = active ? textFn : null;
+  card.classList.toggle('health-card-active', !!active);
+  if (card._healthBound) return;              // handlers attached once
+  card._healthBound = true;
+
+  let pop = null, hideTimer = null;
+  const clear = () => { if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; } };
+  const hide  = () => { clear(); if (pop) { pop.remove(); pop = null; } };
+  const scheduleHide = () => { clear(); hideTimer = setTimeout(hide, 250); };
+
+  const show = () => {
+    if (!card._healthText) return;
+    clear();
+    if (pop) return;
+    const text = card._healthText();
+    pop = document.createElement('div');
+    pop.className = 'health-popover';
+    pop.innerHTML = `<div class="health-popover-head">
+        <span>Details</span>
+        <button class="health-copy" title="Copy to clipboard"><i class="bi bi-clipboard"></i> Copy</button>
+      </div>
+      <pre class="health-popover-body"></pre>`;
+    pop.querySelector('.health-popover-body').textContent = text;
+    pop.querySelector('.health-copy').addEventListener('click', async () => {
+      const btn = pop.querySelector('.health-copy');
+      try { await navigator.clipboard.writeText(text); }
+      catch { const r = document.createRange(); r.selectNodeContents(pop.querySelector('.health-popover-body'));
+              const s = getSelection(); s.removeAllRanges(); s.addRange(r); document.execCommand('copy'); }
+      btn.innerHTML = '<i class="bi bi-check2"></i> Copied';
+      setTimeout(() => { if (btn.isConnected) btn.innerHTML = '<i class="bi bi-clipboard"></i> Copy'; }, 1500);
+    });
+    pop.addEventListener('mouseenter', clear);
+    pop.addEventListener('mouseleave', scheduleHide);
+    document.body.appendChild(pop);
+    const r = card.getBoundingClientRect();
+    pop.style.top  = `${window.scrollY + r.bottom + 6}px`;
+    pop.style.left = `${window.scrollX + r.left}px`;
+  };
+
+  card.addEventListener('mouseenter', show);
+  card.addEventListener('mouseleave', scheduleHide);
 }
 
 async function loadIndices() {
@@ -2499,7 +2719,7 @@ function openArchivesPanel() {
           <button class="btn btn-sm btn-outline-danger" data-act="del-sel" disabled>
             <i class="bi bi-trash me-1"></i>Delete selected</button>
         </div>
-        <div class="arch-files" style="overflow:auto;"></div>
+        <div class="arch-files" style="overflow:auto;max-height:52vh;"></div>
       </div>
       <div class="rt-modal-actions" style="flex:0 0 auto;">
         <button class="btn btn-sm btn-outline-primary" data-act="upload">
@@ -3247,6 +3467,48 @@ function _adUnitOptions(selected) {
     `<option value="${u}"${u === selected ? ' selected' : ''}>${u}</option>`).join('');
 }
 
+/** ISO week number (1–53) for a Date, read in UTC. */
+function _isoWeek(d) {
+  const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const dayNum = (t.getUTCDay() + 6) % 7;             // Mon=0 … Sun=6
+  t.setUTCDate(t.getUTCDate() - dayNum + 3);          // nearest Thursday
+  const firstThu = new Date(Date.UTC(t.getUTCFullYear(), 0, 4));
+  const fdN = (firstThu.getUTCDay() + 6) % 7;
+  firstThu.setUTCDate(firstThu.getUTCDate() - fdN + 3);
+  return 1 + Math.round((t - firstThu) / (7 * 86400000));
+}
+
+/** Preview-only mirror of the backend routers/artificial.py::_derive — computes
+ *  a derived value from an epoch-millis timestamp (UTC + tz offset minutes).
+ *  The authoritative computation is server-side; this drives the live preview. */
+function _derivePreview(rule, tsMs, tzMin) {
+  if (rule === 'epoch_millis')  return tsMs;
+  if (rule === 'epoch_seconds') return Math.floor(tsMs / 1000);
+  const d = new Date(tsMs + (tzMin || 0) * 60000);   // shift, then read UTC parts
+  const isoWd = ((d.getUTCDay() + 6) % 7) + 1;        // Mon=1 … Sun=7
+  switch (rule) {
+    case 'weekday_iso':   return isoWd;
+    case 'weekday_mon0':  return isoWd - 1;
+    case 'weekday_sun0':  return d.getUTCDay();        // Sun=0 … Sat=6
+    case 'weekday_sun1':  return d.getUTCDay() + 1;    // Sun=1 … Sat=7
+    case 'hour':          return d.getUTCHours();
+    case 'minute':        return d.getUTCMinutes();
+    case 'second':        return d.getUTCSeconds();
+    case 'minute_of_day': return d.getUTCHours() * 60 + d.getUTCMinutes();
+    case 'day_of_month':  return d.getUTCDate();
+    case 'month':         return d.getUTCMonth() + 1;
+    case 'month0':        return d.getUTCMonth();
+    case 'quarter':       return Math.floor(d.getUTCMonth() / 3) + 1;
+    case 'year':          return d.getUTCFullYear();
+    case 'day_of_year': {
+      const start = Date.UTC(d.getUTCFullYear(), 0, 0);
+      return Math.floor((Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - start) / 86400000);
+    }
+    case 'week_of_year':  return _isoWeek(d);
+    default:              return '';
+  }
+}
+
 /** Slice-aware synthetic-data wizard: granularity (+round), main/other date
  *  fields with gaps, time span, per-field value lists (cartesian product),
  *  existence-skip on insert, and confirmation before spilling into
@@ -3347,8 +3609,89 @@ async function createArtificialData(indexName) {
                      placeholder="e.g. TCP, UDP"></td>
         </tr>`).join('')}</tbody>
       </table>
-    </div>`;
+    </div>
+
+    <div class="d-flex gap-2 align-items-center mt-2 mb-1 flex-wrap">
+      <span class="small fw-semibold">Dependency rules</span>
+      <button class="btn btn-sm btn-outline-secondary py-0" data-act="add-derived">+ Add rule</button>
+      <span class="small text-secondary">a field COMPUTED from a timestamp (e.g. day = weekday, hourOfDay = hour)</span>
+      <label class="small d-flex gap-1 align-items-center ms-auto" title="Timezone for day/hour derivation (0 = UTC)">
+        TZ offset (min):
+        <input type="number" class="form-control form-control-sm ad-tz" value="0" style="width:5.5rem;"></label>
+    </div>
+    <div class="ad-derived"></div>
+    <div class="ad-derived-preview small text-info mb-1"></div>
+    <datalist id="adDerivedFields">${(info.fields || []).map(f => `<option value="${esc(f.name)}">`).join('')}</datalist>`;
   document.body.appendChild(wrap);
+
+  const deriveRuleOptions = (sel) => (info.derive_rules || []).map(r =>
+    `<option value="${esc(r.id)}"${r.id === sel ? ' selected' : ''}>${esc(r.label)}</option>`).join('');
+
+  const addDerivedRow = (pf = {}) => {
+    const mainNow = wrap.querySelector('.ad-main').value;
+    const srcFields = [...new Set([mainNow, ...dateFields].filter(Boolean))];
+    wrap.querySelector('.ad-derived').insertAdjacentHTML('beforeend',
+      `<div class="ad-drow d-flex gap-2 align-items-center mb-1 flex-wrap">
+        <input type="text" list="adDerivedFields" class="form-control form-control-sm ad-dfield"
+               placeholder="field (e.g. day)" style="width:11rem;" value="${esc(pf.field || '')}">
+        <span class="small text-secondary">=</span>
+        <select class="form-select form-select-sm ad-drule" style="width:15rem;">${deriveRuleOptions(pf.rule)}</select>
+        <span class="small text-secondary">from</span>
+        <select class="form-select form-select-sm ad-dsource" style="width:11rem;">
+          ${srcFields.map(f => `<option value="${esc(f)}"${f === (pf.source || mainNow) ? ' selected' : ''}>${esc(f)}</option>`).join('')}
+        </select>
+        <button class="btn btn-sm btn-outline-danger py-0 ad-drm" title="Remove rule">✕</button>
+      </div>`);
+    updateDerivedPreview();
+  };
+
+  const refreshDerivedSources = () => {
+    const mainNow = wrap.querySelector('.ad-main').value;
+    const srcFields = [...new Set([mainNow, ...dateFields].filter(Boolean))];
+    wrap.querySelectorAll('.ad-drow .ad-dsource').forEach(sel => {
+      const cur = sel.value;
+      const keep = srcFields.includes(cur) ? cur : mainNow;
+      sel.innerHTML = srcFields.map(f =>
+        `<option value="${esc(f)}"${f === keep ? ' selected' : ''}>${esc(f)}</option>`).join('');
+    });
+  };
+
+  const derivedRules = () => [...wrap.querySelectorAll('.ad-drow')].map(r => ({
+    field:  r.querySelector('.ad-dfield').value.trim(),
+    rule:   r.querySelector('.ad-drule').value,
+    source: r.querySelector('.ad-dsource').value,
+  })).filter(d => d.field && d.rule);
+
+  // First planned step's timestamp (ms) — mirrors the backend's rounding so the
+  // preview shows the value the first document will actually get.
+  const firstStepTs = () => {
+    const g = granSeconds();
+    if (!g) return null;
+    const mode = wrap.querySelector('input[name="ad-span"]:checked')?.value;
+    let startS;
+    if (mode === 'slice' && sl) startS = sl.start;
+    else if (mode === 'relative') startS = Date.now() / 1000 - spanSeconds();
+    else { const f = Date.parse(wrap.querySelector('.ad-abs-from').value + ':00Z') / 1000;
+           startS = isNaN(f) ? null : f; }
+    if (startS == null) return null;
+    const t = wrap.querySelector('.ad-round').checked ? Math.ceil(startS / g) * g : startS;
+    return Math.round(t * 1000);
+  };
+
+  const updateDerivedPreview = () => {
+    const rows = [...wrap.querySelectorAll('.ad-drow')];
+    const box = wrap.querySelector('.ad-derived-preview');
+    if (!rows.length) { box.textContent = ''; return; }
+    const tsMs = firstStepTs();
+    if (tsMs == null) { box.textContent = '(set a valid time span to preview)'; return; }
+    const tz = parseInt(wrap.querySelector('.ad-tz').value) || 0;
+    const when = new Date(tsMs).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+    const parts = rows.map(r => {
+      const f = r.querySelector('.ad-dfield').value.trim();
+      return f ? `${f} = ${_derivePreview(r.querySelector('.ad-drule').value, tsMs, tz)}` : null;
+    }).filter(Boolean);
+    box.textContent = parts.length ? `First doc (${when}):  ${parts.join('   ·   ')}` : '';
+  };
 
   const renderOthers = () => {
     const main = wrap.querySelector('.ad-main').value;
@@ -3437,12 +3780,14 @@ async function createArtificialData(indexName) {
     if (c?.contains('ad-rel-n') || c?.contains('ad-rel-u')) selectSpan('relative');
     else if (c?.contains('ad-abs-from') || c?.contains('ad-abs-to')) selectSpan('absolute');
     updateEstimate();
+    updateDerivedPreview();          // dep-rule preview follows the time span
   });
   wrap.addEventListener('change', (e) => {
     const c = e.target.classList;
-    if (c?.contains('ad-main')) renderOthers();
+    if (c?.contains('ad-main')) { renderOthers(); refreshDerivedSources(); }
     if (c?.contains('ad-rel-u')) selectSpan('relative');
     updateEstimate();
+    updateDerivedPreview();
   });
 
   const close = () => {
@@ -3463,6 +3808,8 @@ async function createArtificialData(indexName) {
           <td><input type="text" class="form-control form-control-sm ad-vals" placeholder="e.g. TCP, UDP"></td>
         </tr>`);
     }
+    else if (b.dataset.act === 'add-derived') { addDerivedRow(); }
+    else if (b.classList.contains('ad-drm')) { b.closest('.ad-drow')?.remove(); updateDerivedPreview(); }
     else if (b.dataset.act === 'cancel-job' && b.dataset.job) {
       await api(`/api/exports/jobs/${encodeURIComponent(b.dataset.job)}/cancel`, { method: 'POST' });
     }
@@ -3490,6 +3837,8 @@ async function createArtificialData(indexName) {
       span_from: wrap.querySelector('.ad-abs-from').value,
       span_to: wrap.querySelector('.ad-abs-to').value,
       fields: valueLists(),
+      derived: derivedRules(),
+      tz_offset_minutes: parseInt(wrap.querySelector('.ad-tz').value) || 0,
       confirm_spill: confirmSpill,
     };
     const res = await api('/api/artificial', {
@@ -3584,6 +3933,7 @@ async function showIndexDetail(indexName, preserveFilters = false) {
   // Remember which fields are declared in the mapping so the field-visibility
   // picker can tell mapped vs. unmapped columns apart.
   mappedFieldNames = new Set(Array.isArray(stats.mapping_field_names) ? stats.mapping_field_names : []);
+  mappedDateFields = new Set(Array.isArray(stats.mapping_date_fields) ? stats.mapping_date_fields : []);
   document.getElementById('indexStatCards').innerHTML = `
     <div class="col-auto"><div class="stat-card"><div class="stat-value">${(stats.docs_count ?? 0).toLocaleString()}</div><div class="stat-label">Documents</div></div></div>
     <div class="col-auto"><div class="stat-card"><div class="stat-value text-warning">${(stats.docs_deleted ?? 0).toLocaleString()}</div><div class="stat-label">Deleted Docs</div></div></div>
@@ -4297,9 +4647,15 @@ let fieldSuggestions = [];
 
 const _OP_SYMBOL = { eq: '=', contains: 'contains', neq: '≠', ncontains: 'not-contains' };
 
+function _suggestionValues(s) {
+  return (Array.isArray(s.values) && s.values.length) ? s.values : [s.value];
+}
+
 function _suggestionLabel(s) {
   if (s.kind === 'exists') return `${s.label} ${s.present ? 'exists' : 'missing'}`;
-  return `${s.label} ${_OP_SYMBOL[s.op] || '='} ${s.value}`;
+  const vals = _suggestionValues(s);
+  const shown = vals.length > 1 ? `[${vals.join(', ')}]` : vals[0];
+  return `${s.label} ${_OP_SYMBOL[s.op] || '='} ${shown}`;
 }
 
 /** Inject a clause into a query_body's bool (wrapping non-bool queries). */
@@ -4317,11 +4673,16 @@ function injectClause(qb, clause, where) {
   }
 }
 
-/** Build the ES clause for a chosen candidate field. */
+/** Build the ES clause for a chosen candidate field (multi-value → terms/should). */
 function buildSuggestionClause(s, field) {
   if (s.kind === 'exists') return { exists: { field } };
-  if (s.op === 'contains' || s.op === 'ncontains') return { wildcard: { [field]: `*${s.value}*` } };
-  return { match: { [field]: s.value } };
+  const vals = _suggestionValues(s);
+  if (s.op === 'contains' || s.op === 'ncontains') {
+    return vals.length > 1
+      ? { bool: { should: vals.map(v => ({ wildcard: { [field]: `*${v}*` } })), minimum_should_match: 1 } }
+      : { wildcard: { [field]: `*${vals[0]}*` } };
+  }
+  return vals.length > 1 ? { terms: { [field]: vals } } : { match: { [field]: vals[0] } };
 }
 
 /** Apply a specific candidate field for suggestion i. */
