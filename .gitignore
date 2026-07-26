@@ -31,6 +31,9 @@ logs/
 .DS_Store
 Thumbs.db
 
+# Office lock files (open documents)
+~$*
+
 # Build / deploy artifacts
 *.tar
 *.tar.gz

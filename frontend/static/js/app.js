@@ -3234,6 +3234,220 @@ async function createIndex() {
   showIndexDetail(res.name);
 }
 
+/** "+Add" entry point: empty index by name, or a possible CC index from the
+ *  live catalog filled with artificial data. */
+async function addIndexChoice() {
+  const choice = await uiChoice(document, {
+    title: 'Add index',
+    message: 'Create an empty index by name, or pick one of the CC indices this '
+           + 'machine can create (discovered live from its index templates) and '
+           + 'fill it with artificial data.',
+    buttons: [
+      { value: 'catalog', text: 'CC index + artificial data', cls: 'btn-warning' },
+      { value: 'empty',   text: 'Empty index',                cls: 'btn-primary' },
+      { value: null,      text: 'Cancel',                     cls: 'btn-outline-secondary' },
+    ],
+  });
+  if (choice === 'empty') return createIndex();
+  if (choice === 'catalog') return openPossibleIndexPicker();
+}
+
+/* ── Possible-indices picker (live catalog) ───────────────────────────────── */
+
+function _fmtSliceMin(m) {
+  if (m == null) return '—';
+  if (m % 1440 === 0) { const d = m / 1440; return d === 1 ? '1 day' : `${d} days`; }
+  if (m % 60 === 0)   { const h = m / 60;   return h === 1 ? '1 hour' : `${h} hours`; }
+  return `${m} min`;
+}
+
+/** Doc type actually used in constructed names — the pattern/prefix-derived
+ *  token embedded in example_now (template NAMES are unreliable: product bug). */
+function _possibleDerivedType(f) {
+  return (f.example_now?.match(/-ty-(.+?)-sid-/) || [])[1] || null;
+}
+
+/** Index name for "now" for family f with the chosen doc type. */
+function _possibleName(f, docType) {
+  if (f.slice_minutes && docType) {
+    const prefix = (f.example_now || '').split('-ty-')[0]
+      || f.index_pattern.replace(/-?\*$/, '').replace(/-ty-.*$/, '');
+    const sl = Math.floor(Date.now() / (f.slice_minutes * 60000));
+    return `${prefix}-ty-${docType}-sid-0-sl-${sl}`;
+  }
+  return f.example_now || '';
+}
+
+/** Modal listing every index family the connected machine can create
+ *  (GET /api/indices/possible). Selecting one leads into the artificial-data
+ *  dialog for a name constructed for the current time slice. */
+async function openPossibleIndexPicker() {
+  document.querySelector('.rt-modal-overlay.rt-possible')?.remove();
+  const wrap = document.createElement('div');
+  wrap.className = 'rt-modal-overlay rt-possible';
+  wrap.innerHTML = `<div class="rt-modal" style="min-width:640px;width:900px;max-width:95vw;
+        max-height:92vh;display:flex;flex-direction:column;resize:both;overflow:hidden;">
+      <div class="rt-modal-title" style="flex:0 0 auto;">
+        <i class="bi bi-collection me-1"></i>Possible CC indices — <span class="pp-src">discovering…</span>
+        <button class="btn btn-sm btn-outline-secondary py-0 px-1 ms-2" data-act="refresh"
+                title="Re-run the live discovery (templates + appconfig + live indices)">
+          <i class="bi bi-arrow-clockwise"></i></button></div>
+      <div class="rt-modal-body pp-body" style="flex:1 1 auto;min-height:0;overflow:hidden;
+           display:flex;flex-direction:column;">
+        <div class="text-center text-secondary py-4">
+          <span class="spinner-border spinner-border-sm me-2"></span>
+          Discovering possible indices from the cluster…</div>
+      </div>
+      <div class="rt-modal-actions" style="flex:0 0 auto;">
+        <span class="pp-count small text-secondary me-auto"></span>
+        <button class="btn btn-sm btn-warning" data-act="continue" disabled>
+          <i class="bi bi-magic me-1"></i>Create artificial data</button>
+        <button class="btn btn-sm btn-secondary" data-act="close">Close</button>
+      </div></div>`;
+  document.body.appendChild(wrap);
+  wrap.addEventListener('click', (e) => { if (e.target === wrap) wrap.remove(); });
+  wrap.querySelector('[data-act="close"]').onclick = () => wrap.remove();
+
+  let selected = null;
+
+  const load = async (refresh) => {
+    const body = wrap.querySelector('.pp-body');
+    body.innerHTML = `<div class="text-center text-secondary py-4">
+        <span class="spinner-border spinner-border-sm me-2"></span>
+        Discovering possible indices from the cluster…</div>`;
+    const data = await api('/api/indices/possible' + (refresh ? '?refresh=true' : ''));
+    if (!data || data.error) {
+      body.innerHTML = `<div class="text-danger p-3">Discovery failed: ${esc(data?.error || 'request failed')}</div>`;
+      return;
+    }
+    wrap.querySelector('.pp-src').textContent = data.meta?.source || 'live catalog';
+    wrap.querySelector('.pp-count').textContent =
+      `${(data.families || []).length} possible index families · `
+      + `${(data.families || []).filter(f => f.live_example).length} with live indices`;
+    render(data);
+  };
+
+  const render = (data) => {
+    const fams = data.families || [];
+    const body = wrap.querySelector('.pp-body');
+    body.innerHTML = `
+      <input type="text" class="form-control form-control-sm pp-search mb-2" style="flex:0 0 auto;"
+             placeholder="Filter by name, family, category, doc type…">
+      <div class="pp-list border border-secondary rounded" style="flex:1 1 auto;min-height:0;overflow:auto;">
+        <table class="table table-sm table-hover mb-0" style="font-size:0.78rem;">
+          <thead class="table-dark" style="position:sticky;top:0;z-index:2;"><tr>
+            <th>Index family</th><th>Prefix</th><th class="text-center">Slice</th>
+            <th class="text-center">Doc types</th><th class="text-center">Fields</th>
+            <th class="text-center">Live</th></tr></thead>
+          <tbody></tbody></table></div>
+      <div class="pp-detail border border-secondary rounded mt-2 p-2 d-none"
+           style="flex:0 0 auto;max-height:34vh;overflow:auto;"></div>`;
+
+    const tbody = body.querySelector('tbody');
+    const rowsHtml = [];
+    let lastCat = null;
+    fams.forEach((f, i) => {
+      if (f.category !== lastCat) {
+        lastCat = f.category;
+        rowsHtml.push(`<tr class="pp-cat"><td colspan="6" class="fw-semibold small"
+            style="background:rgba(120,130,150,.15);">${esc(f.category)}</td></tr>`);
+      }
+      const unknown = !f.slice_minutes && /unknown/.test(f.slice_source || '');
+      rowsHtml.push(`<tr class="pp-row" data-i="${i}" style="cursor:pointer;"
+          data-text="${esc((f.display + ' ' + f.family + ' ' + f.category + ' '
+                            + (f.doc_types || []).join(' ')).toLowerCase())}">
+        <td>${f.color ? `<span class="me-1" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${esc(f.color)};"></span>` : ''}${esc(f.display)}</td>
+        <td class="font-monospace text-secondary">${esc(f.family)}</td>
+        <td class="text-center${unknown ? ' text-warning' : ''}" title="${esc(f.slice_source || '')}">
+          ${unknown ? '?' : _fmtSliceMin(f.slice_minutes)}</td>
+        <td class="text-center">${(f.doc_types || []).length || 1}</td>
+        <td class="text-center">${f.field_count}</td>
+        <td class="text-center">${f.live_example ? '<span class="badge bg-success" title="' + esc(f.live_example) + '">live</span>' : '<span class="badge bg-secondary">new</span>'}</td>
+      </tr>`);
+    });
+    tbody.innerHTML = rowsHtml.join('');
+
+    body.querySelector('.pp-search').oninput = (e) => {
+      const q = e.target.value.trim().toLowerCase();
+      let curCat = null;                       // hide category headers with no visible rows
+      const cats = [];
+      tbody.querySelectorAll('tr').forEach(tr => {
+        if (tr.classList.contains('pp-cat')) { curCat = tr; cats.push([tr, 0]); return; }
+        const show = !q || tr.dataset.text.includes(q);
+        tr.classList.toggle('d-none', !show);
+        if (show && cats.length) cats[cats.length - 1][1]++;
+      });
+      cats.forEach(([tr, n]) => tr.classList.toggle('d-none', n === 0));
+    };
+
+    tbody.addEventListener('click', (e) => {
+      const tr = e.target.closest('tr.pp-row');
+      if (!tr) return;
+      tbody.querySelectorAll('tr.pp-row.table-active').forEach(r => r.classList.remove('table-active'));
+      tr.classList.add('table-active');
+      select(fams[+tr.dataset.i]);
+    });
+  };
+
+  const select = (f) => {
+    selected = f;
+    const det = wrap.querySelector('.pp-detail');
+    det.classList.remove('d-none');
+    const derived = _possibleDerivedType(f);
+    const types = (f.doc_types || []).length > 1 ? f.doc_types
+                : [derived || (f.doc_types || [])[0] || f.family];
+    const defType = derived && types.includes(derived) ? derived : types[0];
+    const unknown = !f.slice_minutes && /unknown/.test(f.slice_source || '');
+    det.innerHTML = `
+      <div class="small mb-1"><b>${esc(f.display)}</b>
+        <span class="font-monospace text-secondary">(${esc(f.family)})</span>
+        ${f.description ? ` — ${esc(f.description)}` : ''}</div>
+      <div class="small text-secondary mb-1">
+        Slice: <b>${_fmtSliceMin(f.slice_minutes)}</b> · ${esc(f.slice_source || '')}
+        · ${(f.doc_types || []).length > 1
+            ? `up to ${f.field_count} template fields (each doc type has its own template — the dialog shows the exact list)`
+            : `${f.field_count} template fields`}
+        ${f.live_example ? ` · latest live: <span class="font-monospace">${esc(f.live_example)}</span>` : ' · no live index yet'}</div>
+      ${unknown ? `<div class="small text-warning mb-1"><i class="bi bi-exclamation-triangle me-1"></i>
+          Slice length is UNKNOWN on this machine (no live index, no config record) —
+          the slice window will be guessed from the slice number; double-check the name below.</div>` : ''}
+      ${f.doc_type_note ? `<div class="small text-warning mb-1"><i class="bi bi-exclamation-triangle me-1"></i>${esc(f.doc_type_note)}</div>` : ''}
+      <div class="d-flex gap-2 align-items-center mb-1 flex-wrap">
+        ${types.length > 1 ? `<span class="small fw-semibold">Doc type</span>
+          <select class="form-select form-select-sm pp-type" style="width:16rem;">
+            ${types.map(t => `<option value="${esc(t)}"${t === defType ? ' selected' : ''}>${esc(t)}</option>`).join('')}
+          </select>` : ''}
+        <span class="small fw-semibold">Index name</span>
+        <input type="text" class="form-control form-control-sm pp-name font-monospace"
+               style="min-width:24rem;flex:1 1 auto;" value="${esc(_possibleName(f, defType))}"
+               placeholder="${esc(f.index_pattern)}">
+      </div>
+      <div class="small text-secondary">The name targets the CURRENT time slice; ES applies the
+        family's template (mappings) automatically when the index is first written.</div>`;
+    const nameInp = det.querySelector('.pp-name');
+    const typeSel = det.querySelector('.pp-type');
+    if (typeSel) typeSel.onchange = () => { nameInp.value = _possibleName(f, typeSel.value); sync(); };
+    const btn = wrap.querySelector('[data-act="continue"]');
+    const sync = () => { btn.disabled = !nameInp.value.trim(); };
+    nameInp.oninput = sync;
+    sync();
+  };
+
+  wrap.querySelector('[data-act="continue"]').onclick = () => {
+    const name = wrap.querySelector('.pp-name')?.value.trim();
+    if (!name || !selected) return;
+    wrap.remove();
+    createArtificialData(name);
+  };
+  wrap.querySelector('[data-act="refresh"]').onclick = () => {
+    selected = null;
+    wrap.querySelector('[data-act="continue"]').disabled = true;
+    load(true);
+  };
+
+  await load(false);
+}
+
 /** Delete any index by name (typed confirmation) — used from the detail view
  *  header and from the dashboard table's per-row action. */
 async function deleteIndexByName(name) {
@@ -3467,6 +3681,78 @@ function _adUnitOptions(selected) {
     `<option value="${u}"${u === selected ? ' selected' : ''}>${u}</option>`).join('');
 }
 
+/** Field-aware example values for the "values" placeholder — known CC fields
+ *  get real examples, otherwise the guess follows the name/type. */
+function _adPlaceholder(name, type) {
+  const leaf = (name || 'value').split('.').pop();
+  const l = leaf.toLowerCase();
+  const known = {
+    protocol: 'e.g. TCP, UDP',            risk: 'e.g. High, Medium, Low',
+    status: 'e.g. Started, Terminated',   direction: 'e.g. In, Out',
+    packettype: 'e.g. Regular, Fragmented',
+    countrycode: 'e.g. US, DE',           trapversion: 'e.g. V8',
+  };
+  if (known[l]) return known[l];
+  if (/port$/.test(l)) return 'e.g. 80, 443';
+  if (/ip$|address$|addr$/.test(l)) return 'e.g. 10.1.2.3, 10.1.2.4';
+  if (type === 'boolean') return 'e.g. true, false';
+  if (/^(long|integer|short|byte|double|float|half_float|scaled_float)$/.test(type)) return 'e.g. 100, 2500';
+  return `e.g. ${leaf}1, ${leaf}2`;
+}
+
+/** Random-value kind from name + mapping type — mirror of the backend's
+ *  _rand_kind (routers/artificial.py); keep the two in sync. */
+function _adRandKind(name, type) {
+  const l = (name || '').split('.').pop().toLowerCase();
+  const isNum = /^(long|integer|short|byte|double|float|half_float|scaled_float)$/.test(type);
+  if (/port$/.test(l)) return 'port';
+  if (type === 'boolean') return 'bool';
+  if (/ip$|address$|addr$/.test(l) && !isNum) return 'ip';
+  if (/^(long|integer|short|byte)$/.test(type)) return 'int';
+  if (isNum) return 'float';
+  return 'token';
+}
+
+/** Inner HTML of a field row's value cell for the given mode. */
+function _adValueCellHtml(name, type, mode) {
+  const leaf = (name || 'value').split('.').pop();
+  if (mode === 'random') {
+    const kind = _adRandKind(name, type);
+    if (kind === 'ip')   return `<span class="small text-secondary">random IPv4, e.g. 84.12.5.77</span>`;
+    if (kind === 'bool') return `<span class="small text-secondary">random true / false</span>`;
+    if (kind === 'token') return `<span class="small text-secondary">random from</span>
+        <span class="font-monospace small">${esc(leaf)}1 … ${esc(leaf)}</span><input type="number" min="1"
+        class="form-control form-control-sm ad-rpool" value="10" style="width:4.5rem;"
+        title="Pool size — values are picked from ${esc(leaf)}1 … ${esc(leaf)}N">`;
+    const [lo, hi] = kind === 'port' ? [1, 65535] : [0, 1000];
+    return `<span class="small text-secondary">random ${kind === 'port' ? 'port' : 'number'}</span>
+        <input type="number" class="form-control form-control-sm ad-rmin" value="${lo}" style="width:6rem;" title="Minimum">
+        <span class="small text-secondary">–</span>
+        <input type="number" class="form-control form-control-sm ad-rmax" value="${hi}" style="width:6rem;" title="Maximum">`;
+  }
+  if (mode === 'increment') {
+    return `<input type="text" class="form-control form-control-sm ad-iprefix" placeholder="prefix (opt.)"
+        style="width:7rem;" title="Optional text before the number, e.g. '14-' → 14-1, 14-2, …">
+      <span class="small text-secondary">start</span>
+      <input type="number" class="form-control form-control-sm ad-istart" value="1" style="width:7rem;">
+      <span class="small text-secondary">+</span>
+      <input type="number" class="form-control form-control-sm ad-istep" value="1" style="width:5rem;"
+             title="Step added for every generated document">
+      <span class="small text-secondary">per doc</span>`;
+  }
+  return `<input type="text" class="form-control form-control-sm ad-vals" data-field="${esc(name)}"
+                 placeholder="${esc(_adPlaceholder(name, type))}">`;
+}
+
+function _adModeSelect() {
+  return `<select class="form-select form-select-sm ad-mode" style="width:6.8rem;flex:0 0 auto;"
+      title="values: fixed list (cartesian product) · random: fresh random value per document · increment: counter per document">
+    <option value="list">values</option>
+    <option value="random">random</option>
+    <option value="increment">increment</option>
+  </select>`;
+}
+
 /** ISO week number (1–53) for a Date, read in UTC. */
 function _isoWeek(d) {
   const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
@@ -3544,14 +3830,21 @@ async function createArtificialData(indexName) {
         <button class="btn btn-sm btn-secondary" data-act="close">Close</button>
       </div></div>`;
 
+  const sliceSrc = sl?.source
+    ? (sl.guessed
+        ? ` <span class="badge bg-warning text-dark" title="${esc(sl.source)}">slice length guessed</span>`
+        : ` <span title="${esc(sl.source)}"><i class="bi bi-patch-check text-success"></i></span>`)
+    : '';
   const sliceLine = sl
-    ? `Slice <b>${sl.number}</b> (${esc(sl.portion_label)}): ${fmtIso(sl.start_iso)} → ${fmtIso(sl.end_iso)}`
+    ? `Slice <b>${sl.number}</b> (${esc(sl.portion_label)}${sliceSrc}): ${fmtIso(sl.start_iso)} → ${fmtIso(sl.end_iso)}`
     : 'No "-sl-N" suffix detected — all data goes into this index.';
+  const newNote = info.exists === false
+    ? ` · <span class="text-info">new index — created on first write, template mappings apply</span>`
+    : (info.docs_count != null ? ` · ${info.docs_count.toLocaleString()} docs now` : '');
 
   const body = wrap.querySelector('.ad-body');
   body.innerHTML = `
-    <div class="small text-secondary mb-2">${sliceLine}
-      ${info.docs_count != null ? ` · ${info.docs_count.toLocaleString()} docs now` : ''}</div>
+    <div class="small text-secondary mb-2">${sliceLine}${newNote}</div>
 
     <div class="d-flex gap-2 align-items-center mb-2 flex-wrap">
       <span class="small fw-semibold" style="min-width:110px;">Granularity</span>
@@ -3597,16 +3890,18 @@ async function createArtificialData(indexName) {
       <input type="text" class="form-control form-control-sm ad-field-filter" placeholder="Filter fields…" style="max-width:180px;">
       <button class="btn btn-sm btn-outline-secondary py-0" data-act="add-field"
               title="Add a field that is not in the mapping yet">+ Add field</button>
-      <span class="small text-secondary">comma-separated → one doc per combination per time step; blank = field omitted</span>
+      <span class="small text-secondary">values: comma-separated list → one doc per combination per time step (blank = omitted) · random / increment: filled per document</span>
     </div>
     <div class="ad-fields border border-secondary rounded" style="max-height:38vh;overflow:auto;">
       <table class="table table-sm mb-0" style="font-size:0.78rem;">
-        <thead class="table-dark"><tr><th style="width:34%;">Field</th><th style="width:14%;">Type</th><th>Values</th></tr></thead>
-        <tbody>${(info.fields || []).map(f => `<tr class="ad-frow" data-field="${esc(f.name)}">
+        <thead class="table-dark"><tr><th style="width:28%;">Field</th><th style="width:10%;">Type</th><th>Values</th></tr></thead>
+        <tbody>${(info.fields || []).map(f => `<tr class="ad-frow" data-field="${esc(f.name)}" data-type="${esc(f.type || '')}">
           <td class="font-monospace">${esc(f.name)}</td>
           <td class="text-secondary">${esc(f.type || '')}</td>
-          <td><input type="text" class="form-control form-control-sm ad-vals" data-field="${esc(f.name)}"
-                     placeholder="e.g. TCP, UDP"></td>
+          <td><div class="d-flex gap-1 align-items-center">
+            ${_adModeSelect()}
+            <span class="ad-valcell d-flex gap-1 align-items-center flex-grow-1">${_adValueCellHtml(f.name, f.type || '', 'list')}</span>
+          </div></td>
         </tr>`).join('')}</tbody>
       </table>
     </div>
@@ -3738,11 +4033,32 @@ async function createArtificialData(indexName) {
     return (isNaN(f) || isNaN(t)) ? 0 : Math.max(0, (t - f) / 1000);
   };
 
-  const valueLists = () => [...wrap.querySelectorAll('.ad-vals')]
-    .map(inp => ({ field: inp.dataset.field ||
-                          inp.closest('tr')?.querySelector('.ad-fname')?.value.trim() || '',
-                   values: inp.value.split(',').map(s => s.trim()).filter(Boolean) }))
-    .filter(fv => fv.field && fv.values.length);
+  /** One spec per configured field row: {field, mode:'list', values} |
+   *  {field, mode:'random', kind, min, max, pool} |
+   *  {field, mode:'increment', prefix, start, step}. */
+  const fieldSpecs = () => [...wrap.querySelectorAll('.ad-frow')].map(r => {
+    const field = r.dataset.field || r.querySelector('.ad-fname')?.value.trim() || '';
+    if (!field) return null;
+    const mode = r.querySelector('.ad-mode')?.value || 'list';
+    if (mode === 'list') {
+      const values = (r.querySelector('.ad-vals')?.value || '')
+        .split(',').map(s => s.trim()).filter(Boolean);
+      return values.length ? { field, mode, values } : null;
+    }
+    if (mode === 'random') {
+      const num = (cls) => { const v = parseFloat(r.querySelector(cls)?.value); return isNaN(v) ? null : v; };
+      return { field, mode, kind: _adRandKind(field, r.dataset.type || ''),
+               min: num('.ad-rmin'), max: num('.ad-rmax'),
+               pool: parseInt(r.querySelector('.ad-rpool')?.value) || 10 };
+    }
+    return { field, mode,
+             prefix: r.querySelector('.ad-iprefix')?.value || '',
+             start: parseFloat(r.querySelector('.ad-istart')?.value) || 0,
+             step: parseFloat(r.querySelector('.ad-istep')?.value) || 1 };
+  }).filter(Boolean);
+
+  // Only list-mode fields multiply the doc count (random/increment fill per doc).
+  const valueLists = () => fieldSpecs().filter(s => s.mode === 'list');
 
   const updateEstimate = () => {
     const g = granSeconds();
@@ -3777,6 +4093,24 @@ async function createArtificialData(indexName) {
       });
       return;
     }
+    if (c?.contains('ad-fname')) {
+      // Custom row in random mode: the kind follows the typed name — re-render
+      // the value cell only when the guessed kind actually changes.
+      const tr = e.target.closest('tr.ad-frow');
+      const mode = tr.querySelector('.ad-mode')?.value;
+      const cell = tr.querySelector('.ad-valcell');
+      if (mode === 'random' && cell) {
+        const kind = _adRandKind(e.target.value.trim(), '');
+        if (cell.dataset.kind !== kind) {
+          cell.dataset.kind = kind;
+          cell.innerHTML = _adValueCellHtml(e.target.value.trim(), '', 'random');
+        }
+      }
+      if (mode === 'list') {
+        const inp = cell?.querySelector('.ad-vals');
+        if (inp) inp.placeholder = _adPlaceholder(e.target.value.trim(), '');
+      }
+    }
     if (c?.contains('ad-rel-n') || c?.contains('ad-rel-u')) selectSpan('relative');
     else if (c?.contains('ad-abs-from') || c?.contains('ad-abs-to')) selectSpan('absolute');
     updateEstimate();
@@ -3786,6 +4120,14 @@ async function createArtificialData(indexName) {
     const c = e.target.classList;
     if (c?.contains('ad-main')) { renderOthers(); refreshDerivedSources(); }
     if (c?.contains('ad-rel-u')) selectSpan('relative');
+    if (c?.contains('ad-mode')) {
+      // Swap the value cell to the chosen mode's inputs (kind follows the
+      // field name + type — custom rows resolve from the typed name).
+      const tr = e.target.closest('tr.ad-frow');
+      const name = tr.dataset.field || tr.querySelector('.ad-fname')?.value.trim() || '';
+      tr.querySelector('.ad-valcell').innerHTML =
+        _adValueCellHtml(name, tr.dataset.type || '', e.target.value);
+    }
     updateEstimate();
     updateDerivedPreview();
   });
@@ -3802,10 +4144,13 @@ async function createArtificialData(indexName) {
     else if (b.dataset.act === 'run') submitArtificial(false);
     else if (b.dataset.act === 'add-field') {
       wrap.querySelector('.ad-fields tbody')?.insertAdjacentHTML('beforeend',
-        `<tr class="ad-frow" data-field="">
+        `<tr class="ad-frow" data-field="" data-type="">
           <td><input type="text" class="form-control form-control-sm ad-fname" placeholder="field name"></td>
           <td class="text-secondary">custom</td>
-          <td><input type="text" class="form-control form-control-sm ad-vals" placeholder="e.g. TCP, UDP"></td>
+          <td><div class="d-flex gap-1 align-items-center">
+            ${_adModeSelect()}
+            <span class="ad-valcell d-flex gap-1 align-items-center flex-grow-1">${_adValueCellHtml('', '', 'list')}</span>
+          </div></td>
         </tr>`);
     }
     else if (b.dataset.act === 'add-derived') { addDerivedRow(); }
@@ -3836,7 +4181,7 @@ async function createArtificialData(indexName) {
         : 0,
       span_from: wrap.querySelector('.ad-abs-from').value,
       span_to: wrap.querySelector('.ad-abs-to').value,
-      fields: valueLists(),
+      fields: fieldSpecs(),
       derived: derivedRules(),
       tz_offset_minutes: parseInt(wrap.querySelector('.ad-tz').value) || 0,
       confirm_spill: confirmSpill,
@@ -4046,40 +4391,133 @@ function renderTimelineChart(buckets) {
 // The table shows only GENERIC fields common to every attack type (ID, type,
 // start/end, device IP, status); clicking a row opens the full drill-down
 // across all "dp-" / "attack-data" indices for that attack ID.
+/* ── Attacks view: loaded set + per-column filters ─────────────────────────── */
+let _attacksAll = [];                    // the loaded attacks (pre-filter)
+const ATTACK_COLS = {                    // column key on the attack object → meta
+  attackIpsId: { label:'Attack ID',  kind:'text' },
+  attackType:  { label:'Type',       kind:'text' },
+  startTime:   { label:'Start Time', kind:'date' },
+  endTime:     { label:'End Time',   kind:'date' },
+  deviceIp:    { label:'Device IP',  kind:'text' },
+  status:      { label:'Status',     kind:'text' },
+};
+let attackColFilters = {};               // col → {kind:'text',v} | {kind:'date',op,v}
+let _attacksMatchedTotal = 0;            // total matching server-side (may exceed loaded)
+
+/** Build the /cc/attacks query string from the active column filters, so the
+ *  backend can find matches beyond the loaded page. */
+function _attackQueryString() {
+  const f = attackColFilters, p = new URLSearchParams();
+  const hasF = Object.keys(f).length > 0;
+  p.set('size', hasF ? '1000' : '500');
+  if (f.attackIpsId?.v?.trim()) p.set('attack_id', f.attackIpsId.v.trim());
+  if (f.attackType?.v?.trim())  p.set('type',      f.attackType.v.trim());
+  if (f.deviceIp?.v?.trim())    p.set('device_ip', f.deviceIp.v.trim());
+  if (f.status?.v?.trim())      p.set('status',    f.status.v.trim());
+  for (const [col, key] of [['startTime','start'], ['endTime','end']]) {
+    const df = f[col];
+    if (df?.v) { const ms = new Date(df.v).getTime(); if (!isNaN(ms)) { p.set(key+'_op', df.op); p.set(key+'_val', String(ms)); } }
+  }
+  return p.toString();
+}
+
 async function loadAttacks() {
-  const data  = await api('/api/cc/attacks?size=50');
   const tbody = document.getElementById('attacksTableBody');
+  const meta  = document.getElementById('attacksMeta');
+  if (!tbody) return;
+  if (meta) meta.innerHTML = '<span class="spinner-border spinner-border-sm me-1" style="width:.8rem;height:.8rem;"></span> Loading…';
+
+  const data = await api('/api/cc/attacks?' + _attackQueryString());
   if (data.error) {
     tbody.innerHTML = `<tr><td colspan="6" class="text-center text-danger">${esc(data.error)}</td></tr>`;
+    if (meta) meta.textContent = '';
     return;
   }
-  const attacks = data.attacks || [];
-  if (!attacks.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-secondary py-3">No attacks found</td></tr>';
-    return;
-  }
+  _attacksAll = data.attacks || [];
+  _attacksMatchedTotal = data.matched_total ?? _attacksAll.length;
 
-  // Status filter options come from the data itself (Terminated/Ongoing/…).
-  const sel = document.getElementById('attackStatusFilter');
-  const chosen = sel.value;
-  const statuses = [...new Set(attacks.map(a => a.status).filter(Boolean))].sort();
-  sel.innerHTML = '<option value="">All Statuses</option>' +
-    statuses.map(s => `<option value="${esc(s)}"${s === chosen ? ' selected' : ''}>${esc(s)}</option>`).join('');
-  const shown = chosen ? attacks.filter(a => a.status === chosen) : attacks;
-
-  // Update header badge
-  const hdr = document.querySelector('#view-attacks h5');
+  const hasF = Object.keys(attackColFilters).length > 0;
+  const hdr  = document.querySelector('#view-attacks h5');
   if (hdr) {
     hdr.innerHTML =
       `<i class="bi bi-shield-exclamation me-2 text-danger"></i>Recent Attacks` +
-      ` <span class="badge bg-danger ms-2">${data.total_unique_attacks ?? attacks.length} unique</span>` +
-      ` <span class="badge bg-secondary ms-1">${(data.total_records ?? 0).toLocaleString()} raw records</span>`;
+      ` <span class="badge bg-danger ms-2">${_attacksAll.length.toLocaleString()} shown</span>` +
+      ` <span class="badge bg-secondary ms-1">${(_attacksMatchedTotal || 0).toLocaleString()} ${hasF ? 'match' : 'attacks total'}</span>`;
+  }
+  renderAttacks();
+}
+
+/** Apply the current filters: instant client refine of the loaded set, then a
+ *  server fetch that brings in matches beyond the loaded page. */
+function applyAttackFilters() {
+  renderAttacks();     // instant feedback on what's already loaded
+  loadAttacks();       // authoritative: fetch all matches from the backend
+}
+
+/** Epoch-ms for an attack date value (number, numeric string, or ISO / local
+ *  datetime-local string). Returns null when unparseable. */
+function _attackMs(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') return v < 1e12 ? v * 1000 : v;
+  const s = String(v).trim();
+  if (/^\d{10,}$/.test(s)) { const n = Number(s); return n < 1e12 ? n * 1000 : n; }
+  const t = Date.parse(s);               // ISO (UTC) or datetime-local (local) → absolute ms
+  return isNaN(t) ? null : t;
+}
+
+/** True if an attack passes every active column filter. */
+function _attackMatches(a) {
+  for (const [col, f] of Object.entries(attackColFilters)) {
+    if (!f) continue;
+    if (f.kind === 'text') {
+      const needle = (f.v || '').trim().toLowerCase();
+      if (needle && !String(a[col] ?? '').toLowerCase().includes(needle)) return false;
+    } else {                              // date operators
+      if (!f.v) continue;
+      const am = _attackMs(a[col]);
+      const im = _attackMs(f.v);
+      if (am == null || im == null) { if (im != null) return false; continue; }
+      switch (f.op) {
+        case 'gt':  if (!(am >  im)) return false; break;
+        case 'gte': if (!(am >= im)) return false; break;
+        case 'lt':  if (!(am <  im)) return false; break;
+        case 'lte': if (!(am <= im)) return false; break;
+        case 'eq':  if (Math.floor(am/60000) !== Math.floor(im/60000)) return false; break;  // same minute
+      }
+    }
+  }
+  return true;
+}
+
+/** Render the attacks table from _attacksAll through the active filters. */
+function renderAttacks() {
+  const tbody = document.getElementById('attacksTableBody');
+  if (!tbody) return;
+  const shown = _attacksAll.filter(_attackMatches);
+
+  // reflect active state on each column funnel
+  Object.keys(ATTACK_COLS).forEach(col => {
+    document.getElementById('atkf-' + col)?.classList.toggle('active', !!attackColFilters[col]);
+  });
+
+  // meta line: filtered count (+ server-side match total when it exceeds the page) + clear-all
+  const nF = Object.keys(attackColFilters).length;
+  const meta = document.getElementById('attacksMeta');
+  if (meta) {
+    let m = `Showing <b>${shown.length.toLocaleString()}</b> of ${_attacksAll.length.toLocaleString()} loaded`;
+    if (nF) {
+      if (_attacksMatchedTotal > _attacksAll.length)
+        m += ` · <b>${_attacksMatchedTotal.toLocaleString()}</b> match server-side (first ${_attacksAll.length.toLocaleString()} loaded)`;
+      else
+        m += ` · ${_attacksMatchedTotal.toLocaleString()} match`;
+      m += ` · <a href="#" onclick="clearAllAttackFilters();return false;">Clear ${nF} filter${nF>1?'s':''}</a>`;
+    }
+    meta.innerHTML = m;
   }
 
-  if (!shown.length) {
-    tbody.innerHTML = `<tr><td colspan="6" class="text-center text-secondary py-3">No attacks with status "${esc(chosen)}"</td></tr>`;
-    return;
-  }
+  if (!_attacksAll.length) { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-secondary py-3">No attacks found</td></tr>'; return; }
+  if (!shown.length)       { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-secondary py-3">No attacks match the filters</td></tr>'; return; }
+
   tbody.innerHTML = shown.map(a => {
     const typeBadge = a.attackType
       ? `<span class="badge bg-info text-dark">${esc(a.attackType)}</span>`
@@ -4100,6 +4538,75 @@ async function loadAttacks() {
     </tr>`;
   }).join('');
 }
+
+/** Open (or toggle) the filter popover for an attacks-table column. */
+function toggleAttackFilter(col, btn) {
+  const open = document.querySelector('.atk-filter-pop');
+  const same = open && open.dataset.col === col;
+  open?.remove();
+  if (same) return;                       // second click on same funnel → close
+
+  const meta = ATTACK_COLS[col]; if (!meta) return;
+  const cur  = attackColFilters[col] || {};
+  const pop  = document.createElement('div');
+  pop.className = 'atk-filter-pop';
+  pop.dataset.col = col;
+
+  if (meta.kind === 'text') {
+    pop.innerHTML =
+      `<div class="afp-title">Filter ${esc(meta.label)}</div>
+       <input class="form-control form-control-sm afp-text" placeholder="contains…" value="${esc(cur.v || '')}">
+       <div class="afp-actions">
+         <button class="btn btn-sm btn-primary" data-a="apply">Apply</button>
+         <button class="btn btn-sm btn-outline-secondary" data-a="clear">Clear</button>
+       </div>`;
+  } else {
+    const op = cur.op || 'gte';
+    const ops = [['gt','after ( > )'],['gte','after or equal ( ≥ )'],['lt','before ( < )'],['lte','before or equal ( ≤ )'],['eq','exact ( = the minute )']];
+    pop.innerHTML =
+      `<div class="afp-title">Filter ${esc(meta.label)}</div>
+       <select class="form-select form-select-sm afp-op">${ops.map(o=>`<option value="${o[0]}"${o[0]===op?' selected':''}>${o[1]}</option>`).join('')}</select>
+       <input type="datetime-local" step="1" class="form-control form-control-sm afp-date mt-1" value="${esc(cur.v || '')}">
+       <div class="afp-hint">Times match your local timezone (as shown in the table).</div>
+       <div class="afp-actions">
+         <button class="btn btn-sm btn-primary" data-a="apply">Apply</button>
+         <button class="btn btn-sm btn-outline-secondary" data-a="clear">Clear</button>
+       </div>`;
+  }
+  document.body.appendChild(pop);
+  const r = btn.getBoundingClientRect();
+  pop.style.top  = (window.scrollY + r.bottom + 5) + 'px';
+  pop.style.left = (window.scrollX + Math.max(8, Math.min(r.left, window.innerWidth - 258))) + 'px';
+
+  pop.addEventListener('click', (e) => {
+    const act = e.target.closest('button')?.dataset.a;
+    if (!act) return;
+    if (act === 'clear') {
+      delete attackColFilters[col];
+    } else if (meta.kind === 'text') {
+      const v = pop.querySelector('.afp-text').value;
+      if (v.trim()) attackColFilters[col] = { kind:'text', v }; else delete attackColFilters[col];
+    } else {
+      const v = pop.querySelector('.afp-date').value;
+      const op = pop.querySelector('.afp-op').value;
+      if (v) attackColFilters[col] = { kind:'date', op, v }; else delete attackColFilters[col];
+    }
+    pop.remove();
+    applyAttackFilters();
+  });
+  pop.querySelector('.afp-text')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') pop.querySelector('[data-a="apply"]').click();
+  });
+  setTimeout(() => pop.querySelector('input')?.focus(), 0);
+}
+
+function clearAllAttackFilters() { attackColFilters = {}; applyAttackFilters(); }
+
+// Close an open attacks filter popover when clicking elsewhere.
+document.addEventListener('click', (e) => {
+  if (e.target.closest('.atk-filter-pop') || e.target.closest('.atk-funnel')) return;
+  document.querySelector('.atk-filter-pop')?.remove();
+});
 
 /** Drill-down: every document about one attack ID, searched across all
  *  indices whose names contain "dp-" or "attack-data", grouped per index. */
@@ -5089,4 +5596,164 @@ function esc(s) {
   onDisconnected();
   showView('connection');
 })();
+
+/* ── On-line help ────────────────────────────────────────────────────────────
+   Every screen carries a "?" Help button that opens a modal with comprehensive,
+   context-specific guidance. Content is authored HTML kept in HELP_CONTENT,
+   keyed by the same view names used by showView(). */
+const HELP_CONTENT = {
+  connection: {
+    title: 'Connection', icon: 'bi-hdd-network',
+    body: `
+      <p>Connect the analyzer to a CyberController machine's Elasticsearch / OpenSearch cluster so every other screen has data to work with.</p>
+      <h6>Key fields</h6>
+      <ul>
+        <li><b>Host / Port / Scheme</b> — the ES endpoint (default port <code>9200</code>, scheme <code>http</code> or <code>https</code>).</li>
+        <li><b>User / Password</b> — optional HTTP basic auth.</li>
+        <li><b>Verify certs</b> — TLS certificate verification, off by default for self-signed CC clusters.</li>
+        <li><b>SSH fallback</b> — if the ES port can't be reached directly, the app can SSH in to open the port on the box's firewall, or open an SSH tunnel and forward ES traffic through it.</li>
+      </ul>
+      <h6>How to connect</h6>
+      <ol>
+        <li>Fill in the host and (if needed) credentials, or pick a <b>Saved Profile</b>.</li>
+        <li>Click <b>Connect</b> — the app pings ES and stores the working connection.</li>
+        <li>The top bar shows a green pill with the machine, cluster name and ES version once connected.</li>
+      </ol>
+      <p class="help-tip">The analyzer talks to ES over raw HTTP (not elasticsearch-py), so it works with the older / proxied ES versions common on CC deployments.</p>`,
+  },
+  dashboard: {
+    title: 'Cluster Dashboard', icon: 'bi-speedometer2',
+    body: `
+      <p>A live overview of the connected cluster's health plus a browsable catalog of all CyberController indices.</p>
+      <h6>Cluster cards</h6>
+      <ul>
+        <li><b>Status</b> — green / yellow / red. When it isn't green, <b>hover the card</b> for the exact reason (non-green indices) in a copyable tooltip.</li>
+        <li><b>Nodes</b>, <b>Active Shards</b>, <b>ES Version</b>.</li>
+        <li><b>Unassigned Shards</b> — hover for per-shard detail (index, shard, primary/replica, allocation reason), copyable.</li>
+      </ul>
+      <h6>CC Indices Overview</h6>
+      <ul>
+        <li><b>Search</b> filters the index list as you type.</li>
+        <li>Each index is annotated with its CC <b>category</b> (DP Attacks, EAAF, ADC, …) so you know what it holds.</li>
+        <li><b>Checkboxes</b> select indices → <b>Export selected</b> (one CSV per index) or <b>Delete selected</b>.</li>
+        <li><b>Archives</b> — server-side compressed exports: create, download, and restore/upload index archives.</li>
+        <li><b>Add</b> creates a new index — either an <i>empty</i> one by name, or a <i>possible CC index</i> picked from the live catalog (every family this machine's index templates can create, with real slice sizes and field lists) and filled via the artificial-data dialog.</li>
+        <li><b>Click any row</b> to open its Index Detail screen.</li>
+      </ul>
+      <p class="help-tip">Auto-refresh (top-right) keeps the health and counts current without manual refreshes.</p>`,
+  },
+  summary: {
+    title: 'Summary Analytics', icon: 'bi-bar-chart-line',
+    body: `
+      <p>Aggregate attack analytics across the whole cluster — the same figures a CC techSupport bundle reports.</p>
+      <h6>Stat ribbon (sticks to the top while scrolling)</h6>
+      <ul>
+        <li>Total Attacks · Avg / Max Duration · Peak Attack Bandwidth · Avg Gap Between Attacks · Avg Traffic.</li>
+      </ul>
+      <h6>Charts &amp; tables</h6>
+      <ul>
+        <li><b>Attacks Over Time</b> — switch Day / Week / Month granularity.</li>
+        <li><b>Attack Categories</b> doughnut, <b>By Risk</b>, <b>By Status</b>, <b>Traffic Over Time</b>.</li>
+        <li><b>Duration Stats per Attack Category</b> and <b>Inter-Attack Gap Stats</b> tables.</li>
+      </ul>
+      <h6>Export</h6>
+      <ul>
+        <li><b>Download JSON</b> saves the full analytics payload. The standalone script <code>scripts/generate_cc_summary.py</code> produces the byte-identical JSON on a CC host (localhost:9200) for techSupport automation.</li>
+      </ul>
+      <p class="help-tip">Widgets render independently — if one metric is missing in the data the rest still display.</p>`,
+  },
+  attacks: {
+    title: 'Attacks View', icon: 'bi-shield-exclamation',
+    body: `
+      <p>A flat list of recent attacks using only the fields common to every attack type, so mixed attack sources line up in one table.</p>
+      <h6>Columns</h6>
+      <ul>
+        <li>Attack ID · Type · Start Time · End Time · Device IP · Status (all times human-readable).</li>
+      </ul>
+      <h6>Controls</h6>
+      <ul>
+        <li><b>Status filter</b> — narrows to a single status (values are discovered from the loaded attacks).</li>
+        <li><b>Refresh</b> and <b>Auto-refresh</b>.</li>
+      </ul>
+      <h6>Drill-down</h6>
+      <ul>
+        <li><b>Click any row</b> to open a details modal that searches every <code>*dp-*</code> and <code>*attack-data*</code> index for that attack ID (matching both the dash and underscore ID forms) and groups the matching documents per index — the full picture for that one attack.</li>
+      </ul>`,
+  },
+  query: {
+    title: 'Query Editor', icon: 'bi-terminal',
+    body: `
+      <p>Build and run Elasticsearch queries — either by typing plain English or by editing the raw JSON.</p>
+      <h6>Natural-language box</h6>
+      <ul>
+        <li>Type criteria in plain English, then <b>Translate</b>. Field names, IPs, attack IDs and quoted values are recognised automatically.</li>
+        <li><b>OR within a field, AND across fields:</b> <i>"sourceIp is A or B or C and policyName is pol5"</i> → <code>(sourceIp IN [A,B,C]) AND (policyName = pol5)</code>. OR-ed values collapse into one <code>terms</code> clause.</li>
+        <li><b>Types</b> picker filters by attack category; <b>Time</b> sets a start/end range (each with lower and upper bounds); <b>Sort</b> chooses the order.</li>
+        <li><b>Interpreted as…</b> shows exactly how your text was understood; <b>Field suggestions</b> appear when a reference is ambiguous, so you can pick the right field.</li>
+      </ul>
+      <h6>Running</h6>
+      <ul>
+        <li>Edit the <b>JSON body</b> directly and set the <b>index pattern</b> (comma-separated, wildcards allowed). <b>Run</b> a single query or <b>Run All</b> across a multi-index plan.</li>
+      </ul>
+      <h6>Working with results</h6>
+      <ul>
+        <li>View as <b>JSON / Table / CSV</b>; per-column <b>funnel filters</b>; <b>Query from Filters</b> turns the active filters into a fresh ES query; <b>Aggregate</b> groups by field(s).</li>
+        <li><b>Export</b> the shown rows or all matching docs (server-side scroll). <b>Write mode</b> enables editing / deleting documents.</li>
+      </ul>`,
+  },
+  index: {
+    title: 'Index Detail', icon: 'bi-table',
+    body: `
+      <p>Inspect and manage a single index — its mapping, a document sample, and bulk operations.</p>
+      <h6>Stat cards</h6>
+      <ul>
+        <li>Documents · Deleted Docs · Store Size · Mapped Fields · Showing / Total.</li>
+      </ul>
+      <h6>Sample documents</h6>
+      <ul>
+        <li>View as <b>JSON / Table / CSV</b>; set the <b>Show</b> size; the table has a sticky header and fills the screen.</li>
+        <li><b>Funnel filters</b> per column, sortable headers, <b>Fields</b> to show/hide columns. Date fields display human-readable while still matching on the stored value.</li>
+        <li><b>Query from Filters</b>, <b>Aggregate</b>, and <b>Export</b> (shown rows or all matching docs).</li>
+      </ul>
+      <h6>Index actions (top-right)</h6>
+      <ul>
+        <li><b>Artificial data</b> — generate synthetic documents into the index; slice-aware, skips already-existing data, and supports <b>dependency rules</b> (derive fields such as day / hourOfDay from a timestamp). Each field can take a fixed <b>values</b> list (cartesian product), a <b>random</b> value per document (type-aware: IP addresses, ports, numeric ranges, true/false, or name-based tokens), or an <b>increment</b> counter per document (optional prefix, start, step — e.g. an attack ID increasing by one).</li>
+        <li><b>Import CSV</b> — load documents from a CSV (same shape as export).</li>
+        <li><b>Duplicate</b> — copy the index to a new name, optionally shifting all date fields.</li>
+        <li><b>Delete Index</b> — remove the index permanently.</li>
+      </ul>
+      <h6>Write mode</h6>
+      <ul>
+        <li>Enables in-place cell edits, field deletes, and document deletes. When a filter matches more docs than are loaded, delete offers <b>Selected only</b> vs <b>All matching filter</b>.</li>
+      </ul>`,
+  },
+};
+
+/** Open the online-help modal for a screen (keys match showView names). */
+function showHelp(screen) {
+  const c = HELP_CONTENT[screen];
+  if (!c) return;
+  document.querySelector('.help-overlay')?.remove();
+  const wrap = document.createElement('div');
+  wrap.className = 'help-overlay';
+  wrap.innerHTML =
+    '<div class="help-modal" role="dialog" aria-modal="true">' +
+      '<div class="help-head">' +
+        '<div class="help-title"><i class="bi ' + c.icon + ' me-2"></i>' + esc(c.title) + ' — Help</div>' +
+        '<button class="btn-close btn-close-white help-close" aria-label="Close" title="Close (Esc)"></button>' +
+      '</div>' +
+      '<div class="help-body">' + c.body + '</div>' +
+      '<div class="help-foot">' +
+        '<span class="text-secondary small">Press <kbd>Esc</kbd> or click outside to close · every screen has its own <i class="bi bi-question-circle"></i> Help.</span>' +
+        '<button class="btn btn-sm btn-primary help-close">Got it</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(wrap);
+  const close = () => { wrap.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  wrap.addEventListener('click', (e) => {
+    if (e.target === wrap || e.target.closest('.help-close')) close();
+  });
+}
 

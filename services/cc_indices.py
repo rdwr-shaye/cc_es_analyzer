@@ -5,6 +5,14 @@ Index naming pattern: {prefix}-ty-{type}-sid-{serverId}-sl-{sliceId}
 
 CC_INDEX_CATALOG = {
     # ── DP Attack indices ──────────────────────────────────────────────────
+    "dp-attack-raw": {
+        "display": "DP Attack Raw (per category)",
+        "category": "DP Attacks",
+        "color": "#e74c3c",
+        "description": "Raw DefensePro attack documents — one index family per attack category (ACL, Anomalies, DNS Flood, Behavioral DoS, …); the source the Attacks View joins from.",
+        "key_fields": ["attackIpsId", "startTime", "endTime", "status", "category",
+                       "deviceIp", "sourceAddress", "destAddress", "name", "risk"],
+    },
     "attack-data": {
         "display": "DP Attacks (Raw)",
         "category": "DP Attacks",

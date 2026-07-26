@@ -38,9 +38,12 @@ from routers.exports import _new_job, _finish_job, _JobCancelled, _err_text
 router = APIRouter(prefix="/api/artificial", tags=["artificial"])
 logger = logging.getLogger(__name__)
 
-_SL_RE = re.compile(r"^(?P<prefix>.+-sl-)(?P<num>\d+)$")
+# "-pt-<n>" partition suffixes (index hit its max size) are tolerated and
+# stripped: neighbour slices are always written without a partition.
+_SL_RE = re.compile(r"^(?P<prefix>.+-sl-)(?P<num>\d+)(?:-pt-\d+)?$")
 
-# Slice portions (label, seconds) — mirrors scripts/time_slice.sh.
+# Slice portions (label, seconds) — mirrors scripts/time_slice.sh. Only used
+# as the LAST-RESORT fallback when the live catalog doesn't know the family.
 _PORTIONS = [
     ("20 minutes", 1200),
     ("hour", 3600),
@@ -68,7 +71,9 @@ _BULK_LINES = 2000                     # 1000 docs per bulk request
 
 def _guess_portion(slice_no: int, now_s: float) -> tuple[str, int]:
     """Pick the portion whose current slice number is relatively closest to
-    *slice_no* (the time_slice.sh heuristic). Returns (label, seconds)."""
+    *slice_no* (the time_slice.sh heuristic). Returns (label, seconds).
+    FALLBACK ONLY — the live catalog (services/index_discovery.py) is the
+    authoritative slice-size source; this runs when it doesn't know the family."""
     best = None
     best_score = None
     for label, secs in _PORTIONS:
@@ -81,20 +86,52 @@ def _guess_portion(slice_no: int, now_s: float) -> tuple[str, int]:
     return best or ("week", 604_800)
 
 
-def _parse_slice(index_name: str, now_s: float | None = None) -> dict | None:
-    """Return slice info for a "-sl-<N>" index name, or None."""
+def _portion_label(minutes: int) -> str:
+    """Human label for a slice length in minutes ("5 minutes", "hour", "14 days")."""
+    if minutes % 1440 == 0:
+        d = minutes // 1440
+        return "day" if d == 1 else f"{d} days"
+    if minutes % 60 == 0:
+        h = minutes // 60
+        return "hour" if h == 1 else f"{h} hours"
+    return f"{minutes} minutes"
+
+
+def _parse_slice(index_name: str, now_s: float | None = None, es=None) -> dict | None:
+    """Return slice info for a "-sl-<N>" index name, or None.
+
+    The slice LENGTH comes from the live possible-indices catalog (index
+    templates + appconfig + live indices) when *es* is given and the family is
+    known; only unknown families fall back to the old relative-closeness guess,
+    and the result says so (guessed=True + source) instead of hiding it.
+    """
     m = _SL_RE.match(index_name)
     if not m:
         return None
     now_s = now_s if now_s is not None else time.time()
     num = int(m.group("num"))
-    label, secs = _guess_portion(num, now_s)
+
+    secs, source, guessed = None, None, False
+    if es is not None:
+        from services.index_discovery import slice_for_index
+        minutes, src = slice_for_index(es, index_name)
+        if minutes:
+            secs, source = minutes * 60, src
+    if secs is None:
+        label, secs = _guess_portion(num, now_s)
+        source = "guessed from the slice number — family not in the live catalog"
+        guessed = True
+    else:
+        label = _portion_label(secs // 60)
+
     start = num * secs
     return {
         "number": num,
         "prefix": m.group("prefix"),          # includes the trailing "-sl-"
         "portion_label": label,
         "portion_seconds": secs,
+        "source": source,
+        "guessed": guessed,
         "start": start,
         "end": start + secs,
         "start_iso": datetime.fromtimestamp(start, tz=timezone.utc).isoformat(),
@@ -294,28 +331,43 @@ def _derive(rule: str, ts_ms: int, tz_offset_min: int = 0):
 @router.get("/info/{index_name}")
 def artificial_info(index_name: str):
     """Everything the "create artificial data" dialog needs: slice window,
-    default granularity, date fields, and the value-fields list with types."""
+    default granularity, date fields, and the value-fields list with types.
+
+    Works for indices that DON'T exist yet, as long as their family is in the
+    live possible-indices catalog: the field list then comes from the family's
+    index template (which ES applies automatically on first write)."""
     try:
         es = get_client()
         from routers.query import _collect_date_fields, _pick_date_field
-        if not _index_exists(es, index_name):
-            return {"error": f"index {index_name!r} not found"}
-        # A fresh index can have an EMPTY mapping (dynamic) — still usable:
-        # the dialog then offers free-text field names.
-        all_fields = _field_types(es, index_name)
-        date_fields = [n for n, _s in _collect_date_fields(es, index_name)]
+        exists = _index_exists(es, index_name)
+        if exists:
+            # A fresh index can have an EMPTY mapping (dynamic) — still usable:
+            # the dialog then offers free-text field names.
+            all_fields = _field_types(es, index_name)
+            date_fields = [n for n, _s in _collect_date_fields(es, index_name)]
+        else:
+            from services.index_discovery import catalog_entry_for_index
+            entry = catalog_entry_for_index(es, index_name)
+            if entry is None:
+                return {"error": f"index {index_name!r} not found and no CC "
+                                 f"index template matches its family"}
+            all_fields = [{"name": n, "type": t}
+                          for n, t in sorted(entry.get("fields", {}).items())]
+            date_fields = [f["name"] for f in all_fields if f["type"] == "date"]
         main_guess = _pick_date_field(date_fields, "start") if date_fields else None
         gran = _guess_granularity(index_name)
         docs = None
-        try:
-            r = es.search(index_name, {"size": 0, "query": {"match_all": {}}})
-            t = r.get("hits", {}).get("total")
-            docs = t.get("value") if isinstance(t, dict) else t
-        except Exception:
-            pass
+        if exists:
+            try:
+                r = es.search(index_name, {"size": 0, "query": {"match_all": {}}})
+                t = r.get("hits", {}).get("total")
+                docs = t.get("value") if isinstance(t, dict) else t
+            except Exception:
+                pass
         return {
             "index": index_name,
-            "slice": _parse_slice(index_name),
+            "exists": exists,
+            "slice": _parse_slice(index_name, es=es),
             "granularity_seconds": gran,
             "date_fields": date_fields,
             "main_field_guess": main_guess,
@@ -327,6 +379,61 @@ def artificial_info(index_name: str):
         return {"error": str(e)}
 
 
+# ── Random / incremental field values ────────────────────────────────────────
+
+_INT_TYPES   = {"long", "integer", "short", "byte"}
+_FLOAT_TYPES = {"double", "float", "half_float", "scaled_float"}
+
+
+def _rand_kind(field: str, es_type: str) -> str:
+    """Guess the random-value kind from the field name and mapping type.
+    Mirrors frontend _adRandKind — keep the two in sync."""
+    leaf = field.split(".")[-1].lower()
+    if re.search(r"port$", leaf):
+        return "port"
+    if es_type == "boolean":
+        return "bool"
+    if re.search(r"ip$|address$|addr$", leaf) and es_type not in _INT_TYPES | _FLOAT_TYPES:
+        return "ip"
+    if es_type in _INT_TYPES:
+        return "int"
+    if es_type in _FLOAT_TYPES:
+        return "float"
+    return "token"
+
+
+def _special_value(sp: dict, n: int, rng):
+    """Value for a random/increment field spec on the n-th planned document.
+    Values land as strings when the mapping type is string-ish (CC stores e.g.
+    ports as keyword), as numbers/booleans otherwise."""
+    numeric_target = sp["es_type"] in _INT_TYPES | _FLOAT_TYPES
+    if sp["mode"] == "increment":
+        v = sp["start"] + sp["step"] * n
+        v = int(v) if float(v).is_integer() else round(v, 6)
+        if sp["prefix"] or not numeric_target:
+            return f"{sp['prefix']}{v}"
+        return v
+    k = sp["kind"]
+    if k == "ip":
+        return (f"{rng.randint(1, 254)}.{rng.randint(0, 254)}."
+                f"{rng.randint(0, 254)}.{rng.randint(1, 254)}")
+    if k == "bool":
+        return rng.random() < 0.5
+    if k == "token":
+        leaf = sp["field"].split(".")[-1]
+        return f"{leaf}{rng.randint(1, max(1, int(sp['pool'] or 10)))}"
+    lo_def, hi_def = (1, 65535) if k == "port" else (0, 1000)
+    lo = sp["min"] if sp["min"] is not None else lo_def
+    hi = sp["max"] if sp["max"] is not None else hi_def
+    if hi < lo:
+        lo, hi = hi, lo
+    if k == "float":
+        v = round(rng.uniform(lo, hi), 2)
+    else:
+        v = rng.randint(int(lo), int(hi))
+    return v if numeric_target else str(v)
+
+
 # ── Generation ───────────────────────────────────────────────────────────────
 
 class DateGap(BaseModel):
@@ -336,7 +443,17 @@ class DateGap(BaseModel):
 
 class FieldValues(BaseModel):
     field: str
-    values: list                       # 1+ values → cartesian product across fields
+    values: list = []                  # list mode: 1+ values → cartesian product
+    mode: str = "list"                 # list | random | increment
+    # random mode:
+    kind: str = ""                     # int|float|ip|port|bool|token ("" = auto by name+type)
+    min: float | None = None           # numeric range (defaults per kind)
+    max: float | None = None
+    pool: int = 10                     # token mode: pick from <leaf>1 … <leaf><pool>
+    # increment mode:
+    prefix: str = ""                   # optional, e.g. "14-" → "14-1", "14-2", …
+    start: float = 1.0
+    step: float = 1.0
 
 
 class DerivedField(BaseModel):
@@ -387,7 +504,7 @@ def start_artificial(req: ArtificialRequest):
         return {"error": str(exc)}
 
     now = time.time()
-    sl = _parse_slice(index, now)
+    sl = _parse_slice(index, now, es=es)
 
     # ── Time span ────────────────────────────────────────────────────────────
     if req.span_mode == "slice":
@@ -422,12 +539,37 @@ def start_artificial(req: ArtificialRequest):
 
     # ── Value combinations (cartesian product) ───────────────────────────────
     types = {f["name"]: f["type"] for f in _field_types(es, index)}
+    if not types:
+        # Not-yet-existing index: types come from the family's template so
+        # random/increment values (and coercion) match what ES will apply.
+        from services.index_discovery import catalog_entry_for_index
+        entry = catalog_entry_for_index(es, index)
+        if entry:
+            types = dict(entry.get("fields", {}))
     value_fields = [(fv.field.strip(), [
         _coerce(v, types.get(fv.field.strip(), "")) for v in fv.values
-    ]) for fv in req.fields if fv.field.strip() and fv.values]
+    ]) for fv in req.fields
+        if fv.mode in ("", "list") and fv.field.strip() and fv.values]
     field_names = [f for f, _ in value_fields]
     combos = list(itertools.product(*[vals for _, vals in value_fields])) \
         if value_fields else [()]
+
+    # Random / incremental fields: filled per DOCUMENT (no combo expansion,
+    # not part of the dedup key).
+    special = []
+    for fv in req.fields:
+        f = fv.field.strip()
+        if not f or fv.mode in ("", "list"):
+            continue
+        if fv.mode not in ("random", "increment"):
+            return {"error": f"unknown field mode {fv.mode!r} for {f!r}"}
+        es_type = types.get(f, "")
+        special.append({
+            "field": f, "mode": fv.mode, "es_type": es_type,
+            "kind": (fv.kind or _rand_kind(f, es_type)),
+            "min": fv.min, "max": fv.max, "pool": fv.pool,
+            "prefix": fv.prefix, "start": float(fv.start), "step": float(fv.step),
+        })
     planned = len(steps) * len(combos)
     if planned > _MAX_PLANNED_DOCS:
         return {"error": f"{planned:,} documents planned (steps × value "
@@ -480,6 +622,7 @@ def start_artificial(req: ArtificialRequest):
         "main_field": main,
         "field_names": field_names,
         "combos": combos,
+        "special": special,
         "other_dates": other_dates,
         "derived": derived,
         "tz_offset": int(req.tz_offset_minutes or 0),
@@ -494,10 +637,11 @@ def start_artificial(req: ArtificialRequest):
     threading.Thread(target=_run_artificial_job, args=(job, es, plan),
                      daemon=True, name=f"artificial-{job['id']}").start()
     logger.info("[artificial] job %s: %s docs planned (%s steps × %s combos) "
-                "into %s — main=%r gaps=%s fields=%s derived=%s tz=%s",
+                "into %s — main=%r gaps=%s fields=%s special=%s derived=%s tz=%s",
                 job["id"], planned, len(steps), len(combos),
                 [idx for idx, _ in targets], main,
                 plan["other_dates"], field_names,
+                [(s["field"], s["mode"], s["kind"]) for s in special],
                 [(f, r) for f, r, _ in derived], plan["tz_offset"])
     return {"job_id": job["id"], "planned": planned,
             "targets": [{"index": idx, "docs": len(ts) * len(combos)}
@@ -505,9 +649,13 @@ def start_artificial(req: ArtificialRequest):
 
 
 def _run_artificial_job(job: dict, es, plan: dict) -> None:
+    import random
     from routers.query import _scroll_hits
     main = plan["main_field"]
     fields = plan["field_names"]
+    special = plan.get("special", [])
+    rng = random.Random()
+    doc_no = 0          # planned-doc counter across ALL targets — drives increments
     try:
         for item, (idx, ts_list) in zip(job["items"], plan["targets"]):
             if job["cancelled"]:
@@ -568,6 +716,10 @@ def _run_artificial_job(job: dict, es, plan: dict) -> None:
                     raise _JobCancelled()
                 for combo in plan["combos"]:
                     item["done"] += 1
+                    # The counter advances for every PLANNED doc (even skipped
+                    # ones) so incremental values stay aligned to time steps.
+                    n = doc_no
+                    doc_no += 1
                     if exists and _key(ts, list(combo)) in existing:
                         item["skipped"] += 1
                         continue
@@ -577,6 +729,8 @@ def _run_artificial_job(job: dict, es, plan: dict) -> None:
                         _dset(doc, f, ts + int(gap * 1000))
                     for f, v in zip(fields, combo):
                         _dset(doc, f, v)
+                    for sp in special:
+                        _dset(doc, sp["field"], _special_value(sp, n, rng))
                     # Dependency rules — computed from the (possibly gap-shifted)
                     # source timestamp; applied last so they always win.
                     for f, rule, gap_ms in plan["derived"]:

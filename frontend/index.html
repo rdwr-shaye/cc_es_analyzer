@@ -113,7 +113,10 @@
 
     <!-- ── CONNECTION SETTINGS VIEW ── -->
     <div id="view-connection" class="view-panel p-4 d-none">
-      <h5 class="fw-bold mb-1"><i class="bi bi-hdd-network me-2 text-info"></i>Connection Settings</h5>
+      <div class="d-flex justify-content-between align-items-start mb-1">
+        <h5 class="fw-bold mb-0"><i class="bi bi-hdd-network me-2 text-info"></i>Connection Settings</h5>
+        <button class="btn btn-sm btn-outline-info help-btn" onclick="showHelp('connection')" title="Help for this screen"><i class="bi bi-question-circle me-1"></i>Help</button>
+      </div>
       <p class="text-secondary small mb-4">Configure the CC Linux machine and its Elasticsearch credentials.</p>
 
       <div class="row justify-content-center">
@@ -269,7 +272,10 @@
 
     <!-- ── DASHBOARD VIEW ── -->
     <div id="view-dashboard" class="view-panel p-3 d-none">
-      <h5 class="fw-bold mb-3"><i class="bi bi-speedometer2 me-2 text-warning"></i>Cluster Dashboard</h5>
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="fw-bold mb-0"><i class="bi bi-speedometer2 me-2 text-warning"></i>Cluster Dashboard</h5>
+        <button class="btn btn-sm btn-outline-info help-btn" onclick="showHelp('dashboard')" title="Help for this screen"><i class="bi bi-question-circle me-1"></i>Help</button>
+      </div>
 
       <div class="row g-3 mb-3" id="clusterCards">
         <div class="col-auto"><div class="stat-card text-center health-card" id="statusCard"><div class="stat-value" id="c-status">—</div><div class="stat-label">Status</div></div></div>
@@ -306,7 +312,8 @@
               <button type="button" class="btn btn-outline-secondary py-0 px-2" id="iv-csv"
                       onclick="setIndicesView('csv')">CSV</button>
             </div>
-            <button class="btn btn-sm btn-outline-success py-0 px-2" onclick="createIndex()" title="Create a new index">
+            <button class="btn btn-sm btn-outline-success py-0 px-2" onclick="addIndexChoice()"
+                    title="Add an index — empty, or a possible CC index filled with artificial data">
               <i class="bi bi-plus-lg me-1"></i>Add
             </button>
             <button class="btn btn-sm btn-outline-success py-0 px-2" onclick="downloadIndicesCsv()" title="Download indices as CSV">
@@ -347,6 +354,7 @@
       <div class="d-flex justify-content-between align-items-center mb-3">
         <h5 class="fw-bold mb-0"><i class="bi bi-bar-chart-line me-2 text-primary"></i>Summary Analytics</h5>
         <div class="d-flex gap-2">
+          <button class="btn btn-sm btn-outline-info help-btn" onclick="showHelp('summary')" title="Help for this screen"><i class="bi bi-question-circle me-1"></i>Help</button>
           <button class="btn btn-sm btn-outline-success" onclick="downloadSummaryJson()" id="btnDownloadJson">
             <i class="bi bi-download me-1"></i>Download JSON
           </button>
@@ -464,8 +472,11 @@
                 <table class="table table-sm table-hover mb-0">
                   <thead class="table-dark">
                     <tr>
-                      <th>Scope</th><th class="text-center">Attacks</th><th class="text-center">Gaps Measured</th>
-                      <th class="text-end">Min Gap (s)</th><th class="text-end">Avg Gap (s)</th><th class="text-end">Max Gap (s)</th>
+                      <th>Scope</th><th class="text-center">Attacks</th>
+                      <th class="text-center" title="Every interval between consecutive attacks, including 0-length gaps from attacks that started at the same instant. Equals Attacks − 1 for the sampled set.">Gaps Measured</th>
+                      <th class="text-end" title="Shortest interval between consecutive attacks. 0 when two or more attacks started at the same instant.">Min Gap (s)</th>
+                      <th class="text-end" title="Average interval between consecutive attacks (total time span ÷ number of intervals).">Avg Gap (s)</th>
+                      <th class="text-end" title="Longest interval between consecutive attacks.">Max Gap (s)</th>
                     </tr>
                   </thead>
                   <tbody id="gapsByCatBody"></tbody>
@@ -482,10 +493,7 @@
       <div class="d-flex justify-content-between align-items-center mb-3">
         <h5 class="fw-bold mb-0"><i class="bi bi-shield-exclamation me-2 text-danger"></i>Recent Attacks</h5>
         <div class="d-flex gap-2">
-          <select id="attackStatusFilter" class="form-select form-select-sm" style="width:140px;"
-                  onchange="loadAttacks()" title="Statuses found in the loaded attacks">
-            <option value="">All Statuses</option>
-          </select>
+          <button class="btn btn-sm btn-outline-info help-btn" onclick="showHelp('attacks')" title="Help for this screen"><i class="bi bi-question-circle me-1"></i>Help</button>
           <button class="btn btn-sm btn-outline-primary" onclick="loadAttacks()">
             <i class="bi bi-arrow-clockwise"></i> Refresh
           </button>
@@ -499,14 +507,19 @@
           </select>
         </div>
       </div>
+      <div id="attacksMeta" class="small text-secondary mb-2"></div>
       <div class="card shadow-sm">
         <div class="card-body p-0">
           <div class="table-responsive sticky-head">
             <table class="table table-sm table-hover mb-0">
               <thead class="table-dark">
                 <tr>
-                  <th>Attack ID</th><th>Type</th><th>Start Time</th><th>End Time</th>
-                  <th>Device IP</th><th>Status</th>
+                  <th class="atk-th">Attack ID<button class="atk-funnel" id="atkf-attackIpsId" onclick="toggleAttackFilter('attackIpsId', this)" title="Filter Attack ID"><i class="bi bi-funnel-fill"></i></button></th>
+                  <th class="atk-th">Type<button class="atk-funnel" id="atkf-attackType" onclick="toggleAttackFilter('attackType', this)" title="Filter Type"><i class="bi bi-funnel-fill"></i></button></th>
+                  <th class="atk-th">Start Time<button class="atk-funnel" id="atkf-startTime" onclick="toggleAttackFilter('startTime', this)" title="Filter Start Time"><i class="bi bi-funnel-fill"></i></button></th>
+                  <th class="atk-th">End Time<button class="atk-funnel" id="atkf-endTime" onclick="toggleAttackFilter('endTime', this)" title="Filter End Time"><i class="bi bi-funnel-fill"></i></button></th>
+                  <th class="atk-th">Device IP<button class="atk-funnel" id="atkf-deviceIp" onclick="toggleAttackFilter('deviceIp', this)" title="Filter Device IP"><i class="bi bi-funnel-fill"></i></button></th>
+                  <th class="atk-th">Status<button class="atk-funnel" id="atkf-status" onclick="toggleAttackFilter('status', this)" title="Filter Status"><i class="bi bi-funnel-fill"></i></button></th>
                 </tr>
               </thead>
               <tbody id="attacksTableBody">
@@ -526,6 +539,7 @@
         </button>
         <h5 class="fw-bold mb-0" id="indexDetailTitle">Index Details</h5>
         <div class="ms-auto d-flex gap-2">
+          <button class="btn btn-sm btn-outline-info help-btn" onclick="showHelp('index')" title="Help for this screen"><i class="bi bi-question-circle me-1"></i>Help</button>
           <button class="btn btn-sm btn-outline-warning" onclick="createArtificialData(_currentIndexName)"
                   title="Generate synthetic documents into this index (slice-aware, skips existing data)">
             <i class="bi bi-magic me-1"></i>Artificial data
@@ -619,7 +633,10 @@
 
     <!-- ── QUERY EDITOR VIEW ── -->
     <div id="view-query" class="view-panel p-3 d-none">
-      <h5 class="fw-bold mb-3"><i class="bi bi-terminal me-2 text-success"></i>Query Editor</h5>
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="fw-bold mb-0"><i class="bi bi-terminal me-2 text-success"></i>Query Editor</h5>
+        <button class="btn btn-sm btn-outline-info help-btn" onclick="showHelp('query')" title="Help for this screen"><i class="bi bi-question-circle me-1"></i>Help</button>
+      </div>
       <div id="qeditSplit" class="qedit-split">
         <div class="qedit-pane" id="qeditQueryPane">
           <div class="card shadow-sm h-100">

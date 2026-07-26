@@ -52,6 +52,71 @@ def get_cc_catalog():
     return {"catalog": grouped, "categories": CATEGORIES}
 
 
+def _static_meta_for_family(family: str) -> dict | None:
+    """Display metadata from the static CC_INDEX_CATALOG for a discovered
+    family prefix: exact key first, then the longest static prefix the family
+    extends, then a static key that extends the family (e.g. family 'alert'
+    -> static 'alert-sid'). Purely cosmetic — live data always wins for facts."""
+    if family in CC_INDEX_CATALOG:
+        return CC_INDEX_CATALOG[family]
+    best = None
+    for prefix, meta in CC_INDEX_CATALOG.items():
+        if family.startswith(prefix) and (best is None or len(prefix) > len(best[0])):
+            best = (prefix, meta)
+    if best:
+        return best[1]
+    for prefix, meta in CC_INDEX_CATALOG.items():
+        if prefix.startswith(family) and (best is None or len(prefix) < len(best[0])):
+            best = (prefix, meta)
+    return best[1] if best else None
+
+
+@router.get("/possible")
+def possible_indices(refresh: bool = Query(default=False)):
+    """
+    Every index family the connected CC machine can EVER create — including
+    families with no live index yet — discovered live from the cluster's index
+    templates, appconfig slice records, and existing indices
+    (docs/LIVE_INDEX_DISCOVERY.md). Static CC_INDEX_CATALOG contributes display
+    name / category / color / description; the LIVE data wins for slice size,
+    doc types, and field mappings.
+    """
+    from services.index_discovery import discover
+    try:
+        es = get_client()
+        cat = discover(es, refresh=refresh)
+    except Exception as e:
+        return {"error": str(e)}
+
+    families = []
+    for family, entry in cat["families"].items():
+        static = _static_meta_for_family(family) or {}
+        prefix = re.sub(r"-ty-.*$", "", re.sub(r"-?\*$", "", entry["index_pattern"]))
+        families.append({
+            "family":        family,
+            "display":       static.get("display") or family,
+            "category":      static.get("category") or "Discovered",
+            "color":         static.get("color"),
+            "description":   static.get("description") or "",
+            "index_pattern": entry["index_pattern"],
+            "doc_types":     entry["doc_types"],
+            "slice_minutes": entry["slice_minutes"],
+            "slice_source":  entry["slice_source"],
+            "live_example":  entry.get("live_example"),
+            "example_now":   entry.get("example_now"),
+            "field_count":   entry["field_count"],
+            "fields":        entry["fields"],
+            "doc_type_note": entry.get("doc_type_note"),
+            # A name can be built for "now" unless the prefix itself carries a
+            # wildcard (mid-name-wildcard template with no live index).
+            "constructible": bool(entry.get("example_now")) and "*" not in prefix,
+        })
+    order = {c: i for i, c in enumerate(CATEGORIES)}
+    families.sort(key=lambda f: (order.get(f["category"], len(order)), f["display"]))
+    return {"meta": cat["_meta"], "families": families,
+            "categories": CATEGORIES + ["Discovered"]}
+
+
 @router.get("/{index_name}/stats")
 def index_stats(index_name: str):
     """Detailed stats for a single index."""

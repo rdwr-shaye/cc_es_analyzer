@@ -240,31 +240,85 @@ def _log_es_query(api: str, index: str, body: dict) -> None:
                 api, index, json.dumps(body, indent=2, ensure_ascii=False))
 
 
+def _attack_range_clause(field: str, op: str, val: str):
+    """Build an ES range clause for an attacks-view date column filter.
+    op ∈ gt|gte|lt|lte|eq (eq = the whole minute containing val)."""
+    if not op or val in (None, ""):
+        return None
+    try:
+        ms = int(float(val))
+    except (TypeError, ValueError):
+        return None
+    if op == "eq":
+        m = (ms // 60000) * 60000
+        return {"range": {field: {"gte": m, "lt": m + 60000}}}
+    key = {"gt": "gt", "gte": "gte", "lt": "lt", "lte": "lte"}.get(op)
+    return {"range": {field: {key: ms}}} if key else None
+
+
 @router.get("/cc/attacks")
-def latest_attacks(size: int = 50, status: str = ""):
+def latest_attacks(size: int = 50, status: str = "",
+                   attack_id: str = "", type: str = "", device_ip: str = "",
+                   start_op: str = "", start_val: str = "",
+                   end_op: str = "", end_val: str = ""):
     """
     Two-phase join:
       Phase 1 — fetch unique attack records from dp-attack-raw-* (one doc per attack,
                  attackIpsId uses dash delimiter e.g. '3-1781601338').
       Phase 2 — enrich with aggregated traffic stats from attack-data-*
                  (attackIpsId uses underscore delimiter e.g. '3_1781601338').
+
+    Optional column filters are applied server-side so the Attacks view can find
+    matches beyond the loaded page. Type lives in the index name → it narrows the
+    index pattern; the rest are field clauses (kept broad — the UI refines the
+    exact substring/case match client-side).
     """
     try:
         es = get_client()
 
         # ── Phase 1: canonical attack list from dp-attack-raw-* ──────────────
+        index_pattern = "dp-attack-raw-*"
+        ttok = re.sub(r"[^a-z0-9]+", "*", (type or "").strip().lower()).strip("*")
+        if ttok:
+            index_pattern = f"dp-attack-raw-*{ttok}*"
+
+        must: list = []
+        if attack_id.strip():
+            must.append({"wildcard": {"attackIpsId": f"*{attack_id.strip()}*"}})
+        if device_ip.strip():
+            must.append({"wildcard": {"deviceIp": f"*{device_ip.strip()}*"}})
+        if status.strip():
+            # status is a case-sensitive keyword; resolve the typed substring
+            # against the real distinct values, then match those exactly.
+            needle = status.strip().lower()
+            try:
+                sv = es.search(index_pattern, {"size": 0,
+                    "aggs": {"s": {"terms": {"field": "status", "size": 100}}}})
+                vals = [b.get("key") for b in sv.get("aggregations", {}).get("s", {}).get("buckets", [])
+                        if b.get("key")]
+            except Exception:
+                vals = []
+            keep = [v for v in vals if needle in str(v).lower()]
+            must.append({"terms": {"status": keep or ["__none_status__"]}})
+        for f, op, val in (("startTime", start_op, start_val), ("endTime", end_op, end_val)):
+            rc = _attack_range_clause(f, op, val)
+            if rc:
+                must.append(rc)
+
         raw_body = {
             "size": size,
             "sort": [{"startTime": {"order": "desc"}}],
-            "query": {"match_all": {}},
+            "query": {"bool": {"must": must}} if must else {"match_all": {}},
         }
-        _log_es_query("/api/cc/attacks — phase 1 (attack list)", "dp-attack-raw-*", raw_body)
-        raw_resp = es.search("dp-attack-raw-*", raw_body)
+        _log_es_query("/api/cc/attacks — phase 1 (attack list)", index_pattern, raw_body)
+        raw_resp = es.search(index_pattern, raw_body)
         raw_hits = raw_resp.get("hits", {}).get("hits", [])
         total_raw = raw_resp.get("hits", {}).get("total")
+        matched = total_raw.get("value") if isinstance(total_raw, dict) else (total_raw or 0)
 
         if not raw_hits:
-            return {"total_records": 0, "total_unique_attacks": 0, "attacks": []}
+            return {"total_records": matched or 0, "matched_total": matched or 0,
+                    "total_unique_attacks": 0, "attacks": []}
 
         # Build lookup: underscore_id → dp-attack-raw base record
         raw_by_under = {}
@@ -333,7 +387,8 @@ def latest_attacks(size: int = 50, status: str = ""):
             attacks.append(merged)
 
         return {
-            "total_records":        total_raw.get("value") if isinstance(total_raw, dict) else total_raw,
+            "total_records":        matched,
+            "matched_total":        matched,
             "total_unique_attacks": len(attacks),
             "attacks":              attacks,
         }
@@ -1712,18 +1767,19 @@ def _hist_buckets(aggs: dict, key: str) -> list:
     ]
 
 def _compute_gaps(sorted_timestamps: list) -> dict:
-    """Given sorted list of epoch-ms timestamps, return gap stats in seconds."""
+    """Given sorted list of epoch-ms timestamps, return gap stats in seconds.
+
+    Every consecutive interval is counted, INCLUDING 0-length gaps produced by
+    attacks that started at the same instant. So min_s can be 0 and the average
+    reflects the overall pacing across all attacks (gap_count = attacks - 1).
+    """
     if len(sorted_timestamps) < 2:
         return {"attack_count": len(sorted_timestamps), "gap_count": 0,
                 "min_s": None, "max_s": None, "avg_s": None}
     gaps_s = [
         (sorted_timestamps[i + 1] - sorted_timestamps[i]) / 1000
         for i in range(len(sorted_timestamps) - 1)
-        if sorted_timestamps[i + 1] > sorted_timestamps[i]
     ]
-    if not gaps_s:
-        return {"attack_count": len(sorted_timestamps), "gap_count": 0,
-                "min_s": None, "max_s": None, "avg_s": None}
     return {
         "attack_count": len(sorted_timestamps),
         "gap_count":    len(gaps_s),

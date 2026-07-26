@@ -134,17 +134,17 @@ def _hist_buckets(aggs, key):
 
 
 def _compute_gaps(sorted_timestamps):
+    # Count every consecutive interval, INCLUDING 0-length gaps from attacks that
+    # started at the same instant, so min_s can be 0 and the average reflects the
+    # overall pacing across all attacks (gap_count = attacks - 1). Kept byte-for-
+    # byte in sync with _compute_gaps in routers/query.py.
     if len(sorted_timestamps) < 2:
         return {"attack_count": len(sorted_timestamps), "gap_count": 0,
                 "min_s": None, "max_s": None, "avg_s": None}
     gaps_s = [
         (sorted_timestamps[i + 1] - sorted_timestamps[i]) / 1000
         for i in range(len(sorted_timestamps) - 1)
-        if sorted_timestamps[i + 1] > sorted_timestamps[i]
     ]
-    if not gaps_s:
-        return {"attack_count": len(sorted_timestamps), "gap_count": 0,
-                "min_s": None, "max_s": None, "avg_s": None}
     return {
         "attack_count": len(sorted_timestamps),
         "gap_count":    len(gaps_s),

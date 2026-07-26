@@ -298,6 +298,66 @@ body.qedit-resizing { cursor: col-resize; user-select: none; }
   max-height: none;         /* override the global 70vh cap so it fills instead */
 }
 
+/* ── Attacks view: per-column filter funnels + popover ──────────────────── */
+.atk-th { white-space: nowrap; }
+.atk-funnel {
+  background: none; border: none; padding: 0 0 0 .35rem; margin: 0;
+  color: rgba(255, 255, 255, .5); cursor: pointer; font-size: .72rem; line-height: 1;
+  vertical-align: baseline;
+}
+.atk-funnel:hover { color: #fff; }
+.atk-funnel.active { color: #35d0de; }        /* a column with an active filter */
+.atk-filter-pop {
+  position: absolute; z-index: 4000; width: 244px;
+  background: #fff; color: #212529;
+  border: 1px solid #ced4da; border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .22); padding: .6rem .7rem;
+}
+.atk-filter-pop .afp-title { font-weight: 600; font-size: .8rem; margin-bottom: .45rem; }
+.atk-filter-pop .afp-hint  { font-size: .68rem; color: #6c757d; margin-top: .35rem; }
+.atk-filter-pop .afp-actions { display: flex; gap: .4rem; margin-top: .55rem; }
+
+/* ── On-line help modal (the "?" Help button on every screen) ───────────── */
+.help-overlay {
+  position: fixed; inset: 0; z-index: 3000;
+  background: rgba(0, 0, 0, .45);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.help-modal {
+  background: #fff; color: #212529;
+  width: min(780px, 96vw); max-height: 86vh;
+  border-radius: 12px; overflow: hidden;
+  display: flex; flex-direction: column;
+  box-shadow: 0 14px 44px rgba(0, 0, 0, .38);
+}
+.help-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 13px 18px; background: #0d1b2a; color: #fff;
+}
+.help-title { font-weight: 700; font-size: 1.05rem; }
+.help-body { padding: 16px 22px; overflow-y: auto; line-height: 1.5; }
+.help-body p { margin-bottom: .6rem; }
+.help-body h6 {
+  margin: 1rem 0 .4rem; font-weight: 700; color: #0d6efd;
+  text-transform: uppercase; letter-spacing: .03em; font-size: .74rem;
+}
+.help-body ul, .help-body ol { padding-left: 1.2rem; margin-bottom: .3rem; }
+.help-body li { margin-bottom: .3rem; }
+.help-body code {
+  background: #eef1f4; color: #b5179e; padding: .05rem .32rem; border-radius: 4px;
+  font-size: .85em;
+}
+.help-tip {
+  margin-top: 1rem; padding: .55rem .8rem; border-left: 3px solid #ffc107;
+  background: #fff8e1; border-radius: 4px; font-size: .9rem;
+}
+.help-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 18px; border-top: 1px solid #e5e7eb; background: #f8f9fa;
+}
+.help-btn { white-space: nowrap; }
+
 /* ── Summary Analytics: the stat-card ribbon sticks to the top of the view
    while the rest of the summary scrolls underneath it. Opaque background so
    scrolled content never shows through the gaps between cards. */
