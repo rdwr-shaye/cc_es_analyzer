@@ -6135,6 +6135,181 @@ function esc(s) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   UPDATES — "a newer version of this tool is in the repository"
+   ══════════════════════════════════════════════════════════════════════════
+   The server checks the repository in the background (services/updater.py);
+   here we just render what it found and, when the deployment supports it, ask
+   it to pull + restart. The update restarts the app for everyone, so the other
+   connected users are notified by the server before it happens. */
+
+let _update = null;
+const UPDATE_POLL_MS = 10 * 60 * 1000;
+
+function _verLabel(v) {
+  const ver = (v && v.version) || '?';
+  return v && v.commit ? `${ver} (${v.commit})` : ver;
+}
+
+function renderUpdateBadge() {
+  const btn = document.getElementById('updateBtn');
+  const txt = document.getElementById('updateBtnText');
+  const ver = document.getElementById('appVersion');
+  const u = _update;
+  if (ver) {
+    ver.textContent = u ? 'v' + ((u.current && u.current.version) || '?') : '';
+    ver.title = u
+      ? `Installed: ${_verLabel(u.current)}\nUpdate source: ${u.mode}`
+      : 'Installed version';
+  }
+  if (!btn || !txt) return;
+  if (u && u.update_available) {
+    btn.classList.remove('d-none');
+    txt.textContent = `Update to ${(u.latest && u.latest.version) || 'new version'}`;
+    btn.title = `A newer version is available: ${_verLabel(u.latest)}`
+      + (u.behind ? ` — ${u.behind} change(s) since yours` : '');
+  } else {
+    btn.classList.add('d-none');
+  }
+}
+
+async function pollUpdate() {
+  try {
+    const d = await api('/api/update/status');
+    if (d && !d.error) { _update = d; renderUpdateBadge(); }
+  } catch { /* transient — next tick retries */ }
+}
+
+function startUpdateChecks() {
+  pollUpdate();
+  setInterval(pollUpdate, UPDATE_POLL_MS);
+}
+
+function _updateDialogHtml(u) {
+  const changes = (u.changes || []).slice(0, 10);
+  const changeHtml = changes.length
+    ? `<div class="mt-2"><div class="fw-semibold small mb-1">What's new</div>
+         <ul class="small mb-0 ps-3">${changes.map(c =>
+           `<li><span class="font-monospace text-secondary">${esc(c.hash)}</span> ${esc(c.message)}</li>`).join('')}</ul></div>`
+    : '';
+  const rows = [
+    ['Installed', _verLabel(u.current)],
+    ['Available', _verLabel(u.latest)],
+    u.behind ? ['Changes', `${u.behind} commit(s) ahead of this deployment`] : null,
+    ['Source', `${esc(u.remote || '')}${u.branch ? '/' + esc(u.branch) : ''} · checked ${fmtTime((u.checked_at || 0) * 1000)}`],
+  ].filter(Boolean);
+  const table = rows.map(([k, v]) =>
+    `<tr><td class="text-secondary pe-3">${esc(k)}</td><td>${esc(v)}</td></tr>`).join('');
+  let note = '';
+  if (!u.ok && u.error) {
+    note = `<div class="alert alert-warning py-2 px-2 small mt-2 mb-0">Could not check: ${esc(u.error)}</div>`;
+  } else if (u.update_available && !u.can_apply) {
+    const repo = u.repo || '<the checkout on the server>';
+    note = `<div class="alert alert-secondary py-2 px-2 small mt-2 mb-0">
+        One-click update isn't available here — ${esc(u.cannot_apply_reason || '')}.<br/>
+        On the server run:<br/>
+        <code>cd ${esc(repo)} &amp;&amp; git pull &amp;&amp; docker compose up -d</code></div>`;
+  } else if (u.update_available) {
+    note = `<div class="alert alert-warning py-2 px-2 small mt-2 mb-0">
+        Updating pulls the new code and <b>restarts the app for everyone</b>
+        (about a minute). Other connected users are told first.</div>`;
+  }
+  return `<table class="small mb-0"><tbody>${table}</tbody></table>${changeHtml}${note}
+    <div id="updateProgress" class="mt-2"></div>`;
+}
+
+function showUpdateDialog() {
+  const u = _update || { current: { version: '?' }, latest: {} };
+  document.querySelector('.rt-modal-overlay.update-modal')?.remove();
+  const wrap = document.createElement('div');
+  wrap.className = 'rt-modal-overlay update-modal';
+  wrap.innerHTML = `<div class="rt-modal" style="max-width:640px;">
+      <div class="rt-modal-title"><i class="bi bi-arrow-up-circle-fill me-2"></i>
+        ${u.update_available ? 'A newer version is available' : 'CC ES Analyzer is up to date'}</div>
+      <div class="rt-modal-body" id="updateBody">${_updateDialogHtml(u)}</div>
+      <div class="rt-modal-actions">
+        ${u.can_apply ? '<button class="btn btn-sm btn-success" data-act="apply"><i class="bi bi-download me-1"></i>Update now</button>' : ''}
+        <button class="btn btn-sm btn-outline-info" data-act="check">Check again</button>
+        <button class="btn btn-sm btn-outline-secondary" data-act="close">Close</button>
+      </div></div>`;
+  document.body.appendChild(wrap);
+  const close = () => { wrap.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  wrap.addEventListener('click', async (e) => {
+    if (e.target === wrap) return close();
+    const b = e.target.closest('button[data-act]');
+    if (!b) return;
+    const act = b.dataset.act;
+    if (act === 'close') return close();
+    if (act === 'check') {
+      b.disabled = true; b.textContent = 'Checking…';
+      try { _update = await api('/api/update/check', { method: 'POST' }); } catch { /* shown below */ }
+      renderUpdateBadge();
+      close(); showUpdateDialog();
+      return;
+    }
+    if (act === 'apply') {
+      wrap.querySelectorAll('button[data-act]').forEach(x => { x.disabled = true; });
+      runUpdate(wrap);
+    }
+  });
+}
+
+/** Kick off the update and follow it through the restart. */
+async function runUpdate(wrap) {
+  const box = wrap.querySelector('#updateProgress');
+  const say = (html) => { box.innerHTML = html; };
+  say('<div class="small text-info"><span class="spinner-border spinner-border-sm me-2"></span>Requesting update…</div>');
+
+  let res;
+  try { res = await api('/api/update/apply', { method: 'POST' }); }
+  catch (e) { res = { error: String(e) }; }
+  if (!res || res.error) {
+    say(`<div class="alert alert-danger py-2 px-2 small mb-0">${esc(res?.error || 'update failed')}</div>`);
+    wrap.querySelectorAll('button[data-act="close"]').forEach(x => { x.disabled = false; });
+    return;
+  }
+
+  const started = Date.now();
+  const stepIcon = { ok: '✔', error: '✖', running: '…' };
+  let restarting = false;
+  while (Date.now() - started < 12 * 60 * 1000) {
+    await new Promise(r => setTimeout(r, 2500));
+    let job = null;
+    try { job = await api('/api/update/job'); restarting = false; }
+    catch { restarting = true; }          // expected while the container restarts
+
+    const steps = (job?.steps || []).map(s =>
+      `<div class="small"><span class="font-monospace">${stepIcon[s.status] || '·'}</span>
+         ${esc(s.name)}${s.output ? ` <span class="text-secondary">— ${esc(String(s.output).slice(0, 120))}</span>` : ''}</div>`
+    ).join('');
+    const head = restarting
+      ? '<div class="small text-warning"><span class="spinner-border spinner-border-sm me-2"></span>Restarting the app…</div>'
+      : `<div class="small text-info"><span class="spinner-border spinner-border-sm me-2"></span>${esc(job?.state || 'working')}…</div>`;
+    say(head + steps);
+
+    if (job && job.state === 'done') {
+      say(steps + `<div class="alert alert-success py-2 px-2 small mt-2 mb-0">
+          Updated. Reload the page to load the new version.
+          <button class="btn btn-sm btn-success ms-2 py-0" onclick="location.reload()">Reload now</button></div>`);
+      return;
+    }
+    if (job && job.state === 'error') {
+      say(steps + `<div class="alert alert-danger py-2 px-2 small mt-2 mb-0">${esc(job.error || 'update failed')}</div>`);
+      wrap.querySelectorAll('button[data-act="close"]').forEach(x => { x.disabled = false; });
+      return;
+    }
+    if (job && job.restart_required) {
+      say(steps + `<div class="alert alert-warning py-2 px-2 small mt-2 mb-0">
+          Code updated. Restart the service to load it.</div>`);
+      return;
+    }
+  }
+  say('<div class="alert alert-warning py-2 px-2 small mb-0">Still running — check the server logs '
+    + '(<code>journalctl -u cc-es-analyzer-updater</code>).</div>');
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    INIT — auto-connect from localStorage on page load
    ══════════════════════════════════════════════════════════════════════════ */
 (async function init() {
@@ -6143,6 +6318,7 @@ function esc(s) {
   initAutoRefresh();
   renderProfiles();
   startPresence();
+  startUpdateChecks();
 
   // Try to restore last-used connection
   const saved = localStorage.getItem(LS_ACTIVE);
@@ -6215,6 +6391,12 @@ const HELP_CONTENT = {
         <li>When someone else is connected to the <b>same</b> CC, an amber <b>“N others on this CC”</b> badge appears in the top bar; hover or click it to see who (name, IP, hostname, browser).</li>
         <li>Click the <b>“you: …”</b> button beside it to set the display name others see instead of your IP.</li>
         <li>Before you change anything on a shared CC — delete, edit, import, restore, generate — you get a warning naming the other users, and <b>they are notified</b> of what you did.</li>
+      </ul>
+      <h6>Keeping the tool up to date</h6>
+      <ul>
+        <li>The installed version is shown next to the app name in the top bar.</li>
+        <li>When the repository has a newer version, a green <b>Update to x.y.z</b> button appears there. It opens a dialog with the version, what changed, and <b>Update now</b>.</li>
+        <li>Updating pulls the new code and restarts the app <b>for everyone</b> (about a minute) — the other connected users are notified first. If the server can't update itself, the dialog shows the exact command to run instead.</li>
       </ul>
       <p class="help-tip">The analyzer talks to ES over raw HTTP (not elasticsearch-py), so it works with the older / proxied ES versions common on CC deployments.</p>`,
   },

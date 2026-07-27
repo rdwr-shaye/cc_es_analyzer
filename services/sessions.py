@@ -237,6 +237,43 @@ def notify_peers(sid: str, action: str, detail: str = "") -> int:
     return sent
 
 
+def describe_session(sid: str) -> str:
+    """"name (ip, Chrome on Windows)" — for logs and for telling other users who
+    did something."""
+    with _lock:
+        s = _sessions.get(sid)
+        if not s:
+            return "an unknown user"
+        label, ip, agent = _label(s), s.get("ip", ""), describe_agent(s.get("user_agent", ""))
+    extra = ", ".join(p for p in (ip if ip != label else "", agent) if p)
+    return f"{label} ({extra})" if extra else label
+
+
+def broadcast(action: str, detail: str = "", exclude_sid: str = "") -> int:
+    """Notify EVERY active session, whatever CC they are on — for things that
+    affect the whole service (an update restarting the app), not one cluster."""
+    with _lock:
+        me = _sessions.get(exclude_sid)
+        actor = _label(me) if me else "someone"
+        now = time.time()
+        sent = 0
+        for k, r in _sessions.items():
+            if k == exclude_sid or now - r.get("last_seen", 0) > IDLE_S:
+                continue
+            r["seq"] += 1
+            r["inbox"].append({
+                "id": r["seq"], "ts": now, "actor": actor,
+                "actor_ip": (me or {}).get("ip", ""),
+                "action": action, "detail": detail, "es_target": None,
+                "scope": "service",
+            })
+            sent += 1
+    if sent:
+        logger.info("[presence] broadcast from %s: %s %s -> %s user(s)",
+                    actor, action, detail, sent)
+    return sent
+
+
 def drain(sid: str) -> list[dict]:
     """Take and clear a session's pending notifications."""
     with _lock:

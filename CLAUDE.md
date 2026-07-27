@@ -38,9 +38,16 @@ routers/
   health.py          — /api/health, /api/nodes, /api/connect
   indices.py         — /api/indices, /api/indices/catalog, /api/indices/{name}/stats|sample
   query.py           — /api/query, /api/cc/attacks, /api/cc/attacks/summary, /api/cc/traffic
+  update.py          — /api/update/status|check|apply|job
 services/
   es_client.py       — ESHttpClient singleton; plain HTTP to ES (no elasticsearch-py)
   cc_indices.py      — CC_INDEX_CATALOG dict mapping known index prefixes → metadata
+  updater.py         — version check + one-click update (agent | git | api modes)
+deploy/
+  nginx_detect.py    — find the host's nginx (any container name, or a host service)
+  setup_nginx_path.py— publish the app at /cc_es_analyzer/ on that nginx
+  update_agent.sh    — host-side agent: git fetch, fast-forward, compose rebuild
+VERSION              — single source of truth for the app version
 frontend/
   index.html         — Single HTML file loading the JS app
   static/js/app.js   — Vanilla JS frontend (no build step)
@@ -52,3 +59,5 @@ frontend/
 - The ES client is a module-level singleton (`_client`). `update_client()` replaces it when the user changes connection settings in the UI.
 - `cc_indices.py` contains `CC_INDEX_CATALOG` (prefix → description/category) and `resolve_prefix()` which matches an index name against known CC prefixes. This drives the CC-aware annotations throughout the UI.
 - The frontend is a vanilla JS SPA with no build step — edit `app.js` directly.
+- `deploy/nginx_detect.py` never matches on container/service names (they differ per host): it resolves whoever owns :443/:80 back to a container, a systemd unit or a host process, and reads config from `nginx -T` rather than guessing paths under `/etc/nginx`.
+- Updates: the container can't reach git or rebuild itself, so `deploy/update_agent.sh` runs on the host and the two exchange JSON files through the bind-mounted `.update/` directory. The agent only ever fast-forwards the tracked branch — it never executes anything the app sends it.

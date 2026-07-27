@@ -387,6 +387,30 @@ body.qedit-resizing { cursor: col-resize; user-select: none; }
 /* ── Connection form ─────────────────────────────────────────────────── */
 #connFeedback .alert { border-radius: 8px; }
 
+/* The form is laid out as side-by-side groups so the whole screen (including
+   the Connect button) fits without scrolling. Each group is a soft panel with
+   its own heading. */
+.conn-group {
+  border: 1px solid var(--bs-border-color, #dee2e6);
+  border-radius: 8px;
+  padding: .65rem .75rem .75rem;
+  background: var(--bs-body-bg, #fff);
+}
+.conn-group-title {
+  font-size: .8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+  color: var(--bs-secondary-color, #6c757d);
+  border-bottom: 1px solid var(--bs-border-color, #dee2e6);
+  padding-bottom: .4rem;
+  margin-bottom: .6rem;
+}
+.conn-group-title .form-check-label { text-transform: none; letter-spacing: 0; font-size: .85rem; }
+.conn-group .form-label { font-size: .8rem; }
+/* Long profile lists scroll inside their card instead of stretching the page. */
+.conn-profiles-body { max-height: 60vh; overflow-y: auto; }
+
 /* ── Rich results table (sticky header, sort, filter, cell controls) ──── */
 .rt-table { white-space: nowrap; }
 .rt-table thead th {

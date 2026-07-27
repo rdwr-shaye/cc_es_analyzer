@@ -44,3 +44,6 @@ exports/
 
 # Remembered SSH credentials (encrypted) + key
 data/
+
+# Update agent scratch (host<->container handoff: state, job, request files)
+.update/

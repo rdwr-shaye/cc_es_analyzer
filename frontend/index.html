@@ -22,6 +22,7 @@
     <span class="navbar-brand mb-0 fw-bold fs-5">
       <i class="bi bi-layers-half text-info me-2"></i>CC ES Analyzer
     </span>
+    <span id="appVersion" class="text-secondary" style="font-size:.7rem;" title="Installed version"></span>
   </div>
 
   <!-- Active connection pill (shown when connected) -->
@@ -44,8 +45,12 @@
     </button>
   </div>
 
-  <!-- Who else is on this CC right now -->
+  <!-- Who else is on this CC right now (+ new-version badge) -->
   <div id="presenceBox" class="d-flex align-items-center gap-2 ms-auto">
+    <button id="updateBtn" class="btn btn-sm btn-success py-0 px-2 d-none" onclick="showUpdateDialog()"
+            style="font-size:0.72rem;" title="A newer version is available">
+      <i class="bi bi-arrow-up-circle-fill me-1"></i><span id="updateBtnText">Update available</span>
+    </button>
     <button id="presencePeers" class="btn btn-sm py-0 px-2 d-none" onclick="showPresenceDetail()"
             title="Other users working on this CC">
       <i class="bi bi-people-fill me-1"></i><span id="presenceCount">0</span>
@@ -130,128 +135,147 @@
       </div>
       <p class="text-secondary small mb-4">Configure the CC Linux machine and its Elasticsearch credentials.</p>
 
-      <div class="row justify-content-center">
-        <div class="col-lg-6 col-xl-5">
+      <!-- Wide two-column layout: profiles on the left, a horizontal form on the
+           right. Everything (including Connect) fits above the fold on a laptop
+           screen — no scrolling to reach the buttons. -->
+      <div class="row g-3 align-items-start">
+        <div class="col-xl-3 col-lg-4">
 
           <!-- Saved profiles -->
-          <div class="card shadow-sm mb-3" id="savedProfilesCard">
+          <div class="card shadow-sm" id="savedProfilesCard">
             <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
               <span><i class="bi bi-bookmark-star me-2 text-warning"></i>Saved Profiles</span>
               <span id="profileCount" class="badge bg-secondary">0</span>
             </div>
-            <div class="card-body p-2" id="savedProfilesList">
+            <div class="card-body p-2 conn-profiles-body" id="savedProfilesList">
               <p class="text-secondary small text-center py-2 mb-0">No saved profiles yet</p>
             </div>
           </div>
 
+        </div>
+        <div class="col-xl-9 col-lg-8">
+
           <!-- Connection form -->
           <div class="card shadow-sm">
-            <div class="card-header fw-semibold">
-              <i class="bi bi-plug me-2 text-info"></i>
-              <span id="formTitle">New Connection</span>
+            <div class="card-header fw-semibold d-flex justify-content-between align-items-center gap-2 flex-wrap">
+              <span>
+                <i class="bi bi-plug me-2 text-info"></i>
+                <span id="formTitle">New Connection</span>
+              </span>
+              <!-- Action buttons live in the header so they are reachable no
+                   matter how short the window is. -->
+              <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-primary px-3" onclick="doConnect()" id="btnConnect">
+                  <i class="bi bi-plug-fill me-1"></i>Connect
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" onclick="saveProfile()" title="Save this profile">
+                  <i class="bi bi-bookmark-plus"></i>
+                </button>
+                <button class="btn btn-sm btn-outline-danger" onclick="clearForm()" title="Clear form">
+                  <i class="bi bi-x-lg"></i>
+                </button>
+              </div>
             </div>
             <div class="card-body">
               <div class="row g-3">
 
-                <div class="col-12">
-                  <label class="form-label fw-semibold">Profile Name <span class="text-secondary fw-normal">(optional)</span></label>
-                  <input id="connLabel" type="text" class="form-control" placeholder="e.g. Production CC, Lab Machine…"/>
-                </div>
+                <!-- ── Column 1: the target machine ── -->
+                <div class="col-xxl-4 col-md-6">
+                  <div class="conn-group h-100">
+                    <div class="conn-group-title"><i class="bi bi-pc-display me-1 text-info"></i>Target machine</div>
 
-                <div class="col-12">
-                  <label class="form-label fw-semibold">
-                    <i class="bi bi-pc-display me-1 text-info"></i>CC Machine IP / Hostname
-                  </label>
-                  <input id="connHost" type="text" class="form-control form-control-lg"
-                         placeholder="192.168.1.100" autocomplete="off"/>
-                  <div class="form-text">IP address or hostname of the CC Linux machine</div>
-                </div>
+                    <label class="form-label fw-semibold mb-1">Profile Name <span class="text-secondary fw-normal">(optional)</span></label>
+                    <input id="connLabel" type="text" class="form-control form-control-sm mb-2"
+                           placeholder="e.g. Production CC, Lab Machine…"/>
 
-                <div class="col-5">
-                  <label class="form-label fw-semibold">ES Port</label>
-                  <input id="connPort" type="number" class="form-control" value="9200"/>
-                </div>
-                <div class="col-7">
-                  <label class="form-label fw-semibold">Protocol</label>
-                  <div class="d-flex gap-2">
-                    <div class="form-check mt-2">
-                      <input class="form-check-input" type="radio" name="connScheme" id="schemeHttp" value="http" checked/>
-                      <label class="form-check-label" for="schemeHttp">HTTP</label>
-                    </div>
-                    <div class="form-check mt-2">
-                      <input class="form-check-input" type="radio" name="connScheme" id="schemeHttps" value="https"/>
-                      <label class="form-check-label" for="schemeHttps">HTTPS</label>
-                    </div>
-                  </div>
-                </div>
+                    <label class="form-label fw-semibold mb-1">CC Machine IP / Hostname</label>
+                    <input id="connHost" type="text" class="form-control mb-2"
+                           placeholder="192.168.1.100" autocomplete="off"
+                           title="IP address or hostname of the CC Linux machine"/>
 
-                <div class="col-12"><hr class="my-0"/></div>
-
-                <div class="col-6">
-                  <label class="form-label fw-semibold">
-                    <i class="bi bi-person me-1"></i>Username <span class="text-secondary fw-normal">(optional)</span>
-                  </label>
-                  <input id="connUser" type="text" class="form-control" placeholder="elastic" autocomplete="off"/>
-                </div>
-                <div class="col-6">
-                  <label class="form-label fw-semibold">
-                    <i class="bi bi-key me-1"></i>Password <span class="text-secondary fw-normal">(optional)</span>
-                  </label>
-                  <div class="input-group">
-                    <input id="connPass" type="password" class="form-control" placeholder="••••••••" autocomplete="off"/>
-                    <button class="btn btn-outline-secondary" type="button" onclick="togglePassVis()">
-                      <i class="bi bi-eye" id="passEyeIcon"></i>
-                    </button>
-                  </div>
-                </div>
-
-                <div class="col-12">
-                  <div class="form-check">
-                    <input class="form-check-input" type="checkbox" id="connVerify"/>
-                    <label class="form-check-label" for="connVerify">Verify SSL certificates</label>
-                  </div>
-                </div>
-
-                <div class="col-12"><hr class="my-0"/></div>
-
-                <!-- ── SSH fallback ── -->
-                <div class="col-12">
-                  <div class="form-check">
-                    <input class="form-check-input" type="checkbox" id="connSshEnabled" onchange="toggleSshFields()" checked/>
-                    <label class="form-check-label fw-semibold" for="connSshEnabled">
-                      <i class="bi bi-hdd-network me-1 text-warning"></i>Use SSH if the ES port isn't reachable
-                    </label>
-                  </div>
-                  <div class="form-text">
-                    Only if the direct connection fails: the app SSHes to the CC machine, tries to open the ES
-                    port on its firewall, and — if that still doesn't reach ES — forwards ES traffic through the
-                    SSH connection (port 22) as a fallback.
-                  </div>
-                </div>
-
-                <div id="sshFields" class="col-12">
-                  <div class="row g-3">
-                    <div class="col-6">
-                      <label class="form-label fw-semibold">
-                        <i class="bi bi-person-gear me-1"></i>SSH Username
-                      </label>
-                      <input id="connSshUser" type="text" class="form-control" placeholder="root" autocomplete="off"/>
-                      <div class="form-text">SSH login on the CC machine (used only to carry ES traffic; no firewall changes are made).</div>
-                    </div>
-                    <div class="col-6">
-                      <label class="form-label fw-semibold">
-                        <i class="bi bi-key me-1"></i>SSH Password
-                      </label>
-                      <div class="input-group">
-                        <input id="connSshPass" type="password" class="form-control" placeholder="••••••••" autocomplete="off"/>
-                        <button class="btn btn-outline-secondary" type="button" onclick="toggleSshPassVis()">
-                          <i class="bi bi-eye" id="sshPassEyeIcon"></i>
-                        </button>
+                    <div class="row g-2">
+                      <div class="col-6">
+                        <label class="form-label fw-semibold mb-1">ES Port</label>
+                        <input id="connPort" type="number" class="form-control form-control-sm" value="9200"/>
+                      </div>
+                      <div class="col-6">
+                        <label class="form-label fw-semibold mb-1">Protocol</label>
+                        <div class="d-flex gap-3 pt-1">
+                          <div class="form-check">
+                            <input class="form-check-input" type="radio" name="connScheme" id="schemeHttp" value="http" checked/>
+                            <label class="form-check-label small" for="schemeHttp">HTTP</label>
+                          </div>
+                          <div class="form-check">
+                            <input class="form-check-input" type="radio" name="connScheme" id="schemeHttps" value="https"/>
+                            <label class="form-check-label small" for="schemeHttps">HTTPS</label>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                    <div class="col-5">
-                      <label class="form-label fw-semibold">SSH Port</label>
-                      <input id="connSshPort" type="number" class="form-control" value="22"/>
+                  </div>
+                </div>
+
+                <!-- ── Column 2: Elasticsearch credentials ── -->
+                <div class="col-xxl-4 col-md-6">
+                  <div class="conn-group h-100">
+                    <div class="conn-group-title"><i class="bi bi-shield-lock me-1 text-info"></i>Elasticsearch auth <span class="text-secondary fw-normal">(optional)</span></div>
+
+                    <label class="form-label fw-semibold mb-1"><i class="bi bi-person me-1"></i>Username</label>
+                    <input id="connUser" type="text" class="form-control form-control-sm mb-2" placeholder="elastic" autocomplete="off"/>
+
+                    <label class="form-label fw-semibold mb-1"><i class="bi bi-key me-1"></i>Password</label>
+                    <div class="input-group input-group-sm mb-2">
+                      <input id="connPass" type="password" class="form-control" placeholder="••••••••" autocomplete="off"/>
+                      <button class="btn btn-outline-secondary" type="button" onclick="togglePassVis()">
+                        <i class="bi bi-eye" id="passEyeIcon"></i>
+                      </button>
+                    </div>
+
+                    <div class="form-check">
+                      <input class="form-check-input" type="checkbox" id="connVerify"/>
+                      <label class="form-check-label small" for="connVerify">Verify SSL certificates</label>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- ── Column 3: SSH fallback ── -->
+                <div class="col-xxl-4 col-md-12">
+                  <div class="conn-group h-100">
+                    <div class="conn-group-title">
+                      <div class="form-check mb-0">
+                        <input class="form-check-input" type="checkbox" id="connSshEnabled" onchange="toggleSshFields()" checked/>
+                        <label class="form-check-label fw-semibold" for="connSshEnabled"
+                               title="Only if the direct connection fails: the app SSHes to the CC machine, tries to open the ES port on its firewall, and — if that still doesn't reach ES — forwards ES traffic through the SSH connection (port 22) as a fallback.">
+                          <i class="bi bi-hdd-network me-1 text-warning"></i>Use SSH if the ES port isn't reachable
+                        </label>
+                      </div>
+                    </div>
+
+                    <!-- Inverse-responsive: this group sits beside the other two
+                         (narrow) only on xxl, where the fields stack; below that
+                         it spans the full row, so the fields go side by side. -->
+                    <div id="sshFields">
+                      <div class="row g-2">
+                        <div class="col-xxl-12 col-md-5">
+                          <label class="form-label fw-semibold mb-1"><i class="bi bi-person-gear me-1"></i>SSH Username</label>
+                          <input id="connSshUser" type="text" class="form-control form-control-sm" placeholder="root" autocomplete="off"
+                                 title="SSH login on the CC machine (used only to carry ES traffic; no firewall changes are made)."/>
+                        </div>
+                        <div class="col-xxl-12 col-md-4">
+                          <label class="form-label fw-semibold mb-1"><i class="bi bi-key me-1"></i>SSH Password</label>
+                          <div class="input-group input-group-sm">
+                            <input id="connSshPass" type="password" class="form-control" placeholder="••••••••" autocomplete="off"/>
+                            <button class="btn btn-outline-secondary" type="button" onclick="toggleSshPassVis()">
+                              <i class="bi bi-eye" id="sshPassEyeIcon"></i>
+                            </button>
+                          </div>
+                        </div>
+                        <div class="col-xxl-12 col-md-3">
+                          <label class="form-label fw-semibold mb-1">SSH Port</label>
+                          <input id="connSshPort" type="number" class="form-control form-control-sm" value="22"/>
+                        </div>
+                      </div>
+                      <div class="form-text mt-1">Used only as a fallback — no firewall changes are made.</div>
                     </div>
                   </div>
                 </div>
@@ -260,19 +284,6 @@
 
               <!-- Status feedback -->
               <div id="connFeedback" class="mt-3 d-none"></div>
-
-              <!-- Action buttons -->
-              <div class="d-flex gap-2 mt-4">
-                <button class="btn btn-primary flex-grow-1" onclick="doConnect()" id="btnConnect">
-                  <i class="bi bi-plug-fill me-1"></i>Connect
-                </button>
-                <button class="btn btn-outline-secondary" onclick="saveProfile()" title="Save this profile">
-                  <i class="bi bi-bookmark-plus"></i>
-                </button>
-                <button class="btn btn-outline-danger" onclick="clearForm()" title="Clear form">
-                  <i class="bi bi-x-lg"></i>
-                </button>
-              </div>
 
             </div><!-- /card-body -->
           </div><!-- /card -->

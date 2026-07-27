@@ -26,11 +26,18 @@ services:
       # Server-side index archives (<index>.csv.gz) — kept on a volume so they
       # survive container rebuilds.
       EXPORTS_DIR: "/app/exports"
+      # Where the host update agent leaves what it found (see below).
+      UPDATE_DIR: "/app/.update"
     volumes:
       - cc_es_analyzer_logs:/app/logs
       - cc_es_analyzer_exports:/app/exports
       # Remembered SSH credentials (encrypted) for snapshot archives.
       - cc_es_analyzer_data:/app/data
+      # Shared with deploy/update_agent.sh, which runs on the HOST beside this
+      # checkout: it writes what `git fetch` found and picks up the one-click
+      # update request the app drops here. A bind mount (not a named volume)
+      # because the other end of it is outside Docker.
+      - ./.update:/app/.update
     networks:
       - cc_es_analyzer_net
 

@@ -211,7 +211,80 @@ It auto-detects whether the app serves TLS (`SERVICE_SSL=true`) and proxies over
 `http://` accordingly — so the `/cc_es_analyzer/` URL keeps working whether or not
 the app port itself is HTTPS. `./deploy/install.sh` runs this step for you.
 
+### How the nginx is found (any name, container or service)
 
+Nothing matches on a container name — those differ on every host. `deploy/nginx_detect.py`
+works from the outside in:
+
+1. **Who owns the web port.** `ss`/`netstat` gives the PID listening on 443/80, which is
+   then resolved to what actually serves it — a process inside a container
+   (`/proc/<pid>/cgroup` → container id → `docker inspect`), the `docker-proxy` shim (→ the
+   container publishing that port), or a plain host process (nginx as a systemd service or
+   a hand-started binary).
+2. **Container scan.** Any running container whose name/image/entrypoint mentions nginx or
+   openresty; failing that, any container that *carries* an nginx binary.
+3. **Host binary.** An nginx/openresty install on the machine with a running master.
+
+The result is used the same way in both cases: config is read from `nginx -T` (the files
+nginx really loaded, wherever they live), the default `server{}` block is located
+structurally — no reliance on a `server_name _;` text anchor — and edits go to the host
+copy of a bind-mounted file, or through `docker cp` for image-baked ones, or straight to
+disk for a host nginx. Validation is always `nginx -t` before reload; a host nginx falls
+back to `systemctl reload` if `nginx -s reload` can't find the pid file.
+
+To just look at a machine without changing anything:
+
+```bash
+python3 deploy/nginx_detect.py
+```
+
+It prints the listening web ports, which nginx was found and how, its network mode and
+docker gateway, the loaded config files, and the default server block that would receive
+the location. `deploy/setup_nginx_path.py --local --detect-only` does the same. Pass
+`--proxy-container <name>` to override detection.
+
+## Updates
+
+The app knows its own version (the `VERSION` file at the repo root, also shown in the
+navbar) and tells users when the repository has a newer one — a green **Update to x.y.z**
+badge that opens a dialog listing what changed, with a one-click **Update now**.
+
+How that works depends on how the instance is deployed (`services/updater.py` picks
+automatically; the mode is shown in the version tooltip):
+
+| Mode | When | Check | One-click update |
+|---|---|---|---|
+| `agent` | Docker deployment (the normal case) | `deploy/update_agent.sh` runs on the host and does the `git fetch` with the same credentials that cloned the repo | yes — the agent fast-forwards and runs `docker compose up -d` |
+| `git` | running straight from a checkout (`python main.py`) | the app runs git itself | fast-forwards in place; the process still needs a restart |
+| `api` | no checkout, no agent | Bitbucket REST API (needs `UPDATE_BB_TOKEN`, or `UPDATE_BB_USER` + `UPDATE_BB_PASSWORD`) | no — the dialog shows the command to run |
+
+The container can neither reach the git remote nor rebuild itself, which is what the agent
+is for. They talk through one bind-mounted directory (`.update/`): the agent writes what it
+found, the app drops an update request there, the agent picks it up within ~5s and reports
+progress step by step. **The agent never runs anything the app sends it** — its only action
+is a fast-forward of the branch this checkout already tracks, followed by
+`docker compose up -d`. A dirty or diverged checkout aborts the update with the reason
+shown in the UI.
+
+`./deploy/install.sh` installs the agent as a systemd service. Manually:
+
+```bash
+sudo ./deploy/update_agent.sh --install     # systemd service, checks every 5 min
+./deploy/update_agent.sh --once             # one check, write .update/state.json, exit
+sudo ./deploy/update_agent.sh --uninstall
+```
+
+Both repositories work: for a checkout of the Bitbucket monorepo the agent restricts the
+"behind" count and the change list to the `cc_es_analyzer/` subfolder, so unrelated work
+elsewhere in the repo never looks like an update.
+
+Settings (`.env`): `UPDATE_CHECK_ENABLED` (default true), `UPDATE_ALLOW_APPLY` (set false
+for a check-only deployment), `UPDATE_DIR`, and the `UPDATE_BB_*` credentials for the API
+fallback.
+
+**Releasing a new version:** bump `VERSION` and push. Deployed instances notice within a
+few hours (or immediately via *Check again*). The badge also appears when there are new
+commits without a version bump.
 
 ## Auto-start at Windows logon
 
@@ -265,6 +338,10 @@ before login / survives logoff, register a boot-triggered task under the SYSTEM 
 | `GET` | `/api/cc/attacks` | Recent DP attacks |
 | `GET` | `/api/cc/attacks/summary` | Attack aggregations |
 | `GET` | `/api/cc/traffic` | Traffic data summary |
+| `GET` | `/api/update/status` | Installed vs available version (cached) |
+| `POST` | `/api/update/check` | Force a fresh check now |
+| `POST` | `/api/update/apply` | Pull the new version and restart |
+| `GET` | `/api/update/job` | Progress of the running/last update |
 
 Interactive API docs: **http://localhost:8000/docs**
 

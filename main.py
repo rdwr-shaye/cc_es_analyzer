@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
-from routers import artificial, exports, health, indices, presence, query
+from routers import artificial, exports, health, indices, presence, query, update
 import json
 import re
 import uvicorn
@@ -9,7 +9,7 @@ import logging
 import logging.handlers
 import os
 from config import settings
-from services import sessions
+from services import sessions, updater
 from services.es_client import POOL_SIZE, reset_session, set_session
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
@@ -39,7 +39,9 @@ logger.info("Log file: %s", LOG_FILE)
 app = FastAPI(
     title="CC Elasticsearch Analyzer",
     description="Analyze CyberController Elasticsearch data",
-    version="1.0.0",
+    # Single source of truth: the VERSION file at the repo root. Bumping it is
+    # what tells deployed instances that a new version exists.
+    version=updater.local_version(),
 )
 
 # ── Concurrency ───────────────────────────────────────────────────────────────
@@ -57,6 +59,10 @@ async def _widen_threadpool() -> None:
     anyio.to_thread.current_default_thread_limiter().total_tokens = REQUEST_THREADS
     logger.info("Request threadpool: %s threads · ES connection pool: %s",
                 REQUEST_THREADS, POOL_SIZE)
+    logger.info("CC ES Analyzer %s (update mode: %s)",
+                updater.local_version(), updater.mode())
+    # Look for a newer version off the request path, now and every few hours.
+    updater.start_background_checks()
 
 
 # ── Session / presence middleware ─────────────────────────────────────────────
@@ -136,6 +142,7 @@ app.include_router(query.router)
 app.include_router(exports.router)
 app.include_router(artificial.router)
 app.include_router(presence.router)
+app.include_router(update.router)
 
 # ── Static files + SPA catch-all ─────────────────────────────────────────────
 app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
