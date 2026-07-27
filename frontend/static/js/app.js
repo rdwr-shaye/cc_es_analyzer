@@ -55,6 +55,8 @@ function showView(name) {
   if (name === 'attacks'  && isConnected) loadAttacks();
   if (name === 'dashboard'&& isConnected) loadClusterHealth();
   if (name === 'summary'  && isConnected) loadSummary();
+  // Sort options depend on the index pattern's real date fields.
+  if (name === 'query' && isConnected && typeof loadSortFields === 'function') loadSortFields();
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -88,7 +90,7 @@ function refreshActiveViewer() {
 
 /** Re-run the last executed Query-Editor query (single or multi-index). */
 function refreshQueryResults() {
-  if (perIndexQueries.length > 1) runMultiQuery(perIndexQueries);
+  if (perIndexQueries.length > 1) runMultiQuery(includedPerIndexQueries());
   else runQuery();
 }
 
@@ -941,7 +943,9 @@ function clearSelection() {
 /** Build [{index, query_body}] for the current query (multi or single). */
 function currentQueryItems() {
   if (perIndexQueries.length > 1) {
-    return perIndexQueries.map(p => ({ index: p.index, query_body: p.query_body }));
+    // Only the groups the user kept — export / delete / modify must act on
+    // exactly what "Run All" ran, never on skipped indices.
+    return includedPerIndexQueries().map(p => ({ index: p.index, query_body: p.query_body }));
   }
   let qb;
   try { qb = JSON.parse(document.getElementById('queryBody').value); }
@@ -1666,9 +1670,12 @@ function generateQueryFromFilters() {
   // pattern; Query Editor → the executed query's index pattern(s).
   if (queryIndexEl) {
     if (activeViewer === 'index' && _currentIndexName) {
-      // e.g. "adc-network-hourly-ty-...-687" -> "adc-network-hourly-*"
-      const baseName = _currentIndexName.split('-ty-')[0];
-      queryIndexEl.value = baseName + '-*';
+      // e.g. "adc-network-hourly-ty-...-687" -> "adc-network-hourly*"
+      // The wildcard is appended WITHOUT a separating dash: an index whose name
+      // is exactly the base (e.g. "alert-sid-0") is matched by "alert-sid-0*"
+      // but not by "alert-sid-0-*", which requires at least one more character.
+      const baseName = _currentIndexName.split('-ty-')[0].replace(/-+$/, '');
+      queryIndexEl.value = baseName + '*';
     } else if (activeViewer === 'query' && _queryBaseItems?.length) {
       queryIndexEl.value = [...new Set(_queryBaseItems.map(it => it.index).filter(Boolean))].join(',');
     }
@@ -5560,24 +5567,63 @@ function renderPerIndexQueries(queries) {
 
   // Multi-index → hide the single textarea, show one editable query per index.
   section.classList.remove('d-none');
-  if (countBadge) countBadge.textContent = `${queries.length} groups`;
 
-  list.innerHTML = queries.map((q, i) => {
+  // Each group can be excluded from "Run All". A group whose query ended up as
+  // match_all matches EVERY document in that index — usually because none of
+  // the typed criteria exist there — so it is flagged and offered for removal.
+  queries.forEach(q => { if (q.include === undefined) q.include = true; });
+  const matchAllIdx = queries
+    .map((q, i) => (isMatchAllQuery(q.query_body) ? i : -1))
+    .filter(i => i >= 0 && queries[i].include);
+
+  if (countBadge) {
+    const on = queries.filter(q => q.include).length;
+    countBadge.textContent = on === queries.length
+      ? `${queries.length} groups` : `${on} of ${queries.length} groups`;
+  }
+
+  // The suggestion only makes sense once field references are settled — while
+  // suggestions are pending, a match_all may just be "not resolved yet".
+  const pending = (typeof fieldSuggestions !== 'undefined' && fieldSuggestions.length);
+  const banner = !matchAllIdx.length ? '' : pending
+    ? `<div class="alert alert-secondary py-1 px-2 small mb-1">
+         ${matchAllIdx.length} group(s) currently match every document — pick the right
+         field above first, then re-translate.</div>`
+    : `<div class="alert alert-warning py-1 px-2 small mb-1 d-flex align-items-center gap-2">
+         <i class="bi bi-exclamation-triangle-fill"></i>
+         <span class="flex-grow-1"><b>${matchAllIdx.length} of ${queries.length}</b> groups match
+           <b>every document</b> in their index — none of your criteria exist there.</span>
+         <button class="btn btn-sm btn-outline-warning py-0 px-2" onclick="dropMatchAllQueries()">
+           Skip those ${matchAllIdx.length}
+         </button>
+       </div>`;
+
+  list.innerHTML = banner + queries.map((q, i) => {
     const sortEntry  = q.query_body?.sort?.[0] || {};
     const sortField  = Object.keys(sortEntry)[0] || '—';
     const sortOrder  = sortEntry[sortField]?.order || '—';
     const dateFields = (q.date_fields || []).join(', ') || '—';
-    return `<div class="border border-secondary rounded mb-1" style="font-size:0.78rem;overflow:hidden;">
+    const matchAll   = isMatchAllQuery(q.query_body);
+    const off        = !q.include;
+    return `<div class="border rounded mb-1 ${off ? 'border-secondary' : matchAll ? 'border-warning' : 'border-secondary'}"
+                 style="font-size:0.78rem;overflow:hidden;${off ? 'opacity:.55;' : ''}">
       <div class="d-flex align-items-center px-2 py-1 gap-2"
-           style="cursor:pointer;background:rgba(255,255,255,0.04);"
-           onclick="this.nextElementSibling.classList.toggle('d-none')">
-        <i class="bi bi-layers text-info"></i>
-        <span class="text-info fw-semibold">${esc(q.index)}</span>
-        <span class="text-secondary small ms-2">date fields: ${esc(dateFields)}</span>
-        <span class="text-warning small ms-auto">sort: ${esc(sortField)} ${esc(sortOrder)}</span>
-        <i class="bi bi-chevron-down text-secondary ms-1"></i>
+           style="background:rgba(255,255,255,0.04);">
+        <input type="checkbox" class="form-check-input mt-0" ${q.include ? 'checked' : ''}
+               onclick="event.stopPropagation()" onchange="togglePerIndexQuery(${i}, this.checked)"
+               title="Include this index when running the plan"/>
+        <span class="flex-grow-1 d-flex align-items-center gap-2"
+              style="cursor:pointer;"
+              onclick="this.closest('div').nextElementSibling.classList.toggle('d-none')">
+          <i class="bi bi-layers text-info"></i>
+          <span class="text-info fw-semibold">${esc(q.index)}</span>
+          ${matchAll ? '<span class="badge bg-warning text-dark" title="This query has no filter — it returns every document in the index">matches ALL docs</span>' : ''}
+          <span class="text-secondary small ms-2">date fields: ${esc(dateFields)}</span>
+          <span class="text-warning small ms-auto">sort: ${esc(sortField)} ${esc(sortOrder)}</span>
+          <i class="bi bi-chevron-down text-secondary ms-1"></i>
+        </span>
       </div>
-      <div class="m-0 p-2" style="background:#111;">
+      <div class="m-0 p-2 d-none" style="background:#111;">
         <textarea class="form-control perindex-query" data-idx="${i}" spellcheck="false"
                   oninput="updatePerIndexQuery(${i}, this)"
                   style="font-size:0.72rem;font-family:monospace;min-height:170px;resize:vertical;
@@ -5586,6 +5632,50 @@ function renderPerIndexQueries(queries) {
       </div>
     </div>`;
   }).join('');
+
+  syncRunAllButton();
+}
+
+/** True when a query body has no filter at all (returns the whole index). */
+function isMatchAllQuery(body) {
+  const q = body?.query;
+  if (!q) return true;
+  if (q.match_all) return true;
+  // bool with only a match_all must (what translate builds for "nothing matched")
+  const b = q.bool;
+  if (b && !b.filter && !b.should && !b.must_not) {
+    const must = Array.isArray(b.must) ? b.must : (b.must ? [b.must] : []);
+    return must.length === 1 && !!must[0].match_all;
+  }
+  return false;
+}
+
+/** Groups the user kept — what Run All actually executes. */
+function includedPerIndexQueries() {
+  return perIndexQueries.filter(q => q.include !== false);
+}
+
+function togglePerIndexQuery(i, on) {
+  if (perIndexQueries[i]) perIndexQueries[i].include = !!on;
+  renderPerIndexQueries(perIndexQueries);
+}
+
+function dropMatchAllQueries() {
+  let n = 0;
+  perIndexQueries.forEach(q => {
+    if (q.include !== false && isMatchAllQuery(q.query_body)) { q.include = false; n++; }
+  });
+  renderPerIndexQueries(perIndexQueries);
+  showToast(`Skipped ${n} index(es) whose query matched everything`, 'bg-warning');
+}
+
+/** Run All reflects how many groups are actually selected. */
+function syncRunAllButton() {
+  const btn = document.getElementById('btnRunAll');
+  if (!btn) return;
+  const n = includedPerIndexQueries().length;
+  btn.disabled = n === 0;
+  btn.innerHTML = `<i class="bi bi-play-circle-fill me-1"></i>Run ${n} ${n === 1 ? 'Index' : 'Indices'}`;
 }
 
 /** Keep an edited per-index query in sync; flag invalid JSON inline. */
@@ -5843,10 +5933,50 @@ function _updateTimeRangeBtn() {
 
 /* ── Sort picker ─────────────────────────────────────────────────────────── */
 function onSortChanged() {
-  const hint = document.getElementById('sortHint')?.value ?? 'start';
+  const hint = document.getElementById('sortHint')?.value ?? '';
   const grp  = document.getElementById('sortDirGroup');
   // Hide direction buttons when "None" is selected
   if (grp) grp.style.opacity = hint ? '1' : '0.35';
+}
+
+/* ── Sort field picker ──────────────────────────────────────────────────────
+ * Offer the date fields the index pattern ACTUALLY has. There is no universal
+ * startTime/endTime in CC: dp-attack-raw-* has startTime+endTime, other
+ * families have timeStamp, day, or nothing at all — and asking ES to sort on a
+ * field an index lacks fails the whole search. Default stays "None". */
+let _sortFieldsKey = '';
+
+async function loadSortFields(force) {
+  const sel = document.getElementById('sortHint');
+  const hintEl = document.getElementById('sortFieldHint');
+  const pattern = (document.getElementById('queryIndex')?.value || '').trim();
+  if (!sel) return;
+  if (!pattern) { _sortFieldsKey = ''; return; }
+  if (pattern === _sortFieldsKey && !force) return;
+
+  const list = pattern.split(',').map(s => s.trim()).filter(Boolean);
+  let dates = [];
+  try {
+    const d = await api('/api/indices/exact-fields', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ indices: list }),
+    });
+    if (d && !d.error) dates = d.dates || [];
+  } catch { /* leave the picker as-is; the query just goes unsorted */ }
+  _sortFieldsKey = pattern;
+
+  const keep = sel.value;
+  sel.innerHTML = '<option value="">None</option>' +
+    dates.map(f => `<option value="${esc(f)}">${esc(f)}</option>`).join('');
+  // Keep the user's choice when it still exists in the new pattern.
+  sel.value = dates.includes(keep) ? keep : '';
+  onSortChanged();
+  if (hintEl) {
+    hintEl.textContent = dates.length
+      ? `${dates.length} date field(s) in this pattern`
+      : 'no date fields in this pattern — results are unsorted';
+    hintEl.className = 'small fst-italic ' + (dates.length ? 'text-secondary' : 'text-warning');
+  }
 }
 
 /* ── Attack-type picker ──────────────────────────────────────────────────── */
@@ -6482,14 +6612,17 @@ const HELP_CONTENT = {
       <p>Build and run Elasticsearch queries — either by typing plain English or by editing the raw JSON.</p>
       <h6>Natural-language box</h6>
       <ul>
-        <li>Type criteria in plain English, then <b>Translate</b>. Field names, IPs, attack IDs and quoted values are recognised automatically.</li>
+        <li>Type criteria in plain English, then <b>Translate</b>. Field names, IPs, attack IDs and quoted values are recognised automatically. The box is multi-line — one criterion per line reads best; <kbd>Enter</kbd> translates, <kbd>Shift</kbd>+<kbd>Enter</kbd> adds a line.</li>
+        <li>A criterion that matches <b>no field in the index</b> is not silently ignored: its badge is struck through and a warning says it was not applied — including when that leaves the query matching every document.</li>
         <li><b>OR within a field, AND across fields:</b> <i>"sourceIp is A or B or C and policyName is pol5"</i> → <code>(sourceIp IN [A,B,C]) AND (policyName = pol5)</code>. OR-ed values collapse into one <code>terms</code> clause.</li>
-        <li><b>Types</b> picker filters by attack category; <b>Time</b> sets a start/end range (each with lower and upper bounds); <b>Sort</b> chooses the order.</li>
+        <li><b>Types</b> picker filters by attack category; <b>Time</b> sets a start/end range (each with lower and upper bounds).</li>
+        <li><b>Sort by</b> lists the date fields the current index pattern <i>actually has</i> (they differ per family — <code>startTime</code>/<code>endTime</code>, <code>timestamp</code>, <code>raisedTime</code>…) and defaults to <b>None</b>. Sorting on a field an index lacks makes Elasticsearch reject the whole search, so nothing is assumed; change the pattern and the list follows.</li>
         <li><b>Interpreted as…</b> shows exactly how your text was understood; <b>Field suggestions</b> appear when a reference is ambiguous, so you can pick the right field.</li>
       </ul>
       <h6>Running</h6>
       <ul>
-        <li>Edit the <b>JSON body</b> directly and set the <b>index pattern</b> (comma-separated, wildcards allowed). <b>Run</b> a single query or <b>Run All</b> across a multi-index plan.</li>
+        <li>Edit the <b>JSON body</b> directly and set the <b>index pattern</b> (comma-separated, wildcards allowed). <b>Run</b> a single query or run the multi-index plan.</li>
+        <li>In a multi-index plan each group has a <b>checkbox</b> — untick one to leave that index out. Groups whose query came out as <code>match_all</code> are badged <b>matches ALL docs</b> (your criteria don't exist in that index) and a one-click <b>Skip those N</b> drops them. The Run button shows how many groups are selected, and export / delete / modify act only on those.</li>
       </ul>
       <h6>Working with results</h6>
       <ul>

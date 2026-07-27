@@ -7,7 +7,7 @@ from fastapi import APIRouter, Query, UploadFile, File
 from pydantic import BaseModel
 from services.es_client import get_client
 from services.cc_indices import CC_INDEX_CATALOG, CATEGORIES, resolve_prefix
-from services.field_types import exact_field_map, resolve_exact
+from services.field_types import date_fields, exact_field_map, resolve_exact
 
 router = APIRouter(prefix="/api/indices", tags=["indices"])
 
@@ -290,13 +290,19 @@ def exact_fields(req: ExactFieldsRequest):
         if not idx_list:
             return {"error": "no index provided", "map": {}}
         merged: dict = {}
+        dates: list = []
         for idx in idx_list:
             for field, exact in exact_field_map(es, idx).items():
                 merged.setdefault(field, exact)
+            for d in date_fields(es, idx):
+                if d not in dates:
+                    dates.append(d)
         # Only the fields that actually need redirecting are interesting to the
-        # client; everything else maps to itself.
+        # client; everything else maps to itself. `dates` drives the sort/time
+        # pickers, which offer this index's real date fields rather than
+        # assuming startTime/endTime exist.
         return {"map": {f: e for f, e in merged.items() if f != e},
-                "fields": len(merged)}
+                "fields": len(merged), "dates": sorted(dates)}
     except Exception as e:
         return {"error": str(e), "map": {}}
 

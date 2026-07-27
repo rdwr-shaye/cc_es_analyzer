@@ -674,26 +674,36 @@
             <div class="card-header fw-semibold">Query</div>
             <div class="card-body d-flex flex-column gap-2" style="overflow-y:auto;">
 
-              <!-- Natural language input -->
-              <div class="input-group">
-                <span class="input-group-text bg-dark text-info border-secondary" title="Natural language query">
-                  <i class="bi bi-chat-text"></i>
-                </span>
-                <input id="nlQueryInput" type="text" class="form-control bg-dark text-light border-secondary"
-                       placeholder='e.g. "DNS attacks on device 10.205.102.50 today"'
-                       style="font-size:0.85rem;"
-                       onkeydown="if(event.key==='Enter') translateNlQuery()"/>
-                 <button class="btn btn-outline-secondary btn-sm" id="btnTypePicker"
-                         onclick="toggleAttackTypePicker()" title="Filter by attack type">
-                   <i class="bi bi-tags me-1"></i>Types
-                 </button>
-                 <button class="btn btn-outline-secondary btn-sm" id="btnTimeRange"
-                         onclick="toggleTimeRangePicker()" title="Filter by time range">
-                   <i class="bi bi-calendar-range me-1"></i>Time
-                 </button>
-                 <button class="btn btn-outline-info btn-sm" onclick="translateNlQuery()" title="Translate to ES query">
-                  <i class="bi bi-magic me-1"></i>Translate
-                </button>
+              <!-- Natural language input — a proper multi-line editor, so long
+                   criteria stay readable instead of scrolling inside a one-line
+                   field. Enter still translates; Shift+Enter adds a line. -->
+              <div>
+                <div class="d-flex align-items-center gap-2 mb-1">
+                  <span class="small text-info fw-semibold">
+                    <i class="bi bi-chat-text me-1"></i>Free-text query
+                  </span>
+                  <span class="small text-secondary ms-auto" style="font-size:0.7rem;">
+                    <kbd>Enter</kbd> translate · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line
+                  </span>
+                </div>
+                <textarea id="nlQueryInput" rows="5"
+                          class="form-control bg-dark text-light border-secondary"
+                          placeholder='e.g. "DNS attacks on device 10.205.102.50 today"&#10;one criterion per line reads best:&#10;  sourceAddress is 1.2.3.4 or 5.6.7.8&#10;  category is DNS'
+                          style="font-size:0.85rem;min-height:120px;resize:vertical;"
+                          onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();translateNlQuery();}"></textarea>
+                <div class="d-flex gap-2 mt-1 flex-wrap">
+                  <button class="btn btn-outline-secondary btn-sm" id="btnTypePicker"
+                          onclick="toggleAttackTypePicker()" title="Filter by attack type">
+                    <i class="bi bi-tags me-1"></i>Types
+                  </button>
+                  <button class="btn btn-outline-secondary btn-sm" id="btnTimeRange"
+                          onclick="toggleTimeRangePicker()" title="Filter by time range">
+                    <i class="bi bi-calendar-range me-1"></i>Time
+                  </button>
+                  <button class="btn btn-info btn-sm ms-auto" onclick="translateNlQuery()" title="Translate to ES query">
+                    <i class="bi bi-magic me-1"></i>Translate
+                  </button>
+                </div>
               </div>
               <div id="nlInterpretation" class="d-none small text-success px-1"></div>
 
@@ -770,12 +780,14 @@
                 <span class="small text-secondary text-nowrap">
                   <i class="bi bi-sort-down me-1"></i>Sort by:
                 </span>
+                <!-- Options are filled from the index pattern's REAL date fields
+                     (loadSortFields); "None" is the default because most CC
+                     families have no startTime/endTime and sorting on a missing
+                     field makes Elasticsearch reject the search. -->
                 <select id="sortHint" class="form-select form-select-sm"
-                        style="width:120px;font-size:0.78rem;background:#2a2a2a;color:#ddd;border-color:rgba(255,255,255,0.2);"
+                        style="width:180px;font-size:0.78rem;background:#2a2a2a;color:#ddd;border-color:rgba(255,255,255,0.2);"
                         onchange="onSortChanged()">
-                  <option value="start" selected>Start Time</option>
-                  <option value="end">End Time</option>
-                  <option value="">None</option>
+                  <option value="" selected>None</option>
                 </select>
                 <div class="btn-group btn-group-sm" id="sortDirGroup">
                   <input type="radio" class="btn-check" name="sortDir" id="sortDesc" value="desc" checked autocomplete="off">
@@ -787,7 +799,8 @@
               </div>
 
               <div class="d-flex gap-2">
-                <input id="queryIndex" type="text" class="form-control" placeholder="Index pattern (e.g. dp-attack-raw-*)" value="dp-attack-raw-*"/>
+                <input id="queryIndex" type="text" class="form-control" placeholder="Index pattern (e.g. dp-attack-raw-*)" value="dp-attack-raw-*"
+                       onchange="loadSortFields(true)"/>
                 <input id="querySize" type="number" class="form-control" placeholder="Size" value="10" style="width:80px;"/>
               </div>
               <textarea id="queryBody" class="form-control flex-grow-1"
@@ -815,7 +828,7 @@
                 <button class="btn btn-success" id="btnRunSingle" onclick="runQuery()">
                   <i class="bi bi-play-fill me-1"></i>Run Query
                 </button>
-                <button class="btn btn-primary d-none" id="btnRunAll" onclick="runMultiQuery(perIndexQueries)">
+                <button class="btn btn-primary d-none" id="btnRunAll" onclick="runMultiQuery(includedPerIndexQueries())">
                   <i class="bi bi-play-circle-fill me-1"></i>Run All Indices
                 </button>
                 <button class="btn btn-outline-secondary btn-sm" id="btnFormat" onclick="formatQuery()">

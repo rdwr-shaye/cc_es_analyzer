@@ -1093,24 +1093,44 @@ def translate_nl_query(req: NLQueryRequest):
                                 group_pattern, ref["words"],
                                 [c["field"] for c in cands], why)
 
-        # Started-at → field with "start"
+        # Started-at → field with "start". An index with no date field at all
+        # gets no range clause (and the caller is told) rather than a range on
+        # an invented "startTime".
         if start_bounds:
             sf, sf_reason = _pick_date_field_verbose(date_fields, "start")
-            group_must.append({"range": {sf: dict(start_bounds)}})
+            if sf:
+                _note(("start", 0), True)
+                group_must.append({"range": {sf: dict(start_bounds)}})
+            else:
+                _note(("start", 0), False,
+                      {"kind": "time", "label": "started at", "values": [], "op": "range",
+                       "reason": "this index has no date field to range on"})
             logger.info("[translate] %s  START  chosen=%r  reason=%s  bounds=%s",
                         group_pattern, sf, sf_reason, start_bounds)
 
         # Ended-at → field with "end" (or non-"start" fallback)
         if end_bounds:
             ef, ef_reason = _pick_date_field_verbose(date_fields, "end")
-            group_must.append({"range": {ef: dict(end_bounds)}})
+            if ef:
+                _note(("end", 0), True)
+                group_must.append({"range": {ef: dict(end_bounds)}})
+            else:
+                _note(("end", 0), False,
+                      {"kind": "time", "label": "ended at", "values": [], "op": "range",
+                       "reason": "this index has no date field to range on"})
             logger.info("[translate] %s  END    chosen=%r  reason=%s  bounds=%s",
                         group_pattern, ef, ef_reason, end_bounds)
 
         # NL relative time → applied on start field
         if nl_time:
             tf = _pick_date_field(date_fields, "start")
-            group_must.append({"range": {tf: {"gte": nl_time["value"]}}})
+            if tf:
+                _note(("nltime", 0), True)
+                group_must.append({"range": {tf: {"gte": nl_time["value"]}}})
+            else:
+                _note(("nltime", 0), False,
+                      {"kind": "time", "label": nl_time["label"], "values": [], "op": "range",
+                       "reason": "this index has no date field to range on"})
 
         # Build query — bool whenever there are negations or multiple clauses.
         if group_must_not:
@@ -1130,9 +1150,18 @@ def translate_nl_query(req: NLQueryRequest):
         # (e.g. endTime in dp-attack-extra-*) are filtered out before picking.
         if req.sort_hint and req.sort_direction in ("asc", "desc"):
             sort_field, sort_reason = _resolve_sort_field(es, group_pattern, req.sort_hint)
-            body["sort"] = [{sort_field: {"order": req.sort_direction}}]
+            if sort_field:
+                _note(("sort", 0), True)
+                body["sort"] = [{sort_field: {"order": req.sort_direction}}]
+            else:
+                # Sorting on a field this index doesn't have makes ES fail the
+                # whole search, so the plan is simply left unsorted.
+                _note(("sort", 0), False,
+                      {"kind": "sort", "label": f"sort by {req.sort_hint}", "values": [],
+                       "op": "sort", "reason": "no sortable date field in this index"})
             logger.info("[translate] %s  SORT  hint=%r  chosen=%r  reason=%s  order=%s",
-                        group_pattern, req.sort_hint, sort_field, sort_reason, req.sort_direction)
+                        group_pattern, req.sort_hint, sort_field or "(none)",
+                        sort_reason, req.sort_direction)
 
         per_index_queries.append({
             "index":       group_pattern,
@@ -2506,11 +2535,19 @@ def _pick_date_field_verbose(date_fields: list[str], hint: str) -> tuple[str, st
     When date_fields is empty, returns a hard-coded fallback
     ("endTime" for hint="end", "startTime" otherwise).
     """
-    fallback = "endTime" if hint == "end" else "startTime"
     if not date_fields:
-        return fallback, f"no date fields in mapping — hard-coded fallback '{fallback}'"
+        # No inventing a name: "startTime"/"endTime" do not exist in every CC
+        # family, and sorting or ranging on an absent field either errors or
+        # silently returns nothing. The caller drops the clause and says so.
+        return "", "no date fields in this index"
 
     if hint:
+        # 0. The caller may pass a concrete field name (the UI now offers the
+        #    index's real date fields rather than a generic start/end hint).
+        for f in date_fields:
+            if hint == f:
+                return f, f"explicit field '{f}'"
+
         # 1. Direct name match (e.g. "end" in "endTime")
         for f in date_fields:
             if hint.lower() in f.lower():
@@ -2563,11 +2600,12 @@ def _resolve_sort_field(es, index: str, hint: str) -> tuple[str, str]:
 
     Returns (field_name, reason_string).
     """
-    fallback = "endTime" if hint == "end" else "startTime"
     fields = _collect_date_fields(es, index)
 
     if not fields:
-        return fallback, f"no date fields in mapping — hard-coded fallback '{fallback}'"
+        # Empty, not a guessed name: ES fails the whole search when asked to
+        # sort on a field the index doesn't have.
+        return "", "no date fields in this index — leaving the query unsorted"
 
     # Prefer fields that are sortable (doc_values not explicitly disabled).
     sortable = [name for name, ok in fields if ok]

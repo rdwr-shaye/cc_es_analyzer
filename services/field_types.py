@@ -131,3 +131,42 @@ def resolve_exact(es, index: str, field: str) -> str:
     if not field:
         return field
     return exact_field_map(es, index).get(field, field)
+
+
+def date_fields(es, index: str) -> list[str]:
+    """Date-typed leaf fields of *index*, sorted.
+
+    The UI offers these as sort/range choices instead of assuming every CC
+    family has `startTime` / `endTime` — most don't, and sorting on a field an
+    index lacks makes Elasticsearch reject the whole search.
+    """
+    out: list[str] = []
+    try:
+        resp = es.get(f"/{index}/_mapping", params={})
+    except Exception as exc:
+        logger.warning("[field_types] mapping fetch for %r failed: %s", index, exc)
+        return out
+
+    def _walk(props: dict, prefix: str) -> None:
+        for name, spec in (props or {}).items():
+            if not isinstance(spec, dict):
+                continue
+            path = f"{prefix}{name}"
+            nested = spec.get("properties")
+            if isinstance(nested, dict):
+                _walk(nested, path + ".")
+            elif spec.get("type") == "date" and path not in out:
+                out.append(path)
+
+    def _collect(node) -> None:
+        if not isinstance(node, dict):
+            return
+        props = node.get("properties")
+        if isinstance(props, dict):
+            _walk(props, "")
+            return
+        for v in node.values():
+            _collect(v)
+
+    _collect(resp)
+    return sorted(out)
