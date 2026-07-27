@@ -43,6 +43,17 @@
       <i class="bi bi-plug me-1"></i>Configure
     </button>
   </div>
+
+  <!-- Who else is on this CC right now -->
+  <div id="presenceBox" class="d-flex align-items-center gap-2 ms-auto">
+    <button id="presencePeers" class="btn btn-sm py-0 px-2 d-none" onclick="showPresenceDetail()"
+            title="Other users working on this CC">
+      <i class="bi bi-people-fill me-1"></i><span id="presenceCount">0</span>
+    </button>
+    <button id="presenceMe" class="btn btn-sm btn-outline-secondary py-0 px-2"
+            onclick="promptDisplayName()" title="This is how other users see you — click to set your name"
+            style="font-size:0.72rem;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></button>
+  </div>
 </nav>
 
 <!-- ── LAYOUT ────────────────────────────────────────────────��──────── -->

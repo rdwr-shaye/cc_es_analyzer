@@ -939,6 +939,7 @@ async function deleteSelectedRows(el) {
   const doc = el ? el.ownerDocument : document;
   const docs = [...selectedRows].map(k => { const [index, id] = k.split(ROWSEP); return { index, id }; });
   if (!docs.length) return;
+  if (!await confirmSharedCc(`delete ${docs.length} document(s)`, doc)) return;
 
   // When a column filter is active and more docs match the same filter
   // server-side than are loaded here (Show limit smaller than the match total),
@@ -1287,6 +1288,8 @@ async function columnFieldOp(op, el) {
       localPredicate = (r) => vis.has(rowKey(r));
     }
   }
+
+  if (!await confirmSharedCc(`bulk-edit ${cols.length} field(s)`)) return;
 
   let total = 0;
   const partial = payloadBase._partial;
@@ -1688,7 +1691,7 @@ async function editCell(id, index, field, el) {
   const shown = cur == null ? '' : (typeof cur === 'object' ? JSON.stringify(cur) : String(cur));
   const input = await uiPrompt(doc, { title: `Set "${field}" for _id ${id}`, value: shown, okText: 'Save' });
   if (input === null) return;                 // cancelled
-  await applyDocChange(id, index, field, 'set', input);
+  await applyDocChange(id, index, field, 'set', input, doc);
 }
 
 async function deleteCell(id, index, field, el) {
@@ -1697,11 +1700,13 @@ async function deleteCell(id, index, field, el) {
     message: `Remove "${field}" from document _id ${id}. This deletes the field from the ES document.`,
     okText: 'Delete', danger: true });
   if (!ok) return;
-  await applyDocChange(id, index, field, 'delete', null);
+  await applyDocChange(id, index, field, 'delete', null, doc);
 }
 
-async function applyDocChange(id, index, field, op, value) {
+async function applyDocChange(id, index, field, op, value, doc) {
   if (!writeMode) { showToast('Enable Write mode first', 'bg-warning'); return; }
+  if (!await confirmSharedCc(
+        `${op === 'delete' ? 'delete' : 'edit'} field "${field}" on a document`, doc)) return;
   const res = await api('/api/doc/update', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2660,6 +2665,7 @@ async function exportSelectedIndicesBrowser(names) {
 async function deleteSelectedIndices() {
   const names = [...selectedIndices];
   if (!names.length) return;
+  if (!await confirmSharedCc(`delete ${names.length} ${names.length > 1 ? 'indices' : 'index'}`)) return;
   const ok = await uiConfirm(document, {
     title: `Delete ${names.length} ${names.length > 1 ? 'indices' : 'index'}?`,
     message: 'This permanently deletes: ' + names.join(', '),
@@ -3006,6 +3012,7 @@ async function _confirmExistingTargets(targets) {
  *  CSV archives prompt for target index names as before. */
 async function restoreArchives(names) {
   if (!names.length) return;
+  if (!await confirmSharedCc(`restore ${names.length} archive(s) into this CC`)) return;
   const zips = names.filter(n => n.endsWith('.zip'));
   names = names.filter(n => !n.endsWith('.zip'));
   for (const z of zips) {
@@ -3452,6 +3459,7 @@ async function openPossibleIndexPicker() {
  *  header and from the dashboard table's per-row action. */
 async function deleteIndexByName(name) {
   if (!name) return;
+  if (!await confirmSharedCc(`delete index "${name}"`)) return;
   const typed = await uiPrompt(document, {
     title: `Delete index — type "${name}" to confirm`,
     value: '', okText: 'Delete',
@@ -3600,6 +3608,7 @@ async function duplicateIndex(name) {
   if (!name) return;
   const opts = await duplicateIndexDialog(name);
   if (!opts) return;
+  if (!await confirmSharedCc(`duplicate index "${name}"`)) return;
 
   const sections = indexNameDigitSections(name);
   const looping  = opts.copies > 1 || opts.steps.some(s => s);
@@ -3647,6 +3656,7 @@ function importCsvToIndex() {
 }
 
 async function doImportCsv(indexName, file) {
+  if (!await confirmSharedCc(`import CSV into "${indexName}"`)) return;
   const ok = await uiConfirm(document, {
     title: `Import into "${indexName}"?`,
     message: `Add rows from "${file.name}" (${(file.size / 1024).toFixed(1)} KB) as documents. `
@@ -4163,6 +4173,8 @@ async function createArtificialData(indexName) {
   async function submitArtificial(confirmSpill) {
     const g = granSeconds();
     if (!g || g < 1) { showToast('Granularity must be at least 1 second', 'bg-danger'); return; }
+    // Ask once, on the first attempt — a spill re-submit is the same action.
+    if (!confirmSpill && !await confirmSharedCc(`write artificial data into "${indexName}"`)) return;
     const mode = wrap.querySelector('input[name="ad-span"]:checked')?.value || 'relative';
     const payload = {
       index: indexName,
@@ -5525,6 +5537,157 @@ function showToast(msg, bgClass = 'bg-dark') {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   PRESENCE — who else is working on this CC
+   ══════════════════════════════════════════════════════════════════════════
+   The server identifies each browser by a session cookie and tracks which ES
+   target it is connected to. We poll for co-users so we can (a) show them in
+   the navbar, (b) warn BEFORE this user changes data, and (c) surface the
+   notifications the server queued when THEY changed data. */
+
+let _presence = { you: null, peers: [] };
+let _presenceTimer = null;
+const PRESENCE_POLL_MS = 7000;
+
+function _peerLine(p) {
+  const bits = [p.ip];
+  if (p.hostname && p.hostname !== p.label) bits.push(p.hostname);
+  if (p.agent) bits.push(p.agent);
+  const idle = p.idle_seconds > 60
+    ? ` · idle ${Math.floor(p.idle_seconds / 60)}m` : '';
+  return `${p.label} (${bits.filter(Boolean).join(' · ')})${idle}`;
+}
+
+function renderPresence() {
+  const peers = _presence.peers || [];
+  const btn = document.getElementById('presencePeers');
+  const cnt = document.getElementById('presenceCount');
+  const me = document.getElementById('presenceMe');
+  if (!btn || !me) return;
+  if (peers.length) {
+    btn.classList.remove('d-none');
+    // Amber once someone else is here — this is the "be careful" signal.
+    btn.className = 'btn btn-sm py-0 px-2 btn-warning';
+    cnt.textContent = `${peers.length} other${peers.length > 1 ? 's' : ''} on this CC`;
+    btn.title = 'Also working on this CC:\n' + peers.map(p => '• ' + _peerLine(p)).join('\n');
+  } else {
+    btn.classList.add('d-none');
+  }
+  const you = _presence.you;
+  me.textContent = you ? `you: ${you.label}` : 'you';
+  me.title = you
+    ? `You are shown to others as "${you.label}"`
+      + `\nIP ${you.ip}${you.hostname ? ' · ' + you.hostname : ''}`
+      + `${you.agent ? ' · ' + you.agent : ''}\n\nClick to set a display name.`
+    : 'Click to set a display name';
+}
+
+/** Peer-activity notifications are important and must not be missed, so they
+ *  get a persistent banner rather than a 3-second toast. */
+function showPeerNotification(n) {
+  let box = document.getElementById('peerAlerts');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'peerAlerts';
+    box.className = 'peer-alerts';
+    document.body.appendChild(box);
+  }
+  const when = new Date((n.ts || 0) * 1000).toLocaleTimeString();
+  const el = document.createElement('div');
+  el.className = 'peer-alert';
+  el.innerHTML = `<i class="bi bi-exclamation-triangle-fill me-2"></i>
+    <div class="flex-grow-1">
+      <div><b>${esc(n.actor)}</b> ${esc(n.action)}
+        ${n.detail ? `<span class="font-monospace">${esc(n.detail)}</span>` : ''}
+        on the CC you are working on.</div>
+      <div class="small text-secondary">${esc(n.actor_ip || '')} · ${esc(when)}
+        — your view may be out of date; refresh before you act on it.</div>
+    </div>
+    <button class="btn btn-sm btn-outline-light py-0 px-1 ms-2">✕</button>`;
+  el.querySelector('button').onclick = () => el.remove();
+  box.appendChild(el);
+  setTimeout(() => el.remove(), 60000);
+}
+
+async function pollPresence() {
+  try {
+    const d = await api('/api/presence');
+    if (!d || d.error) return;
+    _presence = { you: d.you, peers: d.peers || [] };
+    renderPresence();
+    (d.notifications || []).forEach(showPeerNotification);
+  } catch { /* transient — next tick retries */ }
+}
+
+function startPresence() {
+  if (_presenceTimer) return;
+  pollPresence();
+  _presenceTimer = setInterval(pollPresence, PRESENCE_POLL_MS);
+}
+
+function showPresenceDetail() {
+  const peers = _presence.peers || [];
+  uiChoice(document, {
+    title: `${peers.length} other user${peers.length > 1 ? 's' : ''} on this CC`,
+    message: peers.length
+      ? peers.map(p => '• ' + _peerLine(p)).join('\n')
+      : 'Nobody else is connected to this CC right now.',
+    buttons: [{ value: null, text: 'Close', cls: 'btn-secondary' }],
+  });
+}
+
+async function promptDisplayName() {
+  const cur = _presence.you?.name || '';
+  const name = await uiPrompt(document, {
+    title: 'Your display name — shown to other users on the same CC',
+    value: cur, okText: 'Save',
+  });
+  if (name == null) return;
+  const d = await api('/api/presence/name', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name.trim() }),
+  });
+  if (d && !d.error) { _presence = { you: d.you, peers: d.peers || [] }; renderPresence(); }
+}
+
+/* Once the user has acknowledged "others are on this CC", don't re-prompt for
+ * every cell edit. The acknowledgement is keyed by WHO is present, so it
+ * lapses the moment a different user joins — and expires on its own. */
+let _sharedCcAck = { key: '', until: 0 };
+const SHARED_ACK_MS = 5 * 60 * 1000;
+
+/** Gate every data-changing action: when other users are on this CC, name them
+ *  and make the user confirm. Returns true to proceed.
+ *  `action` is a short description, e.g. 'delete index "foo"'.
+ *  `doc` targets the pop-out results window when the action started there —
+ *  these handlers run in the main window's context, so the dialog would
+ *  otherwise open behind the window the user is looking at. */
+async function confirmSharedCc(action, doc) {
+  doc = doc || document;
+  let peers = [];
+  try {
+    const d = await api('/api/presence/peers');       // live, not the poll cache
+    peers = d?.peers || [];
+    _presence.peers = peers; renderPresence();
+  } catch { /* if presence is unavailable, don't block the user's work */ }
+  if (!peers.length) return true;
+
+  const key = peers.map(p => p.sid_short).sort().join(',');
+  if (_sharedCcAck.key === key && Date.now() < _sharedCcAck.until) return true;
+
+  const names = peers.map(p => '• ' + _peerLine(p)).join('\n');
+  const ok = await uiConfirm(doc, {
+    title: '⚠ You are about to change data on a shared CC',
+    message: `You are about to ${action}.\n\n`
+           + `${peers.length} other user${peers.length > 1 ? 's are' : ' is'} `
+           + `working on this same CC right now:\n${names}\n\n`
+           + `They will be notified of this change. Continue?`,
+    okText: 'Yes, continue', danger: true,
+  });
+  if (ok) _sharedCcAck = { key, until: Date.now() + SHARED_ACK_MS };
+  return !!ok;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    UTILITIES
    ══════════════════════════════════════════════════════════════════════════ */
 async function api(url, opts = {}) {
@@ -5553,6 +5716,7 @@ function esc(s) {
   initQuerySplitter();
   initAutoRefresh();
   renderProfiles();
+  startPresence();
 
   // Try to restore last-used connection
   const saved = localStorage.getItem(LS_ACTIVE);
@@ -5619,6 +5783,13 @@ const HELP_CONTENT = {
         <li>Click <b>Connect</b> — the app pings ES and stores the working connection.</li>
         <li>The top bar shows a green pill with the machine, cluster name and ES version once connected.</li>
       </ol>
+      <h6>Working alongside other people</h6>
+      <ul>
+        <li>Your connection is <b>yours alone</b> — each browser gets its own session, so colleagues can work on different CC machines at the same time without affecting each other.</li>
+        <li>When someone else is connected to the <b>same</b> CC, an amber <b>“N others on this CC”</b> badge appears in the top bar; hover or click it to see who (name, IP, hostname, browser).</li>
+        <li>Click the <b>“you: …”</b> button beside it to set the display name others see instead of your IP.</li>
+        <li>Before you change anything on a shared CC — delete, edit, import, restore, generate — you get a warning naming the other users, and <b>they are notified</b> of what you did.</li>
+      </ul>
       <p class="help-tip">The analyzer talks to ES over raw HTTP (not elasticsearch-py), so it works with the older / proxied ES versions common on CC deployments.</p>`,
   },
   dashboard: {

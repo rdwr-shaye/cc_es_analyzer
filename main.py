@@ -1,12 +1,16 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from routers import artificial, exports, health, indices, query
+from fastapi.responses import FileResponse, Response
+from routers import artificial, exports, health, indices, presence, query
+import json
+import re
 import uvicorn
 import logging
 import logging.handlers
 import os
 from config import settings
+from services import sessions
+from services.es_client import POOL_SIZE, reset_session, set_session
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 LOG_DIR  = os.path.join(os.path.dirname(__file__), "logs")
@@ -38,12 +42,99 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# ── Concurrency ───────────────────────────────────────────────────────────────
+# Almost every endpoint is a sync `def`, so FastAPI runs it in AnyIO's
+# threadpool — 40 threads by default, which ~20 users (each firing several
+# parallel XHRs per screen) can exhaust. Raise it, and keep the ES connection
+# pool (services/es_client.POOL_SIZE) the same size so requests don't queue in
+# one place only to churn TCP connections in the other.
+REQUEST_THREADS = POOL_SIZE
+
+
+@app.on_event("startup")
+async def _widen_threadpool() -> None:
+    import anyio.to_thread
+    anyio.to_thread.current_default_thread_limiter().total_tokens = REQUEST_THREADS
+    logger.info("Request threadpool: %s threads · ES connection pool: %s",
+                REQUEST_THREADS, POOL_SIZE)
+
+
+# ── Session / presence middleware ─────────────────────────────────────────────
+# Requests that CHANGE data on the connected CC. Matched on method + path so a
+# new UI path can never bypass the peer notification.
+_MANIPULATIONS: list[tuple[str, re.Pattern, str]] = [
+    ("POST",   re.compile(r"^/api/indices/create$"),                "created an index"),
+    ("DELETE", re.compile(r"^/api/indices/([^/]+)$"),               "DELETED index"),
+    ("POST",   re.compile(r"^/api/indices/([^/]+)/duplicate$"),     "duplicated index"),
+    ("POST",   re.compile(r"^/api/indices/([^/]+)/import$"),        "imported CSV into"),
+    ("POST",   re.compile(r"^/api/doc/update$"),                    "edited a document"),
+    ("POST",   re.compile(r"^/api/docs/bulk-delete$"),              "DELETED documents"),
+    ("POST",   re.compile(r"^/api/docs/bulk-field$"),               "bulk-edited a field"),
+    ("POST",   re.compile(r"^/api/artificial$"),                    "generated artificial data"),
+    ("POST",   re.compile(r"^/api/exports/restore$"),               "restored an archive"),
+]
+
+
+def _manipulation(method: str, path: str):
+    """(action, target) when this request changes CC data, else None."""
+    for verb, pattern, action in _MANIPULATIONS:
+        if method != verb:
+            continue
+        m = pattern.match(path)
+        if m:
+            return action, (m.group(1) if m.groups() else "")
+    return None
+
+
+@app.middleware("http")
+async def session_middleware(request: Request, call_next):
+    """Identify the browser, bind its own ES connection for the duration of the
+    request, and tell the other users on that CC when it changes data."""
+    sid_in = request.cookies.get(sessions.COOKIE_NAME)
+    sid = sessions.touch(sid_in, sessions.client_ip(request),
+                         request.headers.get("user-agent", ""))
+    request.state.sid = sid
+    token = set_session(sid)
+    try:
+        hit = _manipulation(request.method, request.url.path)
+        response = await call_next(request)
+
+        if hit is not None:
+            action, target = hit
+            # These endpoints all answer with a small JSON body and report
+            # failures as {"error": ...} at HTTP 200 — read it so we only warn
+            # the others about changes that actually happened.
+            body = b""
+            async for chunk in response.body_iterator:
+                body += chunk
+            failed = response.status_code >= 400
+            if not failed:
+                try:
+                    failed = "error" in json.loads(body or b"{}")
+                except Exception:
+                    failed = False
+            if not failed:
+                sessions.notify_peers(sid, action, target)
+            response = Response(content=body, status_code=response.status_code,
+                                headers=dict(response.headers),
+                                media_type=response.media_type)
+    finally:
+        reset_session(token)
+
+    if sid_in != sid:
+        response.set_cookie(sessions.COOKIE_NAME, sid, httponly=True,
+                            samesite="lax", path="/", max_age=30 * 86400,
+                            secure=request.url.scheme == "https")
+    return response
+
+
 # ── API Routers ───────────────────────────────────────────────────────────────
 app.include_router(health.router)
 app.include_router(indices.router)
 app.include_router(query.router)
 app.include_router(exports.router)
 app.include_router(artificial.router)
+app.include_router(presence.router)
 
 # ── Static files + SPA catch-all ─────────────────────────────────────────────
 app.mount("/static", StaticFiles(directory="frontend/static"), name="static")

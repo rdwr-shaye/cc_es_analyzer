@@ -471,7 +471,27 @@ body.qedit-resizing { cursor: col-resize; user-select: none; }
   box-shadow: 0 10px 40px rgba(0,0,0,.4);
 }
 .rt-modal-title { font-weight: 700; font-size: 1rem; margin-bottom: 10px; }
-.rt-modal-body { font-size: 0.88rem; margin-bottom: 16px; line-height: 1.5; }
+/* pre-line so multi-line messages (e.g. the shared-CC user list) keep their
+   line breaks — the text is escaped, so this is the only way they survive. */
+.rt-modal-body { font-size: 0.88rem; margin-bottom: 16px; line-height: 1.5;
+                 white-space: pre-line; max-height: 60vh; overflow: auto; }
+
+/* ── Peer-activity alerts (someone else changed data on this CC) ──────────── */
+.peer-alerts {
+  position: fixed; top: 60px; right: 16px; z-index: 2000;
+  display: flex; flex-direction: column; gap: 8px;
+  max-width: min(460px, 92vw);
+}
+.peer-alert {
+  display: flex; align-items: flex-start;
+  background: #4a3608; color: #ffe9b8;
+  border: 1px solid #d39e00; border-left: 4px solid #ffc107;
+  border-radius: 6px; padding: 10px 12px;
+  font-size: 0.82rem; line-height: 1.35;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .45);
+}
+.peer-alert .bi { color: #ffc107; font-size: 1rem; }
+.peer-alert .text-secondary { color: #d9c48f !important; }
 
 /* Pretty-JSON viewer modal (object/array cell values) */
 .rt-modal-json { width: min(760px, 94vw); }
