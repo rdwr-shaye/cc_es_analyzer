@@ -2210,6 +2210,13 @@ def _extract_field_refs(text: str) -> list[dict]:
                     and low_tok not in _CONNECTIVE_WORDS
                     and low_tok not in _REF_FILLER
                     and low_tok not in _REF_BOUNDARY
+                    # A word that introduces the NEXT criterion's field name is
+                    # not a value, even after a comma: in "…pol16, attack id is
+                    # 11-…" the comma reads as an OR separator and used to pull
+                    # "attack" in as another policy-name value, leaving "id"
+                    # alone to name the field (which then resolves to the wrong
+                    # one).
+                    and not _starts_new_criterion(tokens, i)
                     and (or_cont or _gated_by_connective(tokens, i))):
                 kind, value = "str", tok
             else:
@@ -2279,6 +2286,24 @@ def _classify_value(tok: str) -> tuple[str | None, str | None]:
             and re.fullmatch(r"[A-Za-z0-9_-]+", tok):
         return "str", tok
     return None, None
+
+
+def _starts_new_criterion(tokens: list[str], i: int) -> bool:
+    """True when the bare word at *i* opens another criterion's field name.
+
+    "status is Active, Terminated" — Terminated is another VALUE.
+    "policy name is not pol16, attack id is 11-…" — attack names the next
+    FIELD, because a connective follows it within a word or two.
+    """
+    for t in tokens[i + 1:i + 4]:
+        low = t.lower()
+        if low in _CONNECTIVE_WORDS or low in _OP_CONTAINS or t in ("=", ":"):
+            return True
+        if low in _REF_BOUNDARY or low in _OR_WORDS or t in (",", ";"):
+            return False
+        if not t.isalpha():          # a value follows → this is a value list
+            return False
+    return False
 
 
 def _gated_by_connective(tokens: list[str], i: int) -> bool:
