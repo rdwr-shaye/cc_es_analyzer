@@ -1630,12 +1630,14 @@ function generateQueryFromFilters() {
 
   for (const [field, values] of activeFilters) {
     const valArray = [...values];
+    // Analyzed text fields need their exact sub-field, or the query returns 0.
+    const f = exactField(field);
     if (valArray.length === 1) {
       // Single value: use term query
-      mustClauses.push({ term: { [field]: valArray[0] } });
+      mustClauses.push({ term: { [f]: valArray[0] } });
     } else {
       // Multiple values: use terms query
-      mustClauses.push({ terms: { [field]: valArray } });
+      mustClauses.push({ terms: { [f]: valArray } });
     }
   }
 
@@ -1975,6 +1977,34 @@ function _modifyFieldsDialog(fields) {
   });
 }
 
+/* ── Exact-match field resolution ────────────────────────────────────────────
+   CC templates map many string fields as ANALYZED text with a `.raw` keyword
+   sub-field. A term query is not analyzed, so `term: {applicationId: "798:80"}`
+   matches nothing — the analyzer indexed 7/79/798/9/98/8/80/0, never the whole
+   value. `applicationId.raw` holds it verbatim. The server tells us which
+   fields need that redirect; we cache the map per index context. */
+let _exactFieldMap = {};          // {field: field.raw} — only fields that differ
+let _exactFieldKey = '';          // index context the map was fetched for
+
+async function loadExactFieldMap(indices) {
+  const list = (indices || []).filter(Boolean);
+  const key = list.join(',');
+  if (!key || key === _exactFieldKey) return _exactFieldMap;
+  try {
+    const d = await api('/api/indices/exact-fields', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ indices: list }),
+    });
+    if (d && !d.error) { _exactFieldMap = d.map || {}; _exactFieldKey = key; }
+  } catch { /* leave the previous map in place */ }
+  return _exactFieldMap;
+}
+
+/** Field name to use in a term/terms clause (…".raw" when analyzed). */
+function exactField(field) {
+  return _exactFieldMap[field] || field;
+}
+
 /** Build ES bool.must clauses from the active table filters (same mapping as
  *  "Query from Filters"): single value → term, multiple values → terms.
  *  Pass `exceptCol` to omit one column (used for cascading value lists). */
@@ -1988,7 +2018,8 @@ function buildFilterMustClauses(exceptCol) {
       const coerce = dateCols.has(field)
         ? (s) => (/^\d{10,}$/.test(String(s)) ? Number(s) : s) : (s) => s;
       const arr = [...values].map(coerce);
-      return arr.length === 1 ? { term: { [field]: arr[0] } } : { terms: { [field]: arr } };
+      const f = dateCols.has(field) ? field : exactField(field);
+      return arr.length === 1 ? { term: { [f]: arr[0] } } : { terms: { [f]: arr } };
     });
 }
 
@@ -4660,6 +4691,7 @@ async function showIndexDetail(indexName, preserveFilters = false) {
   _currentIndexName = indexName;
   showView('index');
   activateViewer('index');
+  loadExactFieldMap([indexName]);      // resolve analyzed fields for filtering
   document.getElementById('indexDetailTitle').textContent = indexName;
   document.getElementById('indexStatCards').innerHTML = '<div class="text-secondary small">Loading stats…</div>';
   setQueryResults('Loading…');
@@ -5334,6 +5366,7 @@ async function runQuery() {
   setQueryResults('Running…');
   document.getElementById('queryMeta').textContent = '';
   captureResults({ hits: [] });
+  loadExactFieldMap([index]);          // for column filters on the results
 
   const data = await api('/api/query', {
     method: 'POST',
@@ -5661,6 +5694,7 @@ function renderSuggestions(list) {
 async function runMultiQuery(queries) {
   if (!queries || !queries.length) return;
   const size = querySizeValue();
+  loadExactFieldMap(queries.map(q => q.index));
   const metaEl = document.getElementById('queryMeta');
   setQueryResults(`⏳ Running ${queries.length} index queries…`);
   metaEl.textContent = '';
@@ -6286,6 +6320,7 @@ const HELP_CONTENT = {
         <li>View as <b>JSON / Table / CSV</b>; set the <b>Show</b> size; the table has a sticky header and fills the screen.</li>
         <li><b>Funnel filters</b> per column, sortable headers, <b>Fields</b> to show/hide columns. Date fields display human-readable while still matching on the stored value.</li>
         <li><b>Query from Filters</b>, <b>Aggregate</b>, and <b>Export</b> (shown rows or all matching docs).</li>
+        <li>Some CC fields (e.g. <code>applicationId</code> on ADC indices) are mapped as <i>analyzed text</i> with an exact <code>.raw</code> twin. Filtering and <b>Query from Filters</b> automatically target <code>&lt;field&gt;.raw</code> for those — an exact match on the analyzed field itself would return nothing, because the analyzer splits the value into fragments.</li>
       </ul>
       <h6>Index actions (top-right)</h6>
       <ul>

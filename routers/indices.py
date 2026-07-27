@@ -7,6 +7,7 @@ from fastapi import APIRouter, Query, UploadFile, File
 from pydantic import BaseModel
 from services.es_client import get_client
 from services.cc_indices import CC_INDEX_CATALOG, CATEGORIES, resolve_prefix
+from services.field_types import exact_field_map, resolve_exact
 
 router = APIRouter(prefix="/api/indices", tags=["indices"])
 
@@ -228,14 +229,25 @@ def field_values(req: FieldValuesRequest):
             resp = es.search(target, body)
             return resp.get("aggregations", {}).get("vals", {}).get("buckets", [])
 
-        # ES 7+ text fields can't be aggregated directly — retry on the
-        # conventional ``.keyword`` sub-field when the first attempt fails.
+        # Analyzed text fields cannot be aggregated, and their tokens would be
+        # useless as filter values anyway ("798:80" is indexed as 798/80/…).
+        # Resolve to the exact sub-field the CC templates provide (.raw), so the
+        # value list holds whole values that a term query can actually match.
+        agg_field = resolve_exact(es, idx_list[0], req.field)
         try:
-            buckets = _agg(req.field)
+            buckets = _agg(agg_field)
         except Exception as first_err:
-            try:
-                buckets = _agg(req.field + ".keyword")
-            except Exception:
+            # Last-ditch fallbacks for mappings we could not read.
+            for alt in (req.field, req.field + ".keyword", req.field + ".raw"):
+                if alt == agg_field:
+                    continue
+                try:
+                    buckets = _agg(alt)
+                    agg_field = alt
+                    break
+                except Exception:
+                    continue
+            else:
                 raise first_err
 
         values = []
@@ -252,9 +264,41 @@ def field_values(req: FieldValuesRequest):
             if v not in seen:
                 seen.add(v); uniq.append(v)
         return {"field": req.field, "values": uniq, "count": len(uniq),
-                "is_date": field_is_date}
+                "is_date": field_is_date, "exact_field": agg_field}
     except Exception as e:
         return {"error": str(e), "values": []}
+
+
+class ExactFieldsRequest(BaseModel):
+    """Which field name to use for exact (term) matching, per field."""
+    indices: list[str] = []
+    index:   str = ""
+
+
+@router.post("/exact-fields")
+def exact_fields(req: ExactFieldsRequest):
+    """Map every field of an index (or pattern) to the name that a term query
+    can match on — e.g. ``applicationId`` → ``applicationId.raw``.
+
+    The UI calls this before turning column filters into an ES query: filtering
+    on an analyzed text field silently returns zero hits otherwise, because a
+    term query is not analyzed while the indexed tokens are.
+    """
+    try:
+        es = get_client()
+        idx_list = [i for i in (req.indices or ([req.index] if req.index else [])) if i]
+        if not idx_list:
+            return {"error": "no index provided", "map": {}}
+        merged: dict = {}
+        for idx in idx_list:
+            for field, exact in exact_field_map(es, idx).items():
+                merged.setdefault(field, exact)
+        # Only the fields that actually need redirecting are interesting to the
+        # client; everything else maps to itself.
+        return {"map": {f: e for f, e in merged.items() if f != e},
+                "fields": len(merged)}
+    except Exception as e:
+        return {"error": str(e), "map": {}}
 
 
 # ── Create / delete indices ─────────────────────────────────────────────────────
