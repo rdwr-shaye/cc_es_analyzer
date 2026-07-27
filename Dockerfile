@@ -14,7 +14,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the application code (see .dockerignore for what is excluded).
-COPY main.py config.py ./
+# VERSION must be here: it is what the running app reports as its own version
+# and what the update check compares against the repository.
+COPY main.py config.py VERSION ./
 COPY routers ./routers
 COPY services ./services
 COPY frontend ./frontend

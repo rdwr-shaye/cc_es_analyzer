@@ -5507,16 +5507,32 @@ async function translateNlQuery() {
     fieldSuggestions = data.suggestions || [];
     renderSuggestions(fieldSuggestions);
 
-    // Show interpretation
+    // Show interpretation. A criterion the server could NOT match to a field is
+    // dropped from the query — without saying so the user reads "Interpreted
+    // as: X" above a query that actually matches everything, so any warning is
+    // shown right next to it (and the badges for dropped criteria are struck
+    // through so it's obvious which ones didn't make it).
+    const dropped = new Set((data.unresolved || []).map(u => String(u.label).toLowerCase()));
+    const isDropped = (s) => [...dropped].some(d => String(s).toLowerCase().startsWith(d));
     if (data.interpreted?.length) {
-      infoEl.className = 'small text-success px-1';
-      infoEl.innerHTML = '<i class="bi bi-check-circle me-1"></i><strong>Interpreted as:</strong> ' +
-        data.interpreted.map(s =>
-          `<span class="badge bg-success bg-opacity-25 text-success border border-success me-1">${esc(s)}</span>`
-        ).join('');
+      infoEl.className = 'small px-1 ' + (data.warning ? 'text-warning' : 'text-success');
+      infoEl.innerHTML =
+        `<i class="bi ${data.warning ? 'bi-exclamation-triangle-fill' : 'bi-check-circle'} me-1"></i>` +
+        '<strong>Interpreted as:</strong> ' +
+        data.interpreted.map(s => {
+          const bad = isDropped(s);
+          const cls = bad ? 'bg-danger bg-opacity-25 text-danger border-danger'
+                          : 'bg-success bg-opacity-25 text-success border-success';
+          return `<span class="badge border ${cls} me-1"${bad ? ' style="text-decoration:line-through"' +
+                  ' title="Not applied — no such field in this index"' : ''}>${esc(s)}</span>`;
+        }).join('');
     } else {
       infoEl.className = 'small text-warning px-1';
       infoEl.textContent = '⚠ No filters matched — using match_all';
+    }
+    if (data.warning) {
+      infoEl.innerHTML += `<div class="alert alert-warning py-1 px-2 mt-1 mb-0 small">
+        <i class="bi bi-exclamation-triangle-fill me-1"></i>${esc(data.warning)}</div>`;
     }
   } catch (e) {
     infoEl.className = 'small text-danger px-1';

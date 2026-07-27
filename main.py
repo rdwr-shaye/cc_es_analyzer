@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from routers import artificial, exports, health, indices, presence, query, update
 import json
 import re
@@ -147,11 +147,52 @@ app.include_router(update.router)
 # ── Static files + SPA catch-all ─────────────────────────────────────────────
 app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
 
+_SPA_HTML = os.path.join(os.path.dirname(__file__), "frontend", "index.html")
+_SPA_ASSETS = [
+    os.path.join(os.path.dirname(__file__), "frontend", "static", "js", "app.js"),
+    os.path.join(os.path.dirname(__file__), "frontend", "static", "css", "style.css"),
+]
+_spa_cache: dict = {}     # {"key": <stamp>, "html": <rendered>}
+
+
+def _asset_version() -> str:
+    """Short stamp that changes whenever the app version or an asset changes."""
+    parts = [updater.local_version()]
+    for path in _SPA_ASSETS:
+        try:
+            parts.append(str(int(os.path.getmtime(path))))
+        except OSError:
+            parts.append("0")
+    import hashlib
+    return hashlib.sha1("|".join(parts).encode()).hexdigest()[:10]
+
+
+def _spa_page() -> str:
+    """index.html with the asset version stamped in, cached until it changes.
+
+    Without this, browsers keep serving the previous app.js from cache after an
+    update — the page looks updated (new HTML) but runs old JavaScript, which
+    presents as "the new features aren't there" until a hard reload.
+    """
+    stamp = _asset_version()
+    try:
+        stamp += "-" + str(int(os.path.getmtime(_SPA_HTML)))
+    except OSError:
+        pass
+    if _spa_cache.get("key") != stamp:
+        with open(_SPA_HTML, "r", encoding="utf-8") as fh:
+            _spa_cache["html"] = fh.read().replace("__ASSET_V__", stamp)
+        _spa_cache["key"] = stamp
+    return _spa_cache["html"]
+
 
 @app.get("/", include_in_schema=False)
 @app.get("/{full_path:path}", include_in_schema=False)
 def serve_spa(full_path: str = ""):
-    return FileResponse("frontend/index.html")
+    # The HTML itself must never be cached — it is what carries the new asset
+    # URLs. The assets under /static are immutable per stamp, so they cache.
+    return Response(content=_spa_page(), media_type="text/html",
+                    headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 def _port_in_use(host: str, port: int) -> bool:

@@ -947,22 +947,48 @@ def translate_nl_query(req: NLQueryRequest):
 
     suggestions: list = []   # partial matches the user must confirm before querying
 
+    # A criterion may legitimately apply to some groups and not others (a
+    # multi-index plan spans different mappings), so dropping it is only worth
+    # reporting when NO group could use it — otherwise the warning is noise.
+    # Silently widening the query to match_all is the dangerous case: the user
+    # sees their criteria under "Interpreted as…" while the query matches
+    # everything, which is exactly what Delete/Modify results would act on.
+    applied_count: dict = {}          # criterion key -> how many groups applied it
+    drop_reason: dict = {}            # criterion key -> {label, values, op, kind, reason}
+    mapping_unavailable: list = []    # groups whose mapping could not be read
+
+    def _note(key, applied: bool, info: dict | None = None) -> None:
+        applied_count[key] = applied_count.get(key, 0) + (1 if applied else 0)
+        if not applied and info:
+            drop_reason[key] = info
+
     for group_pattern in groups:
         date_fields = _get_date_fields(es, group_pattern)
         group_must     = list(common_must)    # copy — do NOT modify common_must
         group_must_not: list = []
 
         # Fetch the group's real field names once for field/existence resolution.
-        all_fields = (_collect_all_fields(es, group_pattern)
-                      if (field_refs or existence_refs or gated_clauses) else [])
+        needs_fields = bool(field_refs or existence_refs or gated_clauses)
+        all_fields = _collect_all_fields(es, group_pattern) if needs_fields else []
         all_fields_set = set(all_fields)
+        # An index whose mapping we CAN read always has fields, so "needed them
+        # and got none" means the mapping call failed (connection lost, index
+        # gone) — a different problem from "this field isn't in this index".
+        if needs_fields and not all_fields:
+            mapping_unavailable.append(group_pattern)
+            logger.warning("[translate] %s  mapping unavailable — every field "
+                           "reference will be dropped", group_pattern)
 
         # Gated clauses (category/status/risk/blocking) — only applied when the
         # field actually exists in THIS group's mapping.
-        for gate_field, clause in gated_clauses:
+        for gi, (gate_field, clause) in enumerate(gated_clauses):
             if gate_field in all_fields_set:
+                _note(("gate", gi), True)
                 group_must.append(clause)
             else:
+                _note(("gate", gi), False,
+                      {"kind": "filter", "label": gate_field, "values": [], "op": "eq",
+                       "reason": f"no '{gate_field}' field in this index"})
                 logger.info("[translate] %s  SKIP clause on %r — field absent from mapping",
                             group_pattern, gate_field)
 
@@ -971,14 +997,39 @@ def translate_nl_query(req: NLQueryRequest):
         # A *confident* match (all descriptor words found) is applied directly; a
         # *partial* match becomes a suggestion the user confirms before it's used.
         if field_refs:
-            for ref in field_refs:
+            for fi, ref in enumerate(field_refs):
                 words = ref["words"] or (["ip"] if ref["kind"] == "ip" else [])
                 fld, score, total, why = _resolve_field_scored(words, all_fields)
                 vals = ref["values"]
+                label = " ".join(ref["words"]) or ref["kind"]
                 if not fld:
-                    logger.info("[translate] %s  FIELD  words=%s values=%r -> UNRESOLVED (%s)",
-                                group_pattern, ref["words"], vals, why)
+                    # Nothing matched every word. Rather than dropping the
+                    # criterion (which silently widens the query), offer whatever
+                    # partially matches so the user can confirm the right field;
+                    # only a reference with no candidate at all is reported as
+                    # unresolved.
+                    cands = _candidate_fields(words, all_fields)
+                    if cands:
+                        _note(("field", fi), True)
+                        suggestions.append({
+                            "index": group_pattern, "kind": "field", "label": label,
+                            "op": ref["op"], "value": vals[0] if vals else None,
+                            "values": vals,
+                            "where": "must_not" if ref["op"] in ("neq", "ncontains") else "must",
+                            "total": total, "candidates": cands,
+                        })
+                        logger.info("[translate] %s  FIELD  words=%s values=%r -> "
+                                    "UNRESOLVED, suggesting %s (%s)",
+                                    group_pattern, ref["words"], vals,
+                                    [c["field"] for c in cands], why)
+                    else:
+                        _note(("field", fi), False,
+                              {"kind": "field", "label": label, "values": vals,
+                               "op": ref["op"], "reason": why})
+                        logger.info("[translate] %s  FIELD  words=%s values=%r -> UNRESOLVED (%s)",
+                                    group_pattern, ref["words"], vals, why)
                     continue
+                _note(("field", fi), True)
                 op = ref["op"]
                 where = "must_not" if op in ("neq", "ncontains") else "must"
                 # eq → match (1 value) / terms (many); contains → wildcard,
@@ -1014,12 +1065,16 @@ def translate_nl_query(req: NLQueryRequest):
         # ES 1.3.14 rejects constant_score+missing here, so "missing" is expressed
         # as must_not exists (and "present" as must exists).
         if existence_refs:
-            for ref in existence_refs:
+            for ei, ref in enumerate(existence_refs):
                 fld, score, total, why = _resolve_field_scored(ref["words"], all_fields)
                 if not fld:
+                    _note(("exists", ei), False,
+                          {"kind": "exists", "label": " ".join(ref["words"]),
+                           "values": [], "op": "exists", "reason": why})
                     logger.info("[translate] %s  EXISTS words=%s -> UNRESOLVED (%s)",
                                 group_pattern, ref["words"], why)
                     continue
+                _note(("exists", ei), True)
                 clause = {"exists": {"field": fld}}
                 where  = "must" if ref["present"] else "must_not"
                 if score >= total:                      # confident — apply
@@ -1100,11 +1155,36 @@ def translate_nl_query(req: NLQueryRequest):
                     [(s["index"], s["label"], [c["field"] for c in s.get("candidates", [])])
                      for s in suggestions])
 
+    # Criteria no group could apply. These used to vanish silently, leaving a
+    # match_all that looks like a working query — the UI has to say so.
+    unresolved = [drop_reason[k] for k, n in applied_count.items()
+                  if n == 0 and k in drop_reason]
+    warning = ""
+    if mapping_unavailable:
+        warning = ("Could not read the mapping for "
+                   + ", ".join(sorted(set(mapping_unavailable)))
+                   + " — check the index pattern and that the connection is still alive. "
+                     "No field criteria could be applied.")
+    elif unresolved:
+        parts = ", ".join(
+            f"“{u['label']}{(' ' + ', '.join(map(str, u['values']))) if u['values'] else ''}”"
+            for u in unresolved)
+        warning = (f"{len(unresolved)} criterion(s) could not be matched to a field in "
+                   f"this index and were NOT applied: {parts}.")
+    if warning and all(q["query_body"].get("query", {}).get("match_all") is not None
+                       for q in per_index_queries):
+        warning += " The query as built matches EVERY document in the index."
+    if warning:
+        logger.warning("[translate] %s", warning)
+
     return {
         "per_index_queries": per_index_queries,
         "interpreted":       interpreted,
         "is_multi_index":    len(groups) > 1,
         "suggestions":       suggestions,
+        "unresolved":        unresolved,
+        "mapping_unavailable": sorted(set(mapping_unavailable)),
+        "warning":           warning,
     }
 
 

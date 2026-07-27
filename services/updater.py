@@ -79,6 +79,11 @@ def local_version() -> str:
         with open(VERSION_FILE, "r", encoding="utf-8") as fh:
             return fh.read().strip() or "0.0.0"
     except OSError:
+        # Loud on purpose: a missing VERSION makes the app report 0.0.0, which
+        # looks like a downgrade and makes every remote version seem newer.
+        logger.warning("[update] no VERSION file at %s — reporting 0.0.0. If this "
+                       "is a container, VERSION is missing from the image.",
+                       VERSION_FILE)
         return "0.0.0"
 
 

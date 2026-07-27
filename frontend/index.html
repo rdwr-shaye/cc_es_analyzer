@@ -8,7 +8,10 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
   <!-- Relative path so the app works both at "/" and behind a proxy prefix
        (e.g. /cc_es_analyzer/) -->
-  <link rel="stylesheet" href="static/css/style.css"/>
+  <!-- ?v=… is substituted by main.py with a hash of the app version + asset
+       mtimes, so a browser can never serve a stale app.js/style.css after an
+       update (a hard reload used to be required). -->
+  <link rel="stylesheet" href="static/css/style.css?v=__ASSET_V__"/>
 </head>
 <body>
 
@@ -918,6 +921,6 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<script src="static/js/app.js"></script>
+<script src="static/js/app.js?v=__ASSET_V__"></script>
 </body>
 </html>
