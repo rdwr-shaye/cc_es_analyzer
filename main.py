@@ -70,6 +70,7 @@ _MANIPULATIONS: list[tuple[str, re.Pattern, str]] = [
     ("POST",   re.compile(r"^/api/doc/update$"),                    "edited a document"),
     ("POST",   re.compile(r"^/api/docs/bulk-delete$"),              "DELETED documents"),
     ("POST",   re.compile(r"^/api/docs/bulk-field$"),               "bulk-edited a field"),
+    ("POST",   re.compile(r"^/api/docs/bulk-update$"),              "modified query results"),
     ("POST",   re.compile(r"^/api/artificial$"),                    "generated artificial data"),
     ("POST",   re.compile(r"^/api/exports/restore$"),               "restored an archive"),
 ]

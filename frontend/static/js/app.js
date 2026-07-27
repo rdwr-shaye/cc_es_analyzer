@@ -400,6 +400,21 @@ function renderResultViews() {
     csvEl.textContent = lastResultHits.length ? buildResultsCsv(lastResultHits, visibleColumns()) : 'No rows to display.';
   }
   syncResultsPopout();   // keep the detached window in sync with the active view
+  syncResultActionButtons();
+}
+
+/** "Modify results" / "Delete results" act on what the query matched, so they
+ *  stay disabled until a query has actually returned rows. Only the Query
+ *  Editor has them (the Index Detail viewer has its own row tools). */
+function syncResultActionButtons() {
+  const on = activeViewer === 'query' && lastResultHits.length > 0;
+  ['btnModifyResults', 'btnDeleteResults'].forEach(id => {
+    const b = document.getElementById(id);
+    if (!b) return;
+    if (!b.dataset.t) b.dataset.t = b.title;     // stash BEFORE overwriting
+    b.disabled = !on;
+    b.title = on ? b.dataset.t : 'Run a query that returns documents first';
+  });
 }
 
 /* ── Rich table: sticky header, per-column sort + value filter, cell edit ── */
@@ -1780,6 +1795,186 @@ function downloadRowsLocally(rows) {
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
 }
 
+/* ── Delete / Modify the whole result set ────────────────────────────────────
+   Delete-by-query and update-by-query, in two steps: pick the scope (the rows
+   on screen vs every doc the query matches), then approve an exact count that
+   the server counts for us — never an estimate. */
+
+/** Rows currently on screen after column filters, as {index,id} doc refs. */
+function _shownDocRefs() {
+  return tableDisplayRows()
+    .filter(r => r._id != null && r._index != null)
+    .map(r => ({ index: r._index, id: r._id }));
+}
+
+/** Exact number of docs the active query matches, straight from ES. */
+async function _matchingTotal(items) {
+  const d = await api('/api/docs/count', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ per_index_queries: items }),
+  });
+  if (!d || d.error) throw new Error(d?.error || 'count failed');
+  return d.total;
+}
+
+/** Step 1 of both flows: resolve the scope and the exact document count.
+ *  Returns {scope, count, payload} or null when the user backed out. */
+async function _resolveResultScope(verb) {
+  const items = activeContextItems();
+  if (!items || !items.length) {
+    showToast('Invalid query JSON — cannot target the matching docs', 'bg-danger');
+    return null;
+  }
+  const shown = _shownDocRefs();
+  let total;
+  try {
+    total = await _matchingTotal(items);
+  } catch (e) {
+    showToast('Could not count matching documents: ' + e.message, 'bg-danger');
+    return null;
+  }
+  if (!total && !shown.length) { showToast('Nothing matches this query', 'bg-warning'); return null; }
+
+  let scope = 'all';
+  if (total > shown.length && shown.length) {
+    const c = await uiChoice(document, {
+      title: `${verb} — which documents?`,
+      message: `${shown.length.toLocaleString()} document(s) are shown here, but this `
+             + `query matches ${total.toLocaleString()} in Elasticsearch.`,
+      buttons: [
+        { value: 'shown', text: `Only the ${shown.length.toLocaleString()} shown`, cls: 'btn-primary' },
+        { value: 'all',   text: `All ${total.toLocaleString()} matching`, cls: 'btn-warning' },
+        { value: null,    text: 'Cancel', cls: 'btn-outline-secondary' },
+      ],
+    });
+    if (!c) return null;
+    scope = c;
+  }
+  return scope === 'all'
+    ? { scope: 'all', count: total, payload: { scope: 'all', per_index_queries: items } }
+    : { scope: 'shown', count: shown.length, payload: { scope: 'selected', docs: shown } };
+}
+
+/** Delete every document the query matched (or just the shown ones). */
+async function deleteResults() {
+  const sel = await _resolveResultScope('Delete results');
+  if (!sel) return;
+  if (!await confirmSharedCc(`delete ${sel.count.toLocaleString()} document(s)`)) return;
+
+  const typed = await uiPrompt(document, {
+    title: `Delete ${sel.count.toLocaleString()} document(s) — type DELETE to confirm`,
+    value: '', okText: 'Delete',
+  });
+  if (typed == null) return;
+  if (typed.trim().toUpperCase() !== 'DELETE') {
+    showToast('Confirmation did not match — nothing was deleted', 'bg-warning'); return;
+  }
+  showToast(`Deleting ${sel.count.toLocaleString()} document(s)…`, 'bg-secondary');
+  const res = await api('/api/docs/bulk-delete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(sel.payload),
+  });
+  if (!res || res.error) { showToast('Delete failed: ' + (res?.error || 'unknown'), 'bg-danger'); return; }
+  showToast(`Deleted ${(res.deleted ?? 0).toLocaleString()} document(s)`, 'bg-success');
+  runQuery();                       // re-run so the view matches Elasticsearch
+}
+
+/** Set one or more field values across the matched documents. */
+async function modifyResults() {
+  const fields = [...new Set([...visibleColumns(), ...currentColumns()])]
+    .filter(c => c && !['_id', '_index'].includes(c));
+  if (!fields.length) { showToast('No fields to modify', 'bg-warning'); return; }
+
+  const values = await _modifyFieldsDialog(fields);
+  if (!values) return;                                  // cancelled
+  const names = Object.keys(values);
+  if (!names.length) { showToast('No values entered — nothing to modify', 'bg-warning'); return; }
+
+  const sel = await _resolveResultScope('Modify results');
+  if (!sel) return;
+  if (!await confirmSharedCc(`modify ${names.length} field(s) on ${sel.count.toLocaleString()} document(s)`)) return;
+
+  const preview = names.map(f => `• ${f} = ${values[f]}`).join('\n');
+  const ok = await uiConfirm(document, {
+    title: `Modify ${sel.count.toLocaleString()} document(s)?`,
+    message: `These field(s) will be set on every one of them:\n${preview}\n\n`
+           + `All other fields keep their current values.`,
+    okText: 'Modify', danger: true,
+  });
+  if (!ok) return;
+  showToast(`Modifying ${sel.count.toLocaleString()} document(s)…`, 'bg-secondary');
+  const res = await api('/api/docs/bulk-update', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...sel.payload, fields: values }),
+  });
+  if (!res || res.error) { showToast('Modify failed: ' + (res?.error || 'unknown'), 'bg-danger'); return; }
+  showToast(`Modified ${(res.updated ?? 0).toLocaleString()} document(s)`, 'bg-success');
+  runQuery();
+}
+
+/** Field list with one value box each. Resolves to {field: value} for the
+ *  boxes that were filled in, or null when cancelled. Blank = leave alone. */
+function _modifyFieldsDialog(fields) {
+  return new Promise(resolve => {
+    const wrap = document.createElement('div');
+    wrap.className = 'rt-modal-overlay';
+    wrap.innerHTML = `<div class="rt-modal" style="min-width:560px;width:720px;max-width:95vw;
+          max-height:88vh;display:flex;flex-direction:column;">
+        <div class="rt-modal-title" style="flex:0 0 auto;">✎ Modify results — set field values</div>
+        <div class="rt-modal-body" style="flex:0 0 auto;white-space:normal;">
+          Type a value for each field you want to change. <b>Fields left blank stay as they are.</b>
+        </div>
+        <input type="text" class="form-control form-control-sm mrf-filter mb-2" style="flex:0 0 auto;"
+               placeholder="Filter fields…">
+        <div class="border border-secondary rounded" style="flex:1 1 auto;min-height:0;overflow:auto;">
+          <table class="table table-sm mb-0" style="font-size:0.8rem;">
+            <thead class="table-dark" style="position:sticky;top:0;z-index:2;">
+              <tr><th style="width:45%;">Field</th><th>New value</th></tr></thead>
+            <tbody>${fields.map(f => `<tr class="mrf-row" data-field="${esc(f)}">
+              <td class="font-monospace">${esc(f)}</td>
+              <td><input type="text" class="form-control form-control-sm mrf-val"
+                         data-field="${esc(f)}" placeholder="leave blank = unchanged"></td>
+            </tr>`).join('')}</tbody>
+          </table>
+        </div>
+        <div class="rt-modal-actions" style="flex:0 0 auto;">
+          <span class="mrf-count small text-info me-auto">no fields set</span>
+          <button class="btn btn-sm btn-warning" data-ok="1">Continue</button>
+          <button class="btn btn-sm btn-outline-secondary" data-ok="0">Cancel</button>
+        </div></div>`;
+    document.body.appendChild(wrap);
+
+    const collect = () => {
+      const out = {};
+      wrap.querySelectorAll('.mrf-val').forEach(i => {
+        if (i.value !== '') out[i.dataset.field] = i.value;
+      });
+      return out;
+    };
+    const done = (v) => { wrap.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey = (e) => { if (e.key === 'Escape') done(null); };
+    document.addEventListener('keydown', onKey);
+    wrap.addEventListener('input', (e) => {
+      if (e.target.classList.contains('mrf-filter')) {
+        const q = e.target.value.trim().toLowerCase();
+        wrap.querySelectorAll('.mrf-row').forEach(r => {
+          r.classList.toggle('d-none', !!q && !r.dataset.field.toLowerCase().includes(q));
+        });
+        return;
+      }
+      const n = Object.keys(collect()).length;
+      wrap.querySelector('.mrf-count').textContent =
+        n ? `${n} field(s) will be set` : 'no fields set';
+    });
+    wrap.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (b) { done(b.getAttribute('data-ok') === '1' ? collect() : null); return; }
+      if (e.target === wrap) done(null);
+    });
+    setTimeout(() => wrap.querySelector('.mrf-val')?.focus(), 0);
+  });
+}
+
 /** Build ES bool.must clauses from the active table filters (same mapping as
  *  "Query from Filters"): single value → term, multiple values → terms.
  *  Pass `exceptCol` to omit one column (used for cascading value lists). */
@@ -2584,25 +2779,112 @@ async function snapshotRestoreFlow(name) {
   const info = await api(`/api/exports/meta/${encodeURIComponent(name)}`);
   const meta = info?.meta || {};
   const indices = meta.indices || [];
-  const existing = indices.filter(ix => allIndices.some(i => i.name === ix));
-  const msg = (indices.length
-      ? `Restores ${indices.length} ${indices.length > 1 ? 'indices' : 'index'} with their original names: `
-        + indices.join(', ') + '. '
-      : 'Index list unknown (no embedded metadata). ')
-    + (meta.source ? `Taken from ${meta.source}. ` : '')
-    + (existing.length
-      ? `WARNING: already exist here and will FAIL to restore (delete or rename them first): ${existing.join(', ')}.`
-      : '');
-  const ok = await uiConfirm(document, {
-    title: `Restore snapshot "${name}" on the connected ES machine?`,
-    message: msg, okText: 'Restore' });
-  if (!ok) return false;
-  const res = await _snapshotApiWithCreds('/api/exports/snapshot/restore', { filename: name });
+
+  // With a known index list, let the user restore a SUBSET; without one we can
+  // only offer the whole snapshot (ES resolves the real list server-side).
+  let chosen = [];
+  if (indices.length) {
+    chosen = await _snapshotIndexPicker(name, indices, meta);
+    if (!chosen) return false;                       // cancelled
+  } else {
+    const ok = await uiConfirm(document, {
+      title: `Restore snapshot "${name}" on the connected ES machine?`,
+      message: 'Index list unknown (no embedded metadata) — every index in the '
+             + 'snapshot will be restored with its original name. '
+             + (meta.source ? `Taken from ${meta.source}.` : ''),
+      okText: 'Restore' });
+    if (!ok) return false;
+  }
+
+  if (!await confirmSharedCc(`restore snapshot "${name}" into this CC`)) return false;
+  const body = { filename: name };
+  // Send the subset only when it IS a subset — an empty list means "all".
+  if (chosen.length && chosen.length !== indices.length) body.indices = chosen;
+  const res = await _snapshotApiWithCreds('/api/exports/snapshot/restore', body);
   if (!res) return false;
   if (res.error) { showToast('Snapshot restore failed to start: ' + res.error, 'bg-danger'); return false; }
   showToast(`Restoring snapshot "${name}"…`, 'bg-info');
   refreshArchivesPanel();
   return true;
+}
+
+/** Checkbox list of a snapshot's indices. Resolves to the chosen names, or
+ *  null when cancelled. Indices that already exist here are pre-unchecked and
+ *  flagged — a native restore cannot overwrite an existing index. */
+function _snapshotIndexPicker(name, indices, meta) {
+  return new Promise(resolve => {
+    const exists = new Set(indices.filter(ix => allIndices.some(i => i.name === ix)));
+    const wrap = document.createElement('div');
+    wrap.className = 'rt-modal-overlay';
+    wrap.innerHTML = `<div class="rt-modal" style="min-width:600px;width:820px;max-width:95vw;
+          max-height:90vh;display:flex;flex-direction:column;">
+        <div class="rt-modal-title" style="flex:0 0 auto;">
+          <i class="bi bi-box-arrow-in-down me-1"></i>Restore “${esc(name)}” — choose indices</div>
+        <div class="rt-modal-body" style="flex:0 0 auto;white-space:normal;">
+          This snapshot holds <b>${indices.length}</b> ${indices.length > 1 ? 'indices' : 'index'}${
+            meta.source ? `, taken from <b>${esc(meta.source)}</b>` : ''}.
+          They are restored under their original names.
+          ${exists.size ? `<div class="text-warning mt-1">
+            <i class="bi bi-exclamation-triangle-fill me-1"></i>${exists.size} already exist on this
+            machine and are unchecked — a restore cannot overwrite an existing index
+            (delete it first, or leave it out).</div>` : ''}
+        </div>
+        <div class="d-flex gap-2 align-items-center mb-2" style="flex:0 0 auto;">
+          <input type="text" class="form-control form-control-sm sip-filter" placeholder="Filter…" style="max-width:220px;">
+          <button class="btn btn-sm btn-outline-secondary py-0" data-act="all">Select all</button>
+          <button class="btn btn-sm btn-outline-secondary py-0" data-act="none">Select none</button>
+          ${exists.size ? `<button class="btn btn-sm btn-outline-secondary py-0" data-act="new">Only new</button>` : ''}
+        </div>
+        <div class="border border-secondary rounded" style="flex:1 1 auto;min-height:0;overflow:auto;">
+          <table class="table table-sm table-hover mb-0" style="font-size:0.8rem;">
+            <tbody>${indices.map((ix, i) => `<tr class="sip-row" data-name="${esc(ix)}">
+              <td style="width:32px;"><input type="checkbox" class="sip-cb" data-i="${i}"
+                  ${exists.has(ix) ? '' : 'checked'}></td>
+              <td class="font-monospace">${esc(ix)}</td>
+              <td class="text-end">${exists.has(ix)
+                  ? '<span class="badge bg-warning text-dark">exists here</span>' : ''}</td>
+            </tr>`).join('')}</tbody>
+          </table>
+        </div>
+        <div class="rt-modal-actions" style="flex:0 0 auto;">
+          <span class="sip-count small text-info me-auto"></span>
+          <button class="btn btn-sm btn-primary" data-ok="1">Restore selected</button>
+          <button class="btn btn-sm btn-outline-secondary" data-ok="0">Cancel</button>
+        </div></div>`;
+    document.body.appendChild(wrap);
+
+    const boxes = () => [...wrap.querySelectorAll('.sip-cb')];
+    const picked = () => boxes().filter(b => b.checked)
+                                .map(b => indices[+b.dataset.i]);
+    const sync = () => {
+      const n = picked().length;
+      wrap.querySelector('.sip-count').textContent =
+        `${n} of ${indices.length} selected`;
+      wrap.querySelector('[data-ok="1"]').disabled = n === 0;
+    };
+    const done = (v) => { wrap.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey = (e) => { if (e.key === 'Escape') done(null); };
+    document.addEventListener('keydown', onKey);
+    wrap.addEventListener('input', (e) => {
+      if (e.target.classList.contains('sip-filter')) {
+        const q = e.target.value.trim().toLowerCase();
+        wrap.querySelectorAll('.sip-row').forEach(r =>
+          r.classList.toggle('d-none', !!q && !r.dataset.name.toLowerCase().includes(q)));
+        return;
+      }
+      sync();
+    });
+    wrap.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) { if (e.target === wrap) done(null); return; }
+      const act = b.dataset.act;
+      if (act === 'all')  { boxes().forEach(c => c.checked = true);  sync(); return; }
+      if (act === 'none') { boxes().forEach(c => c.checked = false); sync(); return; }
+      if (act === 'new')  { boxes().forEach(c => c.checked = !exists.has(indices[+c.dataset.i])); sync(); return; }
+      if (b.hasAttribute('data-ok')) done(b.getAttribute('data-ok') === '1' ? picked() : null);
+    });
+    sync();
+  });
 }
 
 /** Direct client-side export (small indices): folder picker where supported,
@@ -3054,13 +3336,33 @@ function uploadArchive() {
     const zipFiles = files.filter(f => f.name.endsWith('.zip'));
     files = files.filter(f => !f.name.endsWith('.zip'));
     for (const f of zipFiles) {
-      showToast(`Uploading ${f.name}…`, 'bg-secondary');
+      showToast(`Uploading and checking ${f.name}…`, 'bg-secondary');
       const fd = new FormData();
       fd.append('file', f, f.name);
       const res = await api('/api/exports/restore', { method: 'POST', body: fd });
-      if (!res || res.error) { showToast(`Upload of ${f.name} failed: ` + (res?.error || 'unknown'), 'bg-danger'); continue; }
+      if (!res || res.error) {
+        // The server validates the zip and refuses to keep a broken one.
+        showToast(`Upload of ${f.name} rejected: ` + (res?.error || 'unknown'), 'bg-danger');
+        continue;
+      }
       refreshArchivesPanel();
-      if (!await snapshotRestoreFlow(res.saved || f.name)) break;
+      const v = res.validation || {};
+      const summary = [
+        v.integrity ? `Integrity: ${v.integrity}.` : '',
+        v.indices?.length ? `${v.indices.length} index/indices inside.` : '',
+        v.meta?.source ? `Taken from ${v.meta.source}.` : '',
+        (v.warnings || []).join(' '),
+      ].filter(Boolean).join(' ');
+      // Stored is the safe default — restoring writes indices into this CC.
+      const next = await uiChoice(document, {
+        title: `"${f.name}" uploaded and verified`,
+        message: `${summary}\n\nIt is now in the Archives repository. Restore it into the connected CC now?`,
+        buttons: [
+          { value: 'keep',    text: 'Keep in archives only', cls: 'btn-primary' },
+          { value: 'restore', text: 'Restore now…',          cls: 'btn-warning' },
+        ],
+      });
+      if (next === 'restore' && !await snapshotRestoreFlow(res.saved || f.name)) break;
     }
     if (!files.length) return;
     const chosen = await _chooseRestoreTargets(
@@ -3257,6 +3559,96 @@ async function addIndexChoice() {
   });
   if (choice === 'empty') return createIndex();
   if (choice === 'catalog') return openPossibleIndexPicker();
+}
+
+/* ── Fetching-data script generator ──────────────────────────────────────── */
+
+/** Paste indices → download a standalone script that snapshots them on a CC
+ *  machine, producing the same zip the Archives panel makes. Used when the
+ *  analyzer cannot reach that machine (no SSH, isolated site, customer box). */
+function openFetchScriptDialog() {
+  document.querySelector('.rt-modal-overlay.rt-fetchscript')?.remove();
+  const wrap = document.createElement('div');
+  wrap.className = 'rt-modal-overlay rt-fetchscript';
+  wrap.innerHTML = `<div class="rt-modal" style="min-width:600px;width:780px;max-width:95vw;
+        max-height:90vh;display:flex;flex-direction:column;">
+      <div class="rt-modal-title" style="flex:0 0 auto;">
+        <i class="bi bi-file-earmark-code me-1"></i>Fetching data script generator</div>
+      <div class="rt-modal-body" style="flex:0 0 auto;white-space:normal;">
+        Paste the indices to archive — <b>separated by commas or new lines</b>.
+        You'll be asked for an archive name, then the script downloads.
+        <div class="small text-secondary mt-1">
+          Copy it to the CC machine and run it as root (<span class="font-monospace">sh fetch_&lt;name&gt;.sh</span>).
+          It needs only <span class="font-monospace">sh</span>, <span class="font-monospace">curl</span>
+          and <span class="font-monospace">zip</span>, and leaves a
+          <span class="font-monospace">&lt;name&gt;.zip</span> you can upload here via
+          <b>Archives → Upload archive</b>.</div>
+      </div>
+      <textarea class="form-control fs-indices" spellcheck="false"
+                style="flex:1 1 auto;min-height:190px;font-family:monospace;font-size:0.8rem;"
+                placeholder="dp-attack-raw-ty-dos-sid-0-sl-1472&#10;dp-hourly-applications-ty-dp-hourly-applications-sid-0-sl-2948&#10;&#10;…or: index-a, index-b, index-c"></textarea>
+      <div class="d-flex align-items-center gap-2 mt-2" style="flex:0 0 auto;">
+        <span class="fs-count small text-info me-auto">no indices yet</span>
+        <label class="small text-secondary d-flex align-items-center gap-1"
+               title="ES endpoint as seen FROM the CC machine — localhost is almost always right">
+          ES URL on that machine:
+          <input type="text" class="form-control form-control-sm fs-esurl"
+                 value="http://localhost:9200" style="width:15rem;"></label>
+      </div>
+      <div class="rt-modal-actions" style="flex:0 0 auto;">
+        <button class="btn btn-sm btn-warning" data-act="gen">
+          <i class="bi bi-download me-1"></i>Generate</button>
+        <button class="btn btn-sm btn-secondary" data-act="close">Close</button>
+      </div></div>`;
+  document.body.appendChild(wrap);
+
+  const ta = wrap.querySelector('.fs-indices');
+  const parse = () => [...new Set(ta.value.split(/[\s,]+/).map(s => s.trim()).filter(Boolean))];
+  const sync = () => {
+    const n = parse().length;
+    wrap.querySelector('.fs-count').textContent =
+      n ? `${n} ${n > 1 ? 'indices' : 'index'} to archive` : 'no indices yet';
+  };
+  ta.addEventListener('input', sync);
+  wrap.addEventListener('click', async (e) => {
+    if (e.target === wrap) { wrap.remove(); return; }
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.act === 'close') { wrap.remove(); return; }
+    if (b.dataset.act !== 'gen') return;
+
+    const indices = parse();
+    if (!indices.length) { showToast('Paste at least one index name', 'bg-warning'); return; }
+    const name = await uiPrompt(document, {
+      title: 'Archive name — letters, digits, "-" and "_" (becomes <name>.zip)',
+      value: '', okText: 'Generate',
+    });
+    if (name == null) return;
+    const clean = name.trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(clean)) {
+      showToast('Invalid archive name', 'bg-danger'); return;
+    }
+    const res = await fetch(appUrl('/api/exports/script'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: clean, indices,
+                             es_url: wrap.querySelector('.fs-esurl').value.trim() }),
+    });
+    // Errors come back as JSON; success is the script itself.
+    if ((res.headers.get('Content-Type') || '').includes('application/json')) {
+      const err = await res.json();
+      showToast('Script generation failed: ' + (err.error || 'unknown'), 'bg-danger');
+      return;
+    }
+    const text = await res.text();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'text/x-shellscript' }));
+    a.download = `fetch_${clean}.sh`;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+    showToast(`fetch_${clean}.sh downloaded — run it on the CC machine`, 'bg-success');
+    wrap.remove();
+  });
+  setTimeout(() => ta.focus(), 0);
 }
 
 /* ── Possible-indices picker (live catalog) ───────────────────────────────── */
@@ -5807,7 +6199,8 @@ const HELP_CONTENT = {
         <li><b>Search</b> filters the index list as you type.</li>
         <li>Each index is annotated with its CC <b>category</b> (DP Attacks, EAAF, ADC, …) so you know what it holds.</li>
         <li><b>Checkboxes</b> select indices → <b>Export selected</b> (one CSV per index) or <b>Delete selected</b>.</li>
-        <li><b>Archives</b> — server-side compressed exports: create, download, and restore/upload index archives.</li>
+        <li><b>Archives</b> — server-side compressed exports: create, download, and restore/upload index archives. Uploaded snapshot <code>.zip</code>s are verified before being stored, and you choose whether to keep them or restore straight away. Restoring a snapshot lists the indices inside it so you can restore <b>all or just some</b> — ones that already exist here are flagged and unchecked, since a native restore cannot overwrite them.</li>
+        <li><b>Fetching data script generator</b> — for CC machines this app cannot reach (no SSH, isolated site). Paste index names, pick an archive name, and download a standalone <code>sh</code> script. Run it on that machine as root and it performs the same snapshot flow locally, leaving a <code>&lt;name&gt;.zip</code> you can upload here. It needs only <code>sh</code>, <code>curl</code> and <code>zip</code>.</li>
         <li><b>Add</b> creates a new index — either an <i>empty</i> one by name, or a <i>possible CC index</i> picked from the live catalog (every family this machine's index templates can create, with real slice sizes and field lists) and filled via the artificial-data dialog.</li>
         <li><b>Click any row</b> to open its Index Detail screen.</li>
       </ul>
@@ -5870,6 +6263,14 @@ const HELP_CONTENT = {
       <ul>
         <li>View as <b>JSON / Table / CSV</b>; per-column <b>funnel filters</b>; <b>Query from Filters</b> turns the active filters into a fresh ES query; <b>Aggregate</b> groups by field(s).</li>
         <li><b>Export</b> the shown rows or all matching docs (server-side scroll). <b>Write mode</b> enables editing / deleting documents.</li>
+      </ul>
+      <h6>Acting on the whole result set</h6>
+      <p>Two buttons appear beside the view switcher once a query has returned rows — delete-by-query and update-by-query, each in two steps.</p>
+      <ul>
+        <li><b>Modify results</b> — lists every field with a value box. Fill in one or more; <b>fields left blank keep their current values</b>. You then choose the scope and approve.</li>
+        <li><b>Delete results</b> — removes the matched documents; you must type <code>DELETE</code> to confirm.</li>
+        <li>Both ask whether to act on <b>only the rows shown</b> or <b>all documents the query matches</b>, and the count in the prompt is counted by Elasticsearch at that moment — not an estimate from the loaded page.</li>
+        <li>On a shared CC you are also warned who else is connected, and they are notified of the change.</li>
       </ul>`,
   },
   index: {

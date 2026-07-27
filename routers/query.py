@@ -1566,6 +1566,22 @@ class BulkFieldRequest(BaseModel):
     max_docs: int = 100_000
 
 
+class BulkUpdateRequest(BaseModel):
+    """Set SEVERAL fields at once — the Query Editor's "Modify results".
+    Fields the user left blank are simply absent from `fields`."""
+    fields: dict = {}                # {field: new value}
+    scope: str = "selected"
+    docs: list[dict] = []
+    per_index_queries: list[dict] = []
+    max_docs: int = 100_000
+
+
+class CountRequest(BaseModel):
+    """Exact number of docs the given queries match — so a destructive
+    confirmation can state a real number instead of the loaded page size."""
+    per_index_queries: list[dict] = []
+
+
 def _resolve_types(es, index: str, ids: list[str]) -> dict:
     """Map _id -> _type for the given ids in an index (batched ids search)."""
     out: dict = {}
@@ -1661,6 +1677,61 @@ def bulk_field(req: BulkFieldRequest):
         return {"updated": n}
     except Exception as e:
         logger.error("[bulk-field] error: %s", e)
+        return {"error": str(e)}
+
+
+@router.post("/docs/bulk-update")
+def bulk_update(req: BulkUpdateRequest):
+    """Set several fields across many documents in ONE pass.
+
+    Only the fields present in `fields` are touched — everything else in each
+    document is written back verbatim, so blank inputs in the UI genuinely mean
+    "leave unchanged". Values are coerced to the type the field already holds
+    (so "80" stays a number on a numeric field)."""
+    fields = {k: v for k, v in (req.fields or {}).items() if k}
+    if not fields:
+        return {"error": "no fields to update"}
+    try:
+        es = get_client()
+        lines: list = []
+        n = 0
+        for idx, dtype, _id, src in _gather_op_hits(es, req, want_source=True):
+            if not (idx and dtype and _id is not None):
+                continue
+            for field, value in fields.items():
+                src[field] = _coerce_value(value, src.get(field))
+            lines.append(json.dumps({"index": {"_index": idx, "_type": dtype, "_id": _id}}))
+            lines.append(json.dumps(src, default=str))
+            n += 1
+        if lines:
+            es.bulk("\n".join(lines) + "\n", refresh=True)
+        logger.info("[bulk-update] scope=%s fields=%s updated=%s",
+                    req.scope, list(fields), n)
+        return {"updated": n, "fields": list(fields)}
+    except Exception as e:
+        logger.error("[bulk-update] error: %s", e)
+        return {"error": str(e)}
+
+
+@router.post("/docs/count")
+def docs_count(req: CountRequest):
+    """Exact hit count for the given per-index queries (size:0 per index)."""
+    try:
+        es = get_client()
+        total = 0
+        per_index = []
+        for it in req.per_index_queries or []:
+            index = it.get("index")
+            if not index:
+                continue
+            query = (it.get("query_body") or {}).get("query", {"match_all": {}})
+            resp = es.search(index, {"size": 0, "query": query})
+            raw = resp.get("hits", {}).get("total")
+            n = raw.get("value") if isinstance(raw, dict) else (raw or 0)
+            per_index.append({"index": index, "count": n})
+            total += n
+        return {"total": total, "per_index": per_index}
+    except Exception as e:
         return {"error": str(e)}
 
 

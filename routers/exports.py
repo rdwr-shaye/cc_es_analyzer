@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, File, Form, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from config import settings
@@ -247,8 +247,21 @@ async def start_restore(file: UploadFile | None = File(default=None),
         if name.endswith(".zip"):
             # Snapshot archives are only SAVED here; restoring one needs the
             # SSH-credentials handshake → the UI follows up with
-            # POST /api/exports/snapshot/restore.
-            return {"saved": name, "type": "snapshot"}
+            # POST /api/exports/snapshot/restore. Validate now so a broken or
+            # non-snapshot zip is rejected at upload time, not mid-restore.
+            report = validate_snapshot_zip(path)
+            if not report["ok"]:
+                try:
+                    os.remove(path)          # don't keep an unusable archive
+                except OSError:
+                    pass
+                return {"error": "this zip is not a restorable ES snapshot: "
+                                 + "; ".join(report["errors"]),
+                        "validation": report}
+            logger.info("[exports] uploaded snapshot %s validated: %s entries, "
+                        "integrity %s, %s indices", name, report["entries"],
+                        report["integrity"], len(report["indices"]))
+            return {"saved": name, "type": "snapshot", "validation": report}
     elif filename:
         name = os.path.basename(filename)
         if not _SAFE_NAME.match(name):
@@ -371,6 +384,8 @@ class SnapshotRequest(BaseModel):
 class SnapshotRestoreRequest(BaseModel):
     filename: str
     ssh: SnapshotSSH | None = None
+    # Restore only these indices; empty = every index in the snapshot.
+    indices: list[str] = []
 
 
 def _resolve_creds(host: str, ssh: SnapshotSSH | None):
@@ -653,12 +668,19 @@ def start_snapshot_restore(req: SnapshotRestoreRequest):
                 "host": host}
 
     meta = _zip_meta(path) or {}
+    known = meta.get("indices") or []
+    wanted = [i.strip() for i in (req.indices or []) if i and i.strip()]
+    if wanted and known:
+        unknown = [i for i in wanted if i not in known]
+        if unknown:
+            return {"error": "these indices are not in the snapshot: "
+                             + ", ".join(unknown[:5])}
     item = {"index": name, "total": None, "done": 0, "file": fname,
             "phase": "transfer", "unit": "bytes",
-            "indices": meta.get("indices") or []}
+            "indices": wanted or known, "selected": wanted}
     job = _new_job("snap-restore", [item])
     threading.Thread(target=_run_snapshot_restore_job,
-                     args=(job, es, host, name, creds), daemon=True,
+                     args=(job, es, host, name, creds, wanted), daemon=True,
                      name=f"snaprestore-{job['id']}").start()
     logger.info("[exports] snap-restore job %s: %s -> host %s", job["id"], fname, host)
     return {"job_id": job["id"], "host": host}
@@ -668,7 +690,8 @@ class _RestoreStalled(Exception):
     """Restore made no progress — fail WITHOUT deleting the repo files."""
 
 
-def _run_snapshot_restore_job(job: dict, es, host: str, name: str, creds: dict) -> None:
+def _run_snapshot_restore_job(job: dict, es, host: str, name: str, creds: dict,
+                              selected: list | None = None) -> None:
     from services.ssh_ops import SSHSession
     jid = job["id"]
     item = job["items"][0]
@@ -730,6 +753,16 @@ def _run_snapshot_restore_job(job: dict, es, host: str, name: str, creds: dict) 
         if not indices:
             raise RuntimeError("cannot determine which indices the snapshot "
                                "contains — refusing to restore blindly")
+        # Partial restore: keep only what the user picked, validated against
+        # what the snapshot really holds (ES is the authority, not the zip meta).
+        if selected:
+            missing = [i for i in selected if i not in indices]
+            if missing:
+                raise RuntimeError("selected indices are not in this snapshot: "
+                                   + ", ".join(missing[:5]))
+            indices = [i for i in indices if i in selected]
+            logger.info("[exports %s] partial restore: %s of %s indices",
+                        jid, len(indices), len(es_indices))
         item["indices"] = indices
 
         # 3) Native restore, then wait until recovery REALLY finishes.
@@ -741,8 +774,10 @@ def _run_snapshot_restore_job(job: dict, es, host: str, name: str, creds: dict) 
         # nothing is red.
         item["phase"] = "restore"
         item["unit"] = "shards"
-        _es_call(jid, es, "post", f"/_snapshot/{name}/{name}/_restore",
-                 {"ignore_unavailable": True})
+        restore_body: dict = {"ignore_unavailable": True}
+        if selected:
+            restore_body["indices"] = ",".join(indices)
+        _es_call(jid, es, "post", f"/_snapshot/{name}/{name}/_restore", restore_body)
         idx_path = ",".join(indices)
         stall_polls, last_done = 0, -1
         while True:
@@ -832,6 +867,267 @@ def _zip_meta(path: str) -> dict | None:
     except Exception:
         pass
     return None
+
+
+# CRC-checking every entry reads the whole archive; skip it past this size and
+# say so, rather than making an upload appear to hang.
+_DEEP_CHECK_MAX_BYTES = 512 * 1024 * 1024
+
+
+def validate_snapshot_zip(path: str) -> dict:
+    """Check that a .zip really is a restorable ES snapshot repository.
+
+    Fatal problems land in `errors` (restore would fail); cosmetic ones in
+    `warnings`. The structure checked is what both the app's snapshot job and
+    the generated fetch script produce:
+
+        <name>/index-N                 repository index
+        <name>/snap-<uuid>.dat         snapshot metadata
+        <name>/indices/<uuid>/<shard>/…
+        <name>.cc-meta.json            our own metadata (optional)
+
+    The top-level directory MUST match the zip's stem: restore unzips into the
+    host dir and registers the repository at <host_dir>/<stem>, so a mismatch
+    produces an empty repository and a confusing failure.
+    """
+    name = os.path.basename(path)
+    stem = name[:-4] if name.endswith(".zip") else name
+    out: dict = {"name": name, "ok": False, "errors": [], "warnings": [],
+                 "meta": None, "indices": [], "entries": 0, "integrity": "not checked"}
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        out["errors"].append(f"cannot read the file: {exc}")
+        return out
+
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = zf.namelist()
+            out["entries"] = len(names)
+            roots = {n.split("/")[0] for n in names if n}
+            repo_files = [n for n in names if n.startswith(f"{stem}/")]
+
+            if stem not in roots:
+                out["errors"].append(
+                    f"the archive does not contain a top-level '{stem}/' directory "
+                    f"(found: {', '.join(sorted(roots)[:4])}) — the file name and the "
+                    f"snapshot name inside must match")
+            else:
+                if not any(re.match(rf"^{re.escape(stem)}/index-", n) for n in repo_files):
+                    out["errors"].append("no repository index file ('index-N') — "
+                                         "this is not a snapshot repository")
+                if not any(n.startswith(f"{stem}/indices/") for n in repo_files):
+                    out["errors"].append("no 'indices/' directory — the snapshot holds no data")
+                if not any(re.match(rf"^{re.escape(stem)}/snap-.*\.dat$", n) for n in repo_files):
+                    out["warnings"].append("no top-level 'snap-*.dat' metadata file")
+
+            meta = None
+            for n in names:
+                if n.endswith(".cc-meta.json"):
+                    try:
+                        meta = json.loads(zf.read(n))
+                    except Exception as exc:
+                        out["warnings"].append(f"cc-meta.json is not readable: {exc}")
+                    break
+            if meta is None:
+                out["warnings"].append(
+                    "no cc-meta.json — the source machine and index list are unknown "
+                    "(the archive can still be restored)")
+            else:
+                out["meta"] = meta
+                out["indices"] = meta.get("indices") or []
+
+            if size <= _DEEP_CHECK_MAX_BYTES:
+                bad = zf.testzip()
+                if bad:
+                    out["errors"].append(f"corrupted entry: {bad}")
+                    out["integrity"] = "failed"
+                else:
+                    out["integrity"] = "ok"
+            else:
+                out["integrity"] = "skipped (archive larger than 512 MB)"
+    except zipfile.BadZipFile:
+        out["errors"].append("not a valid zip file")
+        return out
+    except Exception as exc:
+        out["errors"].append(f"could not read the archive: {exc}")
+        return out
+
+    out["ok"] = not out["errors"]
+    return out
+
+
+@router.get("/validate/{name}")
+def validate_archive(name: str):
+    """Check a snapshot archive already stored on this server."""
+    if not _SAFE_NAME.match(name) or not name.endswith(".zip"):
+        return {"error": "validation applies to snapshot (.zip) archives"}
+    path = os.path.join(EXPORTS_DIR, name)
+    if not os.path.isfile(path):
+        return {"error": f"archive {name!r} not found"}
+    return validate_snapshot_zip(path)
+
+
+# ── Standalone fetch script ──────────────────────────────────────────────────
+
+class ScriptRequest(BaseModel):
+    """Generate a self-contained snapshot script to run ON a CC machine."""
+    name: str
+    indices: list[str] = []
+    es_url: str = "http://localhost:9200"
+
+
+_FETCH_SCRIPT = r'''#!/bin/sh
+# ---------------------------------------------------------------------------
+# CC ES Analyzer — standalone snapshot fetch script
+#
+# Produces {name}.zip: exactly the archive the analyzer's "Snapshot archive"
+# button creates, so the result can be uploaded straight into its Archives
+# panel and restored on another machine.
+#
+# Run it ON the CC machine (as root):
+#     sh {script_name}
+#
+# It needs only sh, curl and zip — no Python, no analyzer, no network access
+# back to anything. Generated {generated} for {source_desc}.
+# ---------------------------------------------------------------------------
+set -e
+
+ES_URL="${{ES_URL:-{es_url}}}"
+NAME="{name}"
+HOST_DIR="${{HOST_DIR:-{host_dir}}}"     # repo dir as seen on THIS machine
+ES_DIR="${{ES_DIR:-{es_dir}}}"           # same dir as the ES process sees it
+INDICES="{indices_csv}"
+
+REPO_DIR="$HOST_DIR/$NAME"
+ZIP_PATH="$HOST_DIR/$NAME.zip"
+META_PATH="$HOST_DIR/$NAME.cc-meta.json"
+
+echo "== CC snapshot: $NAME"
+echo "   ES        : $ES_URL"
+echo "   indices   : $INDICES"
+echo "   repo dir  : $REPO_DIR  (ES sees $ES_DIR/$NAME)"
+echo
+
+for tool in curl zip; do
+    command -v "$tool" >/dev/null 2>&1 || {{ echo "ERROR: '$tool' is not installed"; exit 1; }}
+done
+
+api() {{  # api <METHOD> <PATH> [BODY]
+    if [ -n "$3" ]; then
+        curl -sS -X "$1" "$ES_URL$2" -H 'Content-Type: application/json' -d "$3"
+    else
+        curl -sS -X "$1" "$ES_URL$2"
+    fi
+}}
+
+# Fail early rather than half-way through a snapshot.
+api GET / >/dev/null || {{ echo "ERROR: cannot reach ES at $ES_URL"; exit 1; }}
+
+cleanup_repo() {{
+    api DELETE "/_snapshot/$NAME/$NAME" >/dev/null 2>&1 || true
+    api DELETE "/_snapshot/$NAME"       >/dev/null 2>&1 || true
+    rm -rf "$REPO_DIR" "$META_PATH"
+}}
+
+# A leftover repo/snapshot from an interrupted run would make the PUTs fail.
+cleanup_repo
+mkdir -p "$HOST_DIR"
+rm -f "$ZIP_PATH"
+
+echo "1/5 registering repository"
+api PUT "/_snapshot/$NAME" \
+    "{{\"type\":\"fs\",\"settings\":{{\"location\":\"$ES_DIR/$NAME\"}}}}"
+echo
+
+echo "2/5 starting snapshot"
+api PUT "/_snapshot/$NAME/$NAME" \
+    "{{\"ignore_unavailable\":true,\"include_global_state\":false,\"indices\":\"$INDICES\"}}"
+echo
+
+echo "3/5 waiting for the snapshot to finish"
+while : ; do
+    STATUS=$(api GET "/_snapshot/$NAME/$NAME/_status")
+    # First "state" is the snapshot's own (per-index ones follow) — take it.
+    STATE=$(echo "$STATUS" | tr ',' '\n' | grep -m1 '"state"' | cut -d'"' -f4)
+    # Shard progress lives in one flat object; isolate it before reading numbers.
+    SS=$(echo "$STATUS" | sed -n 's/.*"shards_stats":{{\([^}}]*\)}}.*/\1/p')
+    DONE=$(echo "$SS" | sed -n 's/.*"done":\([0-9]*\).*/\1/p')
+    TOTAL=$(echo "$SS" | sed -n 's/.*"total":\([0-9]*\).*/\1/p')
+    echo "    state=${{STATE:-?}} shards=${{DONE:-?}}/${{TOTAL:-?}}"
+    case "$STATE" in
+        SUCCESS)                 break ;;
+        FAILED|PARTIAL|ABORTED)  echo "ERROR: snapshot ended in state $STATE"
+                                 cleanup_repo; exit 1 ;;
+    esac
+    sleep 2
+done
+echo
+
+echo "4/5 writing metadata and zipping"
+ES_VERSION=$(api GET / | tr ',' '\n' | grep -m1 '"number"' | cut -d'"' -f4)
+cat > "$META_PATH" <<META
+{{
+ "name": "$NAME",
+ "source": "$(hostname -f 2>/dev/null || hostname)",
+ "indices": [{indices_json}],
+ "created": "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)",
+ "es_version": "$ES_VERSION",
+ "generated_by": "standalone fetch script"
+}}
+META
+# Relative paths only — unzip on the target must recreate <dir>/<name>.
+cd "$HOST_DIR" && zip -rq "$NAME.zip" "$NAME" "$NAME.cc-meta.json"
+echo "    $ZIP_PATH"
+echo
+
+echo "5/5 removing the snapshot and repo from this machine"
+cleanup_repo
+
+echo
+echo "DONE — copy this file off the machine and upload it in the analyzer's"
+echo "       Archives panel (Upload archive):"
+ls -lh "$ZIP_PATH"
+'''
+
+
+@router.post("/script")
+def generate_fetch_script(req: ScriptRequest):
+    """A standalone shell script that performs the snapshot archive flow
+    locally on a CC machine, producing the same <name>.zip the app makes."""
+    name = (req.name or "").strip()
+    if not _SNAP_NAME.match(name):
+        return {"error": "invalid archive name — use letters, digits, '-' and '_' "
+                         "(max 64 chars, must start with a letter or digit)"}
+    indices = [n.strip() for n in (req.indices or []) if n and n.strip()]
+    if not indices:
+        return {"error": "no indices given"}
+    bad = [n for n in indices if any(c in n for c in ' "\'\\$`\n')]
+    if bad:
+        return {"error": f"index names contain unsupported characters: {', '.join(bad[:5])}"}
+
+    try:
+        source_desc = _source_host(get_client()) or "an unknown machine"
+    except Exception:
+        source_desc = "an unknown machine"
+
+    script_name = f"fetch_{name}.sh"
+    body = _FETCH_SCRIPT.format(
+        name=name,
+        script_name=script_name,
+        es_url=req.es_url or "http://localhost:9200",
+        host_dir=settings.snap_host_dir,
+        es_dir=settings.snap_es_dir,
+        indices_csv=",".join(indices),
+        indices_json=", ".join(json.dumps(i) for i in indices),
+        generated=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        source_desc=source_desc,
+    )
+    # LF endings — the script runs on the CC's Linux shell.
+    return Response(content=body.replace("\r\n", "\n"),
+                    media_type="text/x-shellscript",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="{script_name}"'})
 
 
 @router.get("/meta/{name}")

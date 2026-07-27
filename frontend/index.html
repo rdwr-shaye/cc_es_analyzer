@@ -283,9 +283,23 @@
 
     <!-- ── DASHBOARD VIEW ── -->
     <div id="view-dashboard" class="view-panel p-3 d-none">
-      <div class="d-flex justify-content-between align-items-center mb-3">
+      <div class="d-flex justify-content-between align-items-center mb-3 gap-2 flex-wrap">
         <h5 class="fw-bold mb-0"><i class="bi bi-speedometer2 me-2 text-warning"></i>Cluster Dashboard</h5>
-        <button class="btn btn-sm btn-outline-info help-btn" onclick="showHelp('dashboard')" title="Help for this screen"><i class="bi bi-question-circle me-1"></i>Help</button>
+        <div class="d-flex align-items-center gap-2 flex-wrap ms-auto">
+          <button class="btn btn-sm btn-outline-success py-0 px-2" onclick="addIndexChoice()"
+                  title="Add an index — empty, or a possible CC index filled with artificial data">
+            <i class="bi bi-plus-lg me-1"></i>Add
+          </button>
+          <button class="btn btn-sm btn-outline-info py-0 px-2" onclick="openArchivesPanel()"
+                  title="Server-side index archives — compressed exports, downloads, restore/upload">
+            <i class="bi bi-archive me-1"></i>Archives
+          </button>
+          <button class="btn btn-sm btn-outline-warning py-0 px-2" onclick="openFetchScriptDialog()"
+                  title="Generate a standalone script that snapshots indices on a CC machine into a zip archive">
+            <i class="bi bi-file-earmark-code me-1"></i>Fetching data script generator
+          </button>
+          <button class="btn btn-sm btn-outline-info help-btn" onclick="showHelp('dashboard')" title="Help for this screen"><i class="bi bi-question-circle me-1"></i>Help</button>
+        </div>
       </div>
 
       <div class="row g-3 mb-3" id="clusterCards">
@@ -313,20 +327,12 @@
                     onclick="deleteSelectedIndices()" title="Delete all checked indices">
               <i class="bi bi-trash me-1"></i>Delete selected (<span id="delSelCount">0</span>)
             </button>
-            <button class="btn btn-sm btn-outline-info py-0 px-2" onclick="openArchivesPanel()"
-                    title="Server-side index archives — compressed exports, downloads, restore/upload">
-              <i class="bi bi-archive me-1"></i>Archives
-            </button>
             <div class="btn-group btn-group-sm" role="group" aria-label="Indices view">
               <button type="button" class="btn btn-outline-secondary active py-0 px-2" id="iv-table"
                       onclick="setIndicesView('table')">Table</button>
               <button type="button" class="btn btn-outline-secondary py-0 px-2" id="iv-csv"
                       onclick="setIndicesView('csv')">CSV</button>
             </div>
-            <button class="btn btn-sm btn-outline-success py-0 px-2" onclick="addIndexChoice()"
-                    title="Add an index — empty, or a possible CC index filled with artificial data">
-              <i class="bi bi-plus-lg me-1"></i>Add
-            </button>
             <button class="btn btn-sm btn-outline-success py-0 px-2" onclick="downloadIndicesCsv()" title="Download indices as CSV">
               <i class="bi bi-download"></i>
             </button>
@@ -833,6 +839,14 @@
               <button class="btn btn-sm btn-outline-primary py-0 px-2 js-export-all" id="btnExportAll"
                       onclick="exportAll()" title="Export ALL matching docs (scrolls past the Size limit)">
                 <i class="bi bi-cloud-download me-1"></i>All
+              </button>
+              <button class="btn btn-sm btn-outline-warning py-0 px-2" id="btnModifyResults" disabled
+                      onclick="modifyResults()" title="Set field values on the documents this query matched">
+                <i class="bi bi-pencil-square me-1"></i>Modify results
+              </button>
+              <button class="btn btn-sm btn-outline-danger py-0 px-2" id="btnDeleteResults" disabled
+                      onclick="deleteResults()" title="Delete the documents this query matched">
+                <i class="bi bi-trash3 me-1"></i>Delete results
               </button>
               <button class="btn btn-sm btn-outline-secondary py-0 px-2 js-write-toggle" id="btnWriteMode"
                       onclick="toggleWriteMode()" title="Enable editing/deleting fields in the Table view (writes to Elasticsearch)">
