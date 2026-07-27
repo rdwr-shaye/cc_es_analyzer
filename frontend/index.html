@@ -25,7 +25,10 @@
     <span class="navbar-brand mb-0 fw-bold fs-5">
       <i class="bi bi-layers-half text-info me-2"></i>CC ES Analyzer
     </span>
-    <span id="appVersion" class="text-secondary" style="font-size:.7rem;" title="Installed version"></span>
+    <!-- Clickable: the update dialog is otherwise unreachable when no update is
+         available, which is exactly when you want to see why the check failed. -->
+    <span id="appVersion" class="text-secondary" style="font-size:.7rem;cursor:pointer;"
+          onclick="showUpdateDialog()" title="Installed version"></span>
   </div>
 
   <!-- Active connection pill (shown when connected) -->

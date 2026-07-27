@@ -5600,30 +5600,47 @@ function renderPerIndexQueries(queries) {
 
   list.innerHTML = banner + queries.map((q, i) => {
     const sortEntry  = q.query_body?.sort?.[0] || {};
-    const sortField  = Object.keys(sortEntry)[0] || '—';
-    const sortOrder  = sortEntry[sortField]?.order || '—';
-    const dateFields = (q.date_fields || []).join(', ') || '—';
+    const sortField  = Object.keys(sortEntry)[0] || '';
+    const sortOrder  = sortEntry[sortField]?.order || 'desc';
+    const dates      = q.date_fields || [];
     const matchAll   = isMatchAllQuery(q.query_body);
     const off        = !q.include;
+    // Each index family has its own date fields, so the sort belongs per group
+    // rather than to the one global picker — this plan may mix startTime,
+    // timeStamp and indices with no date field at all.
+    const sortOpts = ['<option value="">no sort</option>'].concat(
+      dates.map(f => `<option value="${esc(f)}"${f === sortField ? ' selected' : ''}>${esc(f)}</option>`)
+    ).join('');
     return `<div class="border rounded mb-1 ${off ? 'border-secondary' : matchAll ? 'border-warning' : 'border-secondary'}"
-                 style="font-size:0.78rem;overflow:hidden;${off ? 'opacity:.55;' : ''}">
+                 data-group="${i}" style="font-size:0.78rem;overflow:hidden;${off ? 'opacity:.55;' : ''}">
       <div class="d-flex align-items-center px-2 py-1 gap-2"
            style="background:rgba(255,255,255,0.04);">
         <input type="checkbox" class="form-check-input mt-0" ${q.include ? 'checked' : ''}
-               onclick="event.stopPropagation()" onchange="togglePerIndexQuery(${i}, this.checked)"
+               onchange="togglePerIndexQuery(${i}, this.checked)"
                title="Include this index when running the plan"/>
         <span class="flex-grow-1 d-flex align-items-center gap-2"
-              style="cursor:pointer;"
-              onclick="this.closest('div').nextElementSibling.classList.toggle('d-none')">
+              style="cursor:pointer;" onclick="togglePerIndexBody(${i})">
           <i class="bi bi-layers text-info"></i>
           <span class="text-info fw-semibold">${esc(q.index)}</span>
           ${matchAll ? '<span class="badge bg-warning text-dark" title="This query has no filter — it returns every document in the index">matches ALL docs</span>' : ''}
-          <span class="text-secondary small ms-2">date fields: ${esc(dateFields)}</span>
-          <span class="text-warning small ms-auto">sort: ${esc(sortField)} ${esc(sortOrder)}</span>
-          <i class="bi bi-chevron-down text-secondary ms-1"></i>
         </span>
+        <span class="d-flex align-items-center gap-1" title="${dates.length
+            ? 'Sort this index by one of its own date fields'
+            : 'This index has no date field — it cannot be sorted by time'}">
+          <span class="text-secondary small">sort:</span>
+          <select class="form-select form-select-sm py-0 perindex-sort" ${dates.length ? '' : 'disabled'}
+                  style="width:auto;font-size:0.72rem;background:#2a2a2a;color:#ddd;border-color:rgba(255,255,255,0.2);"
+                  onchange="setPerIndexSort(${i}, this.value, null)">${sortOpts}</select>
+          <button class="btn btn-sm btn-outline-secondary py-0 px-1 perindex-dir"
+                  ${sortField ? '' : 'disabled'} style="font-size:0.7rem;"
+                  title="Ascending / descending"
+                  onclick="setPerIndexSort(${i}, null, '${sortOrder === 'asc' ? 'desc' : 'asc'}')"
+          >${sortOrder === 'asc' ? '▲ Asc' : '▼ Desc'}</button>
+        </span>
+        <i class="bi bi-chevron-down text-secondary" style="cursor:pointer;"
+           onclick="togglePerIndexBody(${i})" title="Show / hide the query"></i>
       </div>
-      <div class="m-0 p-2 d-none" style="background:#111;">
+      <div class="m-0 p-2 d-none perindex-body" style="background:#111;">
         <textarea class="form-control perindex-query" data-idx="${i}" spellcheck="false"
                   oninput="updatePerIndexQuery(${i}, this)"
                   style="font-size:0.72rem;font-family:monospace;min-height:170px;resize:vertical;
@@ -5658,6 +5675,40 @@ function includedPerIndexQueries() {
 function togglePerIndexQuery(i, on) {
   if (perIndexQueries[i]) perIndexQueries[i].include = !!on;
   renderPerIndexQueries(perIndexQueries);
+}
+
+function togglePerIndexBody(i) {
+  document.querySelector(`#perIndexQueriesList [data-group="${i}"] .perindex-body`)
+    ?.classList.toggle('d-none');
+}
+
+/** Set one group's sort field and/or direction (null keeps the current one).
+ *  Updates in place rather than re-rendering, so an expanded query stays open. */
+function setPerIndexSort(i, field, order) {
+  const q = perIndexQueries[i];
+  if (!q) return;
+  const body = q.query_body || (q.query_body = {});
+  const cur       = body.sort?.[0] || {};
+  const curField  = Object.keys(cur)[0] || '';
+  const curOrder  = cur[curField]?.order || 'desc';
+  const nextField = field === null ? curField : field;
+  const nextOrder = order === null ? curOrder : order;
+
+  if (!nextField) delete body.sort;
+  else body.sort = [{ [nextField]: { order: nextOrder } }];
+
+  const row = document.querySelector(`#perIndexQueriesList [data-group="${i}"]`);
+  const ta  = row?.querySelector('textarea.perindex-query');
+  if (ta) ta.value = JSON.stringify(body, null, 2);
+  const dir = row?.querySelector('.perindex-dir');
+  if (dir) {
+    dir.disabled = !nextField;
+    dir.textContent = nextOrder === 'asc' ? '▲ Asc' : '▼ Desc';
+    dir.setAttribute('onclick',
+      `setPerIndexSort(${i}, null, '${nextOrder === 'asc' ? 'desc' : 'asc'}')`);
+  }
+  const sel = row?.querySelector('select.perindex-sort');
+  if (sel && sel.value !== nextField) sel.value = nextField;
 }
 
 function dropMatchAllQueries() {
@@ -6302,10 +6353,22 @@ function renderUpdateBadge() {
   const ver = document.getElementById('appVersion');
   const u = _update;
   if (ver) {
-    ver.textContent = u ? 'v' + ((u.current && u.current.version) || '?') : '';
-    ver.title = u
-      ? `Installed: ${_verLabel(u.current)}\nUpdate source: ${u.mode}`
-      : 'Installed version';
+    const installed = (u && u.current && u.current.version) || '';
+    ver.textContent = installed ? 'v' + installed : '';
+    let tip = u ? `Installed: ${_verLabel(u.current)}\nUpdate source: ${u.mode}`
+                : 'Installed version';
+    if (installed === '0.0.0') {
+      tip += '\n\nThis build reports no version: the VERSION file is missing '
+           + 'from the image. Pull the latest code and rebuild.';
+    }
+    if (u && u.ok === false && u.error) {
+      tip += `\n\nUpdate check failed: ${u.error}`;
+    }
+    tip += '\n\nClick for update details.';
+    ver.title = tip;
+    // Flag a build that can't report its version, and a check that isn't working.
+    ver.className = (installed === '0.0.0' || (u && u.ok === false))
+      ? 'text-warning' : 'text-secondary';
   }
   if (!btn || !txt) return;
   if (u && u.update_available) {
@@ -6321,7 +6384,12 @@ function renderUpdateBadge() {
 async function pollUpdate() {
   try {
     const d = await api('/api/update/status');
-    if (d && !d.error) { _update = d; renderUpdateBadge(); }
+    // `error` here means the REMOTE check failed (no host agent, no Bitbucket
+    // credentials, network down) — the INSTALLED version is local knowledge and
+    // is still in the payload, so it must still be displayed. Treating any
+    // error as a dead response left the navbar with no version at all, which
+    // looks like the app doesn't report one.
+    if (d && d.current) { _update = d; renderUpdateBadge(); }
   } catch { /* transient — next tick retries */ }
 }
 
@@ -6623,6 +6691,7 @@ const HELP_CONTENT = {
       <ul>
         <li>Edit the <b>JSON body</b> directly and set the <b>index pattern</b> (comma-separated, wildcards allowed). <b>Run</b> a single query or run the multi-index plan.</li>
         <li>In a multi-index plan each group has a <b>checkbox</b> — untick one to leave that index out. Groups whose query came out as <code>match_all</code> are badged <b>matches ALL docs</b> (your criteria don't exist in that index) and a one-click <b>Skip those N</b> drops them. The Run button shows how many groups are selected, and export / delete / modify act only on those.</li>
+        <li>Each group also has its <b>own sort</b>: the dropdown beside it lists that index's date fields (they differ per family) and the ▼/▲ button flips the direction. Groups with no date field show <i>no sort</i> and the control is disabled. The global <b>Sort by</b> only seeds the plan when you translate; after that, set the sort per index here.</li>
       </ul>
       <h6>Working with results</h6>
       <ul>
