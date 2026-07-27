@@ -6608,9 +6608,10 @@ const HELP_CONTENT = {
       </ul>
       <h6>Keeping the tool up to date</h6>
       <ul>
-        <li>The installed version is shown next to the app name in the top bar.</li>
-        <li>When the repository has a newer version, a green <b>Update to x.y.z</b> button appears there. It opens a dialog with the version, what changed, and <b>Update now</b>.</li>
+        <li>The installed version is shown next to the app name in the top bar. <b>Click it</b> for update details — where the check looks, when it last ran, and what changed.</li>
+        <li>When the repository has a newer version, a green <b>Update to x.y.z</b> button appears there. It opens the same dialog with <b>Update now</b>.</li>
         <li>Updating pulls the new code and restarts the app <b>for everyone</b> (about a minute) — the other connected users are notified first. If the server can't update itself, the dialog shows the exact command to run instead.</li>
+        <li>An <b>amber</b> version means something is off — hover it. Either the update check failed (usually no update agent on that host, so it falls back to the repository API and gets refused), or the build reports <code>0.0.0</code>, which means its <code>VERSION</code> file is missing and it needs a rebuild.</li>
       </ul>
       <p class="help-tip">The analyzer talks to ES over raw HTTP (not elasticsearch-py), so it works with the older / proxied ES versions common on CC deployments.</p>`,
   },
@@ -6683,6 +6684,7 @@ const HELP_CONTENT = {
         <li>Type criteria in plain English, then <b>Translate</b>. Field names, IPs, attack IDs and quoted values are recognised automatically. The box is multi-line — one criterion per line reads best; <kbd>Enter</kbd> translates, <kbd>Shift</kbd>+<kbd>Enter</kbd> adds a line.</li>
         <li>A criterion that matches <b>no field in the index</b> is not silently ignored: its badge is struck through and a warning says it was not applied — including when that leaves the query matching every document.</li>
         <li><b>OR within a field, AND across fields:</b> <i>"sourceIp is A or B or C and policyName is pol5"</i> → <code>(sourceIp IN [A,B,C]) AND (policyName = pol5)</code>. OR-ed values collapse into one <code>terms</code> clause.</li>
+        <li><b>Negation:</b> <i>"is not"</i>, <i>"not"</i>, <i>"without"</i>, <i>"except"</i> put that criterion under <code>must_not</code> — for ordinary fields and for category / risk / status alike. A negation belongs to <b>its own criterion only</b>: in <i>"policy name is not pol16"</i> ⏎ <i>"attack id is 11-…"</i> the attack id is a positive match. Separate criteria with a new line, a comma, or <i>and</i> — a line ending (or starting) with <i>or</i> continues the previous one instead.</li>
         <li><b>Types</b> picker filters by attack category; <b>Time</b> sets a start/end range (each with lower and upper bounds).</li>
         <li><b>Sort by</b> lists the date fields the current index pattern <i>actually has</i> (they differ per family — <code>startTime</code>/<code>endTime</code>, <code>timestamp</code>, <code>raisedTime</code>…) and defaults to <b>None</b>. Sorting on a field an index lacks makes Elasticsearch reject the whole search, so nothing is assumed; change the pattern and the list follows.</li>
         <li><b>Interpreted as…</b> shows exactly how your text was understood; <b>Field suggestions</b> appear when a reference is ambiguous, so you can pick the right field.</li>
@@ -6719,7 +6721,8 @@ const HELP_CONTENT = {
       <ul>
         <li>View as <b>JSON / Table / CSV</b>; set the <b>Show</b> size; the table has a sticky header and fills the screen.</li>
         <li><b>Funnel filters</b> per column, sortable headers, <b>Fields</b> to show/hide columns. Date fields display human-readable while still matching on the stored value.</li>
-        <li><b>Query from Filters</b>, <b>Aggregate</b>, and <b>Export</b> (shown rows or all matching docs).</li>
+        <li><b>Query from Filters</b>, <b>Aggregate</b>, and <b>Export</b> (shown rows or all matching docs). Query from Filters also fills the index pattern for you, derived from this index's name — <code>dp-attack-raw-ty-…</code> becomes <code>dp-attack-raw*</code>, and an index with no suffix at all (<code>alert-sid-0</code>) becomes <code>alert-sid-0*</code>, which still matches it. Edit the pattern freely before running.</li>
+        <li>Sorting uses a date field this index really has (taken from its mapping), never an assumed <code>startTime</code>.</li>
         <li>Some CC fields (e.g. <code>applicationId</code> on ADC indices) are mapped as <i>analyzed text</i> with an exact <code>.raw</code> twin. Filtering and <b>Query from Filters</b> automatically target <code>&lt;field&gt;.raw</code> for those — an exact match on the analyzed field itself would return nothing, because the analyzer splits the value into fragments.</li>
       </ul>
       <h6>Index actions (top-right)</h6>
