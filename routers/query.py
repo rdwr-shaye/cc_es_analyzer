@@ -846,11 +846,11 @@ def translate_nl_query(req: NLQueryRequest):
     if req.attack_types:                       # UI picker overrides text category
         clean = [t.strip() for t in req.attack_types if t.strip()]
         if len(clean) == 1:
-            gated_clauses.append(("category", {"match": {"category": clean[0]}}))
+            gated_clauses.append(("category", {"match": {"category": clean[0]}}, False))
             interpreted.append(f"category = {clean[0]}")
         elif len(clean) > 1:
             gated_clauses.append(("category", {"bool": {"should": [{"match": {"category": t}} for t in clean],
-                                                        "minimum_should_match": 1}}))
+                                                        "minimum_should_match": 1}}, False))
             interpreted.append(f"category IN [{', '.join(clean)}]")
         enum_maps.pop("category", None)
 
@@ -873,22 +873,29 @@ def translate_nl_query(req: NLQueryRequest):
                 g["rep"] = term          # prefer a multi-word representative
 
     consumed = req.text
+    # Keyed by (field, negated): "category is not DNS" must become a must_not,
+    # not a positive match on DNS — the exact opposite of what was asked. The
+    # same query can hold both ("category is DNS and status is not Active").
     _matched: dict = defaultdict(list)
     for (field, norm), g in sorted(_groups.items(), key=lambda kv: -len(kv[0][1])):
         pat = _enum_pattern(g["rep"])
-        if pat.search(consumed):
+        m = pat.search(consumed)
+        if m:
+            negated = _negated_before(consumed, m.start())
             for c in g["canons"]:
-                if c not in _matched[field]:
-                    _matched[field].append(c)
+                if c not in _matched[(field, negated)]:
+                    _matched[(field, negated)].append(c)
             consumed = pat.sub(" ", consumed)
-    for field, vals in _matched.items():
+    for (field, negated), vals in _matched.items():
         if len(vals) == 1:
-            gated_clauses.append((field, {"match": {field: vals[0]}}))
-            interpreted.append(f"{field} = {vals[0]}")
+            clause = {"match": {field: vals[0]}}
+            shown = vals[0]
         else:
-            gated_clauses.append((field, {"bool": {"should": [{"match": {field: v}} for v in vals],
-                                                   "minimum_should_match": 1}}))
-            interpreted.append(f"{field} IN [{', '.join(vals)}]")
+            clause = {"bool": {"should": [{"match": {field: v}} for v in vals],
+                               "minimum_should_match": 1}}
+            shown = "[" + ", ".join(vals) + "]"
+        gated_clauses.append((field, clause, negated))
+        interpreted.append(f"{field} {'≠' if negated else '='} {shown}")
 
     # Free-text "<descriptor words> <value>" references (IPs, attack IDs, numbers,
     # quoted strings). The real ES field is resolved per-index from the mapping
@@ -908,9 +915,13 @@ def translate_nl_query(req: NLQueryRequest):
         interpreted.append(f"{label} {'exists' if ref['present'] else 'missing'}")
 
     # Blocking state (nested field — gated on the "blockingState" leaf)
-    if any(w in text_lower for w in ("blocking", "blocked")):
-        gated_clauses.append(("blockingState", {"match": {"characteristics.blockingState": "Blocking"}}))
-        interpreted.append("blockingState = Blocking")
+    _blocking_at = next((text_lower.find(w) for w in ("blocking", "blocked")
+                         if text_lower.find(w) >= 0), -1)
+    if _blocking_at >= 0:
+        _blk_neg = _negated_before(req.text, _blocking_at)
+        gated_clauses.append(("blockingState",
+                              {"match": {"characteristics.blockingState": "Blocking"}}, _blk_neg))
+        interpreted.append(f"blockingState {'≠' if _blk_neg else '='} Blocking")
 
     # ── Explicit date values from the UI picker ───────────────────────────────
     # Each of start/end carries optional "after" (gte) and "before" (lte) bounds.
@@ -981,10 +992,10 @@ def translate_nl_query(req: NLQueryRequest):
 
         # Gated clauses (category/status/risk/blocking) — only applied when the
         # field actually exists in THIS group's mapping.
-        for gi, (gate_field, clause) in enumerate(gated_clauses):
+        for gi, (gate_field, clause, gate_neg) in enumerate(gated_clauses):
             if gate_field in all_fields_set:
                 _note(("gate", gi), True)
-                group_must.append(clause)
+                (group_must_not if gate_neg else group_must).append(clause)
             else:
                 _note(("gate", gi), False,
                       {"kind": "filter", "label": gate_field, "values": [], "op": "eq",
@@ -1135,7 +1146,14 @@ def translate_nl_query(req: NLQueryRequest):
         # Build query — bool whenever there are negations or multiple clauses.
         if group_must_not:
             bool_q: dict = {"must_not": group_must_not}
-            bool_q["must"] = group_must or [{"match_all": {}}]
+            if group_must:
+                bool_q["must"] = group_must
+            elif _needs_pure_negative_filler(es):
+                # Legacy Elasticsearch (pre-2.0) had no `adjust_pure_negative`:
+                # a bool with only must_not is a Lucene query with no positive
+                # clause and matches NOTHING. Modern ES/OpenSearch handle it, so
+                # the filler is only added where it is actually required.
+                bool_q["must"] = [{"match_all": {}}]
             query: dict = {"bool": bool_q}
         elif not group_must:
             query = {"match_all": {}}
@@ -2068,6 +2086,53 @@ def _word_matches_tokens(word: str, tokens: list[str]) -> bool:
 
 # Words that OR two values of the SAME field together ("A or B", "A nor B").
 _OR_WORDS = {"or", "nor"}
+# Words that end a criterion — a negator before one of these belongs to the
+# PREVIOUS criterion and must not negate what follows.
+_NEG_STOP = {"and", "or", "nor", "but", "then", "where", ",", ";"}
+
+
+_LINE_CONNECTIVE_END  = re.compile(r"(?:\b(?:or|and|nor|but)\b|[,;])\s*$", re.I)
+_LINE_CONNECTIVE_HEAD = re.compile(r"^\s*(?:\b(?:or|and|nor|but)\b|[,;])", re.I)
+
+
+def _join_criteria_lines(text: str) -> str:
+    """Fold a multi-line query into one line, ANDing the separate criteria.
+
+    The free-text box is multi-line and people write one criterion per line, but
+    the tokenizer is whitespace-insensitive — without an explicit boundary the
+    lines glue together and a "not" on one line negates the next one too. "and"
+    is both the right meaning and a hard boundary for the scans that follow.
+    A line that ends (or the next one that begins) with a connective is a
+    deliberate continuation — "sourceIp is A or⏎B" — and is joined as-is.
+    """
+    lines = [ln.strip() for ln in re.split(r"[\r\n]+", text or "")]
+    out = ""
+    for ln in (l for l in lines if l):
+        if not out:
+            out = ln
+            continue
+        continues = bool(_LINE_CONNECTIVE_END.search(out) or _LINE_CONNECTIVE_HEAD.match(ln))
+        out += (" " if continues else " and ") + ln
+    return out
+
+
+def _negated_before(text: str, pos: int) -> bool:
+    """True when the phrase ending at *pos* is negated ("… is not DNS").
+
+    Used for enum/category values, which are matched by pattern rather than by
+    the token walk, and so used to ignore negation completely — turning
+    "category is not DNS" into a positive match on DNS. Only the few words
+    immediately before the value are considered, and the scan stops at a
+    criterion boundary so an earlier "not" cannot bleed across.
+    """
+    words = re.findall(r"[A-Za-z']+|[!,;]", text[:pos])
+    for w in reversed(words[-4:]):
+        low = w.lower().replace("'", "")
+        if low in _NEG_STOP or w in (",", ";"):
+            return False
+        if low in _OP_NEGATE or w == "!":
+            return True
+    return False
 
 
 def _is_or_continuation(tokens: list[str], prev_i: int, i: int) -> bool:
@@ -2117,6 +2182,7 @@ def _extract_field_refs(text: str) -> list[dict]:
     # at separators. A value is either an always-value token (quoted/IP/id/
     # number/mixed-alnum/compound-with-digit) or a bare word that follows a
     # connective ("contains Incorrect", "is blacklist").
+    text = _join_criteria_lines(text)
     tokens = re.findall(
         r'"[^"]*"|\d{1,3}(?:\.\d{1,3}){3}|[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+|[A-Za-z0-9]+|[^\s]', text)
 
@@ -2156,10 +2222,17 @@ def _extract_field_refs(text: str) -> list[dict]:
             continue
 
         # Walk back over preceding tokens to collect descriptor words and ops.
+        # The scan must never cross the PREVIOUS criterion's value: everything
+        # before it belongs to that criterion, so reading past it picks up its
+        # operator too — "policy name is not pol16 / attack id is 11-178…" would
+        # otherwise inherit the "not" and negate the attack id as well. Only
+        # "and"/"or" used to stop the scan, which left criteria separated by a
+        # line break (or nothing) leaking into each other.
         words: list[str] = []
         contains = negate = False
+        floor = prev_val_i if prev_val_i is not None else -1
         j = i - 1
-        while j >= 0:
+        while j > floor:
             t = tokens[j]
             low = t.lower()
             if low in _REF_BOUNDARY:
@@ -2513,6 +2586,47 @@ def _pick_date_field(date_fields: list[str], hint: str) -> str:
     """Thin wrapper — returns only the field name."""
     field, _ = _pick_date_field_verbose(date_fields, hint)
     return field
+
+
+_PURE_NEG_CACHE: dict = {}          # base_url -> (ts, needs_filler)
+_PURE_NEG_TTL = 600
+
+
+def _needs_pure_negative_filler(es) -> bool:
+    """True only for a genuine Elasticsearch older than 2.0.
+
+    Those reject a bool query that has must_not and nothing else (it matches no
+    documents), which is why a `must: [match_all]` filler used to be added
+    unconditionally — noise on every modern cluster. Note that CC ships
+    OPENSEARCH 1.3.x, whose version number looks like an ancient Elasticsearch
+    but which is forked from ES 7.10 and handles pure-negative bools fine; the
+    `distribution` field and the Lucene version tell them apart.
+    """
+    key = getattr(es, "base_url", "?")
+    now = time.time()
+    hit = _PURE_NEG_CACHE.get(key)
+    if hit and now - hit[0] < _PURE_NEG_TTL:
+        return hit[1]
+    needs = False
+    try:
+        info = es.get("/", params={}) or {}
+        ver = info.get("version", {}) or {}
+        number = str(ver.get("number") or "")
+        distribution = str(ver.get("distribution") or "").lower()
+        lucene = str(ver.get("lucene_version") or "")
+        major = int(number.split(".")[0]) if number.split(".")[0].isdigit() else 99
+        lucene_major = int(lucene.split(".")[0]) if lucene.split(".")[0].isdigit() else 99
+        # OpenSearch (any version) is post-7.10 → fine. Otherwise only a real
+        # ES 1.x/0.x needs the filler, and its Lucene major is ≤ 4.
+        needs = (distribution != "opensearch" and major < 2 and lucene_major <= 4)
+        logger.info("[translate] pure-negative bool filler needed=%s "
+                    "(version=%s distribution=%s lucene=%s)",
+                    needs, number or "?", distribution or "-", lucene or "?")
+    except Exception as exc:
+        logger.warning("[translate] could not read the cluster version (%s) — "
+                       "assuming a modern bool query is fine", exc)
+    _PURE_NEG_CACHE[key] = (now, needs)
+    return needs
 
 
 def _pick_date_field_verbose(date_fields: list[str], hint: str) -> tuple[str, str]:
