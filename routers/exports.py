@@ -222,12 +222,20 @@ def _run_export_job(job: dict, es) -> None:
 @router.post("/restore")
 async def start_restore(file: UploadFile | None = File(default=None),
                         filename: str = Form(default=""),
-                        target: str = Form(default="")):
+                        target: str = Form(default=""),
+                        id_column: str = Form(default="_id"),
+                        generate_ids: bool = Form(default=False)):
     """Restore an archive into the currently-connected ES.
 
     Give EITHER an uploaded .csv/.csv.gz file (the cross-machine 'upload' flow)
     OR `filename` of an archive already in this server's exports directory.
     `target` = index to restore into (default: the archive's name stem).
+
+    `id_column` decides each document's id: `_id` (default) reuses the archived
+    id so a re-restore overwrites; any other column takes the id from that field
+    (e.g. `attackIpsId`). Set `generate_ids` to send no id at all and let ES
+    assign one — a separate flag because FastAPI resolves an empty-string Form
+    value to the field's default, so `id_column=""` can never reach us.
     """
     from routers.indices import _valid_index_name
 
@@ -285,14 +293,17 @@ async def start_restore(file: UploadFile | None = File(default=None),
     except Exception as exc:
         return {"error": str(exc)}
 
+    id_col = "" if generate_ids else (id_column or "").strip()
     job = _new_job("restore", [{"index": tgt, "total": None, "done": 0, "file": name}])
-    threading.Thread(target=_run_restore_job, args=(job, es, path, tgt), daemon=True,
-                     name=f"restore-{job['id']}").start()
-    logger.info("[exports] restore job %s: %s -> index %r", job["id"], name, tgt)
-    return {"job_id": job["id"], "target": tgt}
+    threading.Thread(target=_run_restore_job, args=(job, es, path, tgt, id_col),
+                     daemon=True, name=f"restore-{job['id']}").start()
+    logger.info("[exports] restore job %s: %s -> index %r (id from %s)",
+                job["id"], name, tgt, id_col or "ES (auto-generated)")
+    return {"job_id": job["id"], "target": tgt, "id_column": id_col or None}
 
 
-def _run_restore_job(job: dict, es, path: str, target: str) -> None:
+def _run_restore_job(job: dict, es, path: str, target: str,
+                     id_col: str = "_id") -> None:
     from routers.indices import _coerce_cell, _flush_batch, _MISSING
     item = job["items"][0]
     meta_cols = {"_id", "_index"}
@@ -308,6 +319,10 @@ def _run_restore_job(job: dict, es, path: str, target: str) -> None:
                     headers = [h.strip() for h in next(reader)]
             except StopIteration:
                 raise ValueError("archive has no rows")
+            if id_col and id_col not in headers:
+                raise ValueError(f"id column {id_col!r} is not in the archive "
+                                 f"header (columns: "
+                                 f"{', '.join(h for h in headers if h) or 'none'})")
 
             batch: list = []
             failed = 0
@@ -335,7 +350,7 @@ def _run_restore_job(job: dict, es, path: str, target: str) -> None:
                 for i, col in enumerate(headers):
                     if not col or i >= len(row):
                         continue
-                    if col == "_id":
+                    if id_col and col == id_col:
                         doc_id = row[i].strip()
                     if col in meta_cols:
                         continue

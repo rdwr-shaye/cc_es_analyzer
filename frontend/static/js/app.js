@@ -3314,6 +3314,66 @@ async function _chooseRestoreTargets(labels, okText) {
   return out.length ? out : null;
 }
 
+/** Read the header row of a plain .csv the user picked (first 64 KB is plenty).
+ *  Returns the column names, or null when it can't be read. */
+async function _csvHeader(file) {
+  try {
+    const head = await file.slice(0, 65536).text();
+    // The export writes a "#cc-es-archive …" comment line before the header.
+    const line = head.split(/\r?\n/).find(l => l.trim() && !l.startsWith('#'));
+    if (!line) return null;
+    return line.split(',').map(s => s.trim().replace(/^"|"$/g, ''));
+  } catch (_) {
+    return null;
+  }
+}
+
+/** Ask where the imported/restored documents get their `_id` from.
+ *  Resolves to the column name ('' = let ES generate), or null when cancelled.
+ *  `columns` (optional) is the file's header — used to validate a custom pick. */
+async function _chooseIdSource(title, columns) {
+  const hasId = !columns || columns.includes('_id');
+  const buttons = [];
+  if (hasId) {
+    buttons.push({ value: '_id', text: 'Keep the file\'s _id', cls: 'btn-primary' });
+  }
+  buttons.push({ value: '', text: 'Let Elasticsearch generate ids',
+                 cls: hasId ? 'btn-outline-primary' : 'btn-primary' });
+  buttons.push({ value: '_pick', text: 'Take the id from a field…', cls: 'btn-outline-info' });
+  buttons.push({ value: null, text: 'Cancel', cls: 'btn-outline-secondary' });
+  const choice = await uiChoice(document, {
+    title,
+    message: (hasId
+      ? 'Keeping the id means a document that already exists is OVERWRITTEN rather than '
+      + 'duplicated. Generating ids always adds new documents. '
+      : 'This file has no _id column. ')
+      + 'Some CC families keep the id in a field as well — on dp-attack-raw* the _id IS '
+      + 'the attackIpsId — so you can point at that field instead.',
+    buttons,
+  });
+  if (choice == null) return null;
+  if (choice !== '_pick') return choice;
+  const guess = (columns || []).find(c => /^attackIpsId$/i.test(c)) || '';
+  const col = await uiPrompt(document, {
+    title: 'Field holding the document id',
+    value: guess, okText: 'Use this field' });
+  if (col == null || !col.trim()) return null;
+  const c = col.trim();
+  if (columns && !columns.includes(c)) {
+    showToast(`"${c}" is not a column in this file`, 'bg-danger');
+    return null;
+  }
+  return c;
+}
+
+/** Put the chosen id source on a restore FormData. `col` is '' for
+ *  ES-generated ids — sent as an explicit `generate_ids` flag, because FastAPI
+ *  resolves an empty-string Form value back to the field's default ('_id'). */
+function _appendIdSource(fd, col) {
+  if (col === '') fd.append('generate_ids', 'true');
+  else fd.append('id_column', col);
+}
+
 /** One combined warning for restore targets that already exist in ES. */
 async function _confirmExistingTargets(targets) {
   const existing = [...new Set(targets.filter(t => allIndices.some(ix => ix.name === t)))];
@@ -3342,11 +3402,15 @@ async function restoreArchives(names) {
   const chosen = await _chooseRestoreTargets(names.map(n => ({ name: n })));
   if (!chosen) return;
   if (!await _confirmExistingTargets(chosen.map(c => c.target))) return;
+  const idCol = await _chooseIdSource(
+    `Restore ${chosen.length} archive(s) — document ids`);
+  if (idCol === null) return;
   let started = 0; const failures = [];
   for (const c of chosen) {
     const fd = new FormData();
     fd.append('filename', names[c.i]);
     fd.append('target', c.target);
+    _appendIdSource(fd, idCol);
     const res = await api('/api/exports/restore', { method: 'POST', body: fd });
     if (res && !res.error) started++;
     else failures.push(`${names[c.i]}: ${res?.error || 'unknown'}`);
@@ -3408,6 +3472,13 @@ function uploadArchive() {
       'Upload & Restore');
     if (!chosen) return;
     if (!await _confirmExistingTargets(chosen.map(c => c.target))) return;
+    // Plain .csv uploads expose their header; .csv.gz is gzipped, so the
+    // dialog falls back to assuming the standard export shape.
+    const plain = files[chosen[0].i];
+    const idCol = await _chooseIdSource(
+      `Upload & restore ${chosen.length} archive(s) — document ids`,
+      plain && plain.name.endsWith('.csv') ? await _csvHeader(plain) : null);
+    if (idCol === null) return;
     let started = 0; const failures = [];
     for (const c of chosen) {
       const f = files[c.i];
@@ -3415,6 +3486,7 @@ function uploadArchive() {
       const fd = new FormData();
       fd.append('file', f, f.name);
       fd.append('target', c.target);
+      _appendIdSource(fd, idCol);
       const res = await api('/api/exports/restore', { method: 'POST', body: fd });
       if (res && !res.error) started++;
       else failures.push(`${f.name}: ${res?.error || 'unknown'}`);
@@ -4089,22 +4161,28 @@ async function doImportCsv(indexName, file) {
   if (!await confirmSharedCc(`import CSV into "${indexName}"`)) return;
   const ok = await uiConfirm(document, {
     title: `Import into "${indexName}"?`,
-    message: `Add rows from "${file.name}" (${(file.size / 1024).toFixed(1)} KB) as documents. `
-      + 'Rows carrying an _id that already exists are overwritten.',
+    message: `Add rows from "${file.name}" (${(file.size / 1024).toFixed(1)} KB) as documents.`,
     okText: 'Import',
   });
   if (!ok) return;
+  const idCol = await _chooseIdSource(
+    `Import into "${indexName}" — document ids`, await _csvHeader(file));
+  if (idCol === null) return;
   showToast(`Importing ${file.name}…`, 'bg-secondary');
   const fd = new FormData();
   fd.append('file', file, file.name);
   let res;
   try {
-    res = await api(`/api/indices/${encodeURIComponent(indexName)}/import`, { method: 'POST', body: fd });
+    res = await api(`/api/indices/${encodeURIComponent(indexName)}/import`
+                    + `?id_column=${encodeURIComponent(idCol)}`,
+                    { method: 'POST', body: fd });
   } catch (e) {
     showToast('Import failed: ' + e, 'bg-danger'); return;
   }
   if (!res || res.error) { showToast('Import failed: ' + (res?.error || 'unknown'), 'bg-danger'); return; }
-  const msg = `Imported ${res.indexed}/${res.rows} row(s)` + (res.failed ? ` — ${res.failed} failed` : '');
+  const msg = `Imported ${res.indexed}/${res.rows} row(s)`
+    + (res.id_column ? ` (_id from ${res.id_column})` : ' (ES-generated ids)')
+    + (res.failed ? ` — ${res.failed} failed` : '');
   showToast(msg, res.failed ? 'bg-warning' : 'bg-success');
   if (res.failed && Array.isArray(res.errors) && res.errors.length) {
     console.warn('CSV import errors (first few):', res.errors);
@@ -4356,6 +4434,18 @@ async function createArtificialData(indexName) {
     </div>
     <div class="ad-derived"></div>
     <div class="ad-derived-preview small text-info mb-1"></div>
+
+    <div class="d-flex gap-2 align-items-center mt-2 mb-1 flex-wrap">
+      <span class="small fw-semibold">Document _id</span>
+      <select class="form-select form-select-sm ad-idmode" style="width:19rem;"
+              title="Where each document's _id comes from">
+        ${(info.id_modes || [{ id: 'auto', label: 'Auto — Elasticsearch generates the id' }])
+          .map(m => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('')}
+      </select>
+      <span class="ad-idcell d-flex gap-1 align-items-center flex-grow-1"></span>
+    </div>
+    <div class="ad-id-preview small text-info mb-1"></div>
+    <datalist id="adIdFields"></datalist>
     <datalist id="adDerivedFields">${(info.fields || []).map(f => `<option value="${esc(f.name)}">`).join('')}</datalist>`;
   document.body.appendChild(wrap);
 
@@ -4378,6 +4468,7 @@ async function createArtificialData(indexName) {
         <button class="btn btn-sm btn-outline-danger py-0 ad-drm" title="Remove rule">✕</button>
       </div>`);
     updateDerivedPreview();
+    refreshIdFieldList();
   };
 
   const refreshDerivedSources = () => {
@@ -4510,6 +4601,121 @@ async function createArtificialData(indexName) {
   };
   updateEstimate();
 
+  /* ── Document _id ──────────────────────────────────────────────────────────
+   * Mirrors routers/artificial.py::_build_id_rule / _doc_id: the id can only be
+   * built from fields this job actually writes, so the picker and the preview
+   * are both driven by the live form state. */
+
+  /** Every field the current form will write into each document. */
+  const idFieldNames = () => {
+    const names = new Set();
+    const main = wrap.querySelector('.ad-main')?.value.trim();
+    if (main) names.add(main);
+    wrap.querySelectorAll('.ad-other-row').forEach(r => {
+      if (r.querySelector('.ad-other-on').checked) names.add(r.dataset.field);
+    });
+    fieldSpecs().forEach(s => names.add(s.field));      // blank value lists are dropped
+    derivedRules().forEach(d => names.add(d.field));
+    return [...names].filter(Boolean).sort();
+  };
+
+  const refreshIdFieldList = () => {
+    const dl = wrap.querySelector('#adIdFields');
+    if (dl) dl.innerHTML = idFieldNames().map(f => `<option value="${esc(f)}">`).join('');
+  };
+
+  const renderIdCell = () => {
+    const cell = wrap.querySelector('.ad-idcell');
+    const mode = wrap.querySelector('.ad-idmode').value;
+    if (mode === 'field') {
+      const names = idFieldNames();
+      const guess = names.find(f => /^attackIpsId$/i.test(f)) || '';
+      cell.innerHTML = `<input type="text" list="adIdFields" class="form-control form-control-sm ad-idfield"
+             style="width:15rem;" placeholder="e.g. attackIpsId" value="${esc(guess)}">
+        <span class="small text-secondary">the field's value becomes the _id</span>`;
+    } else if (mode === 'template') {
+      cell.innerHTML = `<input type="text" class="form-control form-control-sm ad-idtpl"
+             style="min-width:16rem;flex:1 1 auto;" placeholder="{attackIpsId}">
+        <span class="small text-secondary" title="{n} document number · {ts} main timestamp (ms) · {index} target index"
+          >{field} placeholders · also {n}, {ts}, {index}</span>`;
+    } else {
+      cell.innerHTML = '<span class="small text-secondary">Elasticsearch assigns a unique '
+        + 'id to every document (duplicates are always added, never overwritten).</span>';
+    }
+    refreshIdFieldList();
+    updateIdPreview();
+  };
+
+  /** Field values the FIRST generated document will carry — drives the preview. */
+  const firstDocValues = () => {
+    const tsMs = firstStepTs();
+    const vals = {};
+    const main = wrap.querySelector('.ad-main').value.trim();
+    if (main && tsMs != null) vals[main] = tsMs;
+    wrap.querySelectorAll('.ad-other-row').forEach(r => {
+      if (!r.querySelector('.ad-other-on').checked || tsMs == null) return;
+      const gap = (parseFloat(r.querySelector('.ad-gap-n').value) || 0) *
+                  _AD_UNIT_S[r.querySelector('.ad-gap-u').value];
+      vals[r.dataset.field] = tsMs + Math.round(gap * 1000);
+    });
+    for (const s of fieldSpecs()) {
+      if (s.mode === 'list')           vals[s.field] = s.values[0];
+      else if (s.mode === 'increment') vals[s.field] = `${s.prefix}${s.start}`;
+      else                             vals[s.field] = '‹random›';
+    }
+    const tz = parseInt(wrap.querySelector('.ad-tz').value) || 0;
+    if (tsMs != null) {
+      for (const d of derivedRules()) vals[d.field] = _derivePreview(d.rule, tsMs, tz);
+    }
+    return { vals, tsMs };
+  };
+
+  const updateIdPreview = () => {
+    const box = wrap.querySelector('.ad-id-preview');
+    if (!box) return;
+    const mode = wrap.querySelector('.ad-idmode').value;
+    if (mode === 'auto') { box.textContent = ''; box.className = 'ad-id-preview small text-info mb-1'; return; }
+    const { vals, tsMs } = firstDocValues();
+    let out, bad = false;
+    if (mode === 'field') {
+      const f = wrap.querySelector('.ad-idfield')?.value.trim();
+      if (!f) { box.textContent = '(choose the field holding the id)'; return; }
+      bad = !(f in vals);
+      out = bad ? `"${f}" is not generated by this job — give it a value above` : String(vals[f]);
+    } else {
+      const tpl = wrap.querySelector('.ad-idtpl')?.value || '';
+      if (!/\{[^{}]+\}/.test(tpl)) {
+        box.textContent = '(add at least one {field} placeholder — a constant id '
+                        + 'would leave a single document)';
+        return;
+      }
+      out = tpl.replace(/\{([^{}]+)\}/g, (_m, k) => {
+        k = k.trim();
+        if (k === 'n')     return '0';
+        if (k === 'ts')    return tsMs == null ? '{ts}' : String(tsMs);
+        if (k === 'index') return indexName;
+        if (k in vals)     return String(vals[k]);
+        bad = true;
+        return `⟨${k}?⟩`;
+      });
+    }
+    box.className = 'ad-id-preview small mb-1 ' + (bad ? 'text-warning' : 'text-info');
+    box.textContent = (bad ? '⚠ ' : 'First doc _id:  ') + out;
+  };
+
+  /** The doc_id payload for POST /api/artificial. */
+  const idRule = () => {
+    const mode = wrap.querySelector('.ad-idmode').value;
+    if (mode === 'field') {
+      return { mode, field: wrap.querySelector('.ad-idfield')?.value.trim() || '' };
+    }
+    if (mode === 'template') {
+      return { mode, template: wrap.querySelector('.ad-idtpl')?.value.trim() || '' };
+    }
+    return { mode: 'auto' };
+  };
+  renderIdCell();
+
   // Editing a span sub-input auto-selects ITS radio, so the value the user
   // types actually takes effect. Without this, typing "8 days" in the relative
   // row while the "slice window" radio stayed selected silently clipped the
@@ -4555,6 +4761,8 @@ async function createArtificialData(indexName) {
     else if (c?.contains('ad-abs-from') || c?.contains('ad-abs-to')) selectSpan('absolute');
     updateEstimate();
     updateDerivedPreview();          // dep-rule preview follows the time span
+    refreshIdFieldList();
+    updateIdPreview();
   });
   wrap.addEventListener('change', (e) => {
     const c = e.target.classList;
@@ -4568,8 +4776,11 @@ async function createArtificialData(indexName) {
       tr.querySelector('.ad-valcell').innerHTML =
         _adValueCellHtml(name, tr.dataset.type || '', e.target.value);
     }
+    if (c?.contains('ad-idmode')) { renderIdCell(); return; }   // re-renders + previews
     updateEstimate();
     updateDerivedPreview();
+    refreshIdFieldList();
+    updateIdPreview();
   });
 
   const close = () => {
@@ -4594,7 +4805,10 @@ async function createArtificialData(indexName) {
         </tr>`);
     }
     else if (b.dataset.act === 'add-derived') { addDerivedRow(); }
-    else if (b.classList.contains('ad-drm')) { b.closest('.ad-drow')?.remove(); updateDerivedPreview(); }
+    else if (b.classList.contains('ad-drm')) {
+      b.closest('.ad-drow')?.remove();
+      updateDerivedPreview(); refreshIdFieldList(); updateIdPreview();
+    }
     else if (b.dataset.act === 'cancel-job' && b.dataset.job) {
       await api(`/api/exports/jobs/${encodeURIComponent(b.dataset.job)}/cancel`, { method: 'POST' });
     }
@@ -4625,6 +4839,7 @@ async function createArtificialData(indexName) {
       span_to: wrap.querySelector('.ad-abs-to').value,
       fields: fieldSpecs(),
       derived: derivedRules(),
+      doc_id: idRule(),
       tz_offset_minutes: parseInt(wrap.querySelector('.ad-tz').value) || 0,
       confirm_spill: confirmSpill,
     };
@@ -6631,6 +6846,7 @@ const HELP_CONTENT = {
         <li>Each index is annotated with its CC <b>category</b> (DP Attacks, EAAF, ADC, …) so you know what it holds.</li>
         <li><b>Checkboxes</b> select indices → <b>Export selected</b> (one CSV per index) or <b>Delete selected</b>.</li>
         <li><b>Archives</b> — server-side compressed exports: create, download, and restore/upload index archives. Uploaded snapshot <code>.zip</code>s are verified before being stored, and you choose whether to keep them or restore straight away. Restoring a snapshot lists the indices inside it so you can restore <b>all or just some</b> — ones that already exist here are flagged and unchecked, since a native restore cannot overwrite them.</li>
+        <li><b>Document ids on restore</b> (CSV archives only) — before a restore starts you pick where each <code>_id</code> comes from: keep the archived <code>_id</code> so a repeat restore overwrites rather than duplicates, let Elasticsearch generate fresh ids, or take the id from a field such as <code>attackIpsId</code>. Snapshot <code>.zip</code>s are unaffected — a native restore always keeps the original ids.</li>
         <li><b>Fetching data script generator</b> — for CC machines this app cannot reach (no SSH, isolated site). Paste index names, pick an archive name, and download a standalone <code>sh</code> script. Run it on that machine as root and it performs the same snapshot flow locally, leaving a <code>&lt;name&gt;.zip</code> you can upload here. It needs only <code>sh</code>, <code>curl</code> and <code>zip</code>.</li>
         <li><b>Add</b> creates a new index — either an <i>empty</i> one by name, or a <i>possible CC index</i> picked from the live catalog (every family this machine's index templates can create, with real slice sizes and field lists) and filled via the artificial-data dialog.</li>
         <li><b>Click any row</b> to open its Index Detail screen.</li>
@@ -6728,7 +6944,8 @@ const HELP_CONTENT = {
       <h6>Index actions (top-right)</h6>
       <ul>
         <li><b>Artificial data</b> — generate synthetic documents into the index; slice-aware, skips already-existing data, and supports <b>dependency rules</b> (derive fields such as day / hourOfDay from a timestamp). Each field can take a fixed <b>values</b> list (cartesian product), a <b>random</b> value per document (type-aware: IP addresses, ports, numeric ranges, true/false, or name-based tokens), or an <b>increment</b> counter per document (optional prefix, start, step — e.g. an attack ID increasing by one).</li>
-        <li><b>Import CSV</b> — load documents from a CSV (same shape as export).</li>
+        <li><b>Document _id</b> (artificial data) — by default Elasticsearch assigns each id. Some CC families store the id in a field too: on <code>dp-attack-raw*</code> the <code>_id</code> <i>is</i> the <code>attackIpsId</code>. Choose <b>Copy a generated field</b> to reuse that field's value, or <b>Template</b> to build the id from several — <code>{attackIpsId}</code>, <code>{poId}-{attackIpsId}</code>, also <code>{n}</code> (document number), <code>{ts}</code> (main timestamp in millis) and <code>{index}</code>. A preview shows the first document's id, and only fields this run actually writes may be used.</li>
+        <li><b>Import CSV</b> — load documents from a CSV (same shape as export). You choose where each <code>_id</code> comes from: keep the file's <code>_id</code> (re-importing then overwrites instead of duplicating), let Elasticsearch generate ids, or take the id from any column (e.g. <code>attackIpsId</code>). The chosen column still stays in the document body.</li>
         <li><b>Duplicate</b> — copy the index to a new name, optionally shifting all date fields.</li>
         <li><b>Delete Index</b> — remove the index permanently.</li>
       </ul>

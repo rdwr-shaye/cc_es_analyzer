@@ -542,8 +542,17 @@ async def import_csv(index_name: str,
     The CSV is expected in the same shape the app exports: a header row of
     column names, ``_id`` / ``_index`` metadata columns (dropped from the doc
     body), object/array cells JSON-encoded, scalar cells stringified, and empty
-    cells meaning the field was absent. The ``_id`` column (configurable via
-    ``id_column``) sets each document's id; drop/rename it to let ES auto-assign.
+    cells meaning the field was absent.
+
+    ``id_column`` chooses where each document's id comes from:
+
+    * ``"_id"`` (default) — reuse the exported id, so a re-import overwrites
+      rather than duplicates;
+    * ``""`` — send no ``_id`` at all and let Elasticsearch generate one;
+    * any other column name — take the id from that field, e.g. ``attackIpsId``
+      on ``dp-attack-raw*`` where the id and the field hold the same value.
+      The column stays in the document body as well (only ``_id``/``_index``
+      are stripped).
     """
     name = (index_name or "").strip()
     if not name:
@@ -564,10 +573,22 @@ async def import_csv(index_name: str,
     reader = csv.reader(io.StringIO(text))
     try:
         headers = [h.strip() for h in next(reader)]
+        # Skip metadata comment lines (e.g. "#cc-es-archive source=…"), which
+        # the server-side archive export writes before the real header. Without
+        # this a gunzipped archive imports its own comment line as the header.
+        while headers and headers[0].startswith("#"):
+            headers = [h.strip() for h in next(reader)]
     except StopIteration:
         return {"error": "uploaded file has no rows"}
     if not any(headers):
         return {"error": "uploaded file has no header row"}
+
+    # An id column that isn't in the file is a mistake, not a licence to
+    # auto-generate ids for the whole import — say so instead.
+    id_col = (id_column or "").strip()
+    if id_col and id_col not in headers:
+        return {"error": f"id column {id_col!r} is not in the CSV header "
+                         f"(columns: {', '.join(h for h in headers if h) or 'none'})"}
 
     es = get_client()
     meta_cols = {"_id", "_index"}
@@ -591,7 +612,7 @@ async def import_csv(index_name: str,
             if not col or i >= len(row):
                 continue
             cell = row[i]
-            if col == id_column:
+            if id_col and col == id_col:
                 doc_id = cell.strip()
             if col in meta_cols:
                 continue                   # metadata, not a document field
@@ -619,7 +640,8 @@ async def import_csv(index_name: str,
             pass
 
     return {"ok": failed == 0, "index": name, "rows": rows,
-            "indexed": indexed, "failed": failed, "errors": errors}
+            "indexed": indexed, "failed": failed, "errors": errors,
+            "id_column": id_col or None}
 
 
 def _flush_batch(es, index_name: str, batch: list, refresh: bool) -> tuple:
