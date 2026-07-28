@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import re
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query, UploadFile, File
 from pydantic import BaseModel
@@ -672,6 +673,30 @@ _MISSING  = object()
 _INT_RE   = re.compile(r"^-?(?:0|[1-9][0-9]*)$")
 _FLOAT_RE = re.compile(r"^-?(?:0|[1-9][0-9]*)\.[0-9]+(?:[eE][-+]?[0-9]+)?$")
 
+# The app's own display format for dates ("2026-07-14 08:16:33 UTC"), produced
+# by the frontend's fmtEpochDisplay(). CSV downloads now carry raw epoch millis,
+# but files exported BEFORE that change still use this shape — and it cannot be
+# imported as-is: a date-mapped field rejects it outright, and a fresh index
+# maps it as text, silently breaking time filters and date sorting. Converting
+# it back is therefore never a loss. The " UTC" suffix keeps it distinctive
+# enough that a real keyword value is very unlikely to collide.
+_READABLE_DATE_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))? UTC$")
+
+
+def _readable_date_ms(t: str):
+    """Epoch millis for the app's display format, or None if *t* isn't one."""
+    m = _READABLE_DATE_RE.match(t)
+    if not m:
+        return None
+    y, mo, d, h, mi, s, frac = m.groups()
+    try:
+        dt = datetime(int(y), int(mo), int(d), int(h), int(mi), int(s),
+                      tzinfo=timezone.utc)
+    except ValueError:                     # impossible date, e.g. 2026-02-30
+        return None
+    return int(dt.timestamp()) * 1000 + (int(frac.ljust(3, "0")) if frac else 0)
+
 
 def _coerce_cell(raw: str):
     """Turn an exported CSV cell back into a typed JSON value.
@@ -681,6 +706,10 @@ def _coerce_cell(raw: str):
     so it is dropped rather than stored as ""). Integers/floats/booleans are
     coerced back so a re-import into a fresh index gets sensible dynamic types;
     numbers with leading zeros stay strings to preserve ids.
+
+    A cell in the app's own human-readable date format is turned back into
+    epoch millis, so CSVs exported before downloads switched to raw values
+    still import — see ``_READABLE_DATE_RE``.
     """
     if raw == "":
         return _MISSING
@@ -707,6 +736,9 @@ def _coerce_cell(raw: str):
             return float(t)
         except Exception:
             return raw
+    ms = _readable_date_ms(t)
+    if ms is not None:
+        return ms
     return raw
 
 

@@ -352,10 +352,17 @@ function asJsonObject(v) {
   return null;
 }
 
-function buildResultsCsv(hits, cols) {
+/** CSV text for `hits`.
+ *
+ *  On screen, date columns render human-readable. Files written to disk pass
+ *  `rawDates` so they carry the value Elasticsearch actually stores (epoch
+ *  millis): a readable date re-imports as a STRING, which a real CC mapping
+ *  rejects outright and a fresh index silently maps as text — breaking time
+ *  filters and date sorting on it. Keep exports round-trippable. */
+function buildResultsCsv(hits, cols, rawDates = false) {
   if (!hits.length) return '';
   cols = cols || resultColumns(hits);
-  const dateCols = activeDateColumns();     // dates human-readable in the CSV view
+  const dateCols = rawDates ? new Set() : activeDateColumns();
   const esc = (s) => /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   const lines = [cols.map(esc).join(',')];
   for (const h of hits) lines.push(cols.map(c => esc(displayCell(h[c], dateCols.has(c)))).join(','));
@@ -868,7 +875,7 @@ function openAggregateDialog(el) {
   function downloadCsv() {
     if (!lastAgg || !lastAgg.rows.length) return;
     const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const blob = new Blob([buildResultsCsv(lastAgg.rows, lastAgg.cols)],
+    const blob = new Blob([buildResultsCsv(lastAgg.rows, lastAgg.cols, true)],
                           { type: 'text/csv;charset=utf-8' });
     const a = doc.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -1793,7 +1800,8 @@ function downloadRowsLocally(rows) {
     content = JSON.stringify(rows, null, 2);
     mime = 'application/json'; ext = 'json';
   } else {
-    content = buildResultsCsv(rows, currentColumns());
+    // rawDates: the file must re-import cleanly (screen views stay readable).
+    content = buildResultsCsv(rows, currentColumns(), true);
     mime = 'text/csv'; ext = 'csv';
   }
   const blob = new Blob([content], { type: mime + ';charset=utf-8' });
@@ -3603,7 +3611,7 @@ function downloadIndicesCsv() {
   const rows = indicesRows();
   if (!rows.length) { showToast('No indices to export', 'bg-warning'); return; }
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const blob = new Blob([buildResultsCsv(rows)], { type: 'text/csv;charset=utf-8' });
+  const blob = new Blob([buildResultsCsv(rows, null, true)], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `cc_indices_${ts}.csv`;
@@ -6937,6 +6945,8 @@ const HELP_CONTENT = {
       <ul>
         <li>View as <b>JSON / Table / CSV</b>; set the <b>Show</b> size; the table has a sticky header and fills the screen.</li>
         <li><b>Funnel filters</b> per column, sortable headers, <b>Fields</b> to show/hide columns. Date fields display human-readable while still matching on the stored value.</li>
+        <li><b>Dates in exported CSVs</b> — on screen dates are human-readable, but every downloaded CSV carries the value Elasticsearch stores (epoch millis), so an export can be re-imported as-is. A readable date would otherwise come back as a <i>string</i>: a real CC mapping rejects it (<code>failed to parse field … of type [date]</code>), and a brand-new index silently maps it as text, which breaks time filters and date sorting on that index.</li>
+        <li><b>Older CSVs still import</b> — files exported before that change carry <code>2026-07-14 08:16:33 UTC</code>, and the importer converts that form back to epoch millis. Note it only ever held whole seconds, so those rows come back rounded to the second; a fresh export keeps the exact millisecond.</li>
         <li><b>Query from Filters</b>, <b>Aggregate</b>, and <b>Export</b> (shown rows or all matching docs). Query from Filters also fills the index pattern for you, derived from this index's name — <code>dp-attack-raw-ty-…</code> becomes <code>dp-attack-raw*</code>, and an index with no suffix at all (<code>alert-sid-0</code>) becomes <code>alert-sid-0*</code>, which still matches it. Edit the pattern freely before running.</li>
         <li>Sorting uses a date field this index really has (taken from its mapping), never an assumed <code>startTime</code>.</li>
         <li>Some CC fields (e.g. <code>applicationId</code> on ADC indices) are mapped as <i>analyzed text</i> with an exact <code>.raw</code> twin. Filtering and <b>Query from Filters</b> automatically target <code>&lt;field&gt;.raw</code> for those — an exact match on the analyzed field itself would return nothing, because the analyzer splits the value into fragments.</li>
