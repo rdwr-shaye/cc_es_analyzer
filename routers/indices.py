@@ -591,7 +591,14 @@ async def import_csv(index_name: str,
         return {"error": f"id column {id_col!r} is not in the CSV header "
                          f"(columns: {', '.join(h for h in headers if h) or 'none'})"}
 
-    es = get_client()
+    # A session whose ES binding is gone (the server restarted under it) must
+    # get the app's normal {"error": …} answer, not an unhandled exception —
+    # FastAPI turns that into a plain-text 500 the UI cannot parse as JSON.
+    try:
+        es = get_client()
+    except Exception as e:
+        return {"error": f"not connected to Elasticsearch: {_es_error(e)}"}
+
     meta_cols = {"_id", "_index"}
     indexed = failed = rows = 0
     errors: list[str] = []
@@ -603,42 +610,51 @@ async def import_csv(index_name: str,
             if len(errors) < 5:
                 errors.append(msg)
 
-    for row in reader:
-        if not row or all(c == "" for c in row):
-            continue                       # skip blank lines
-        rows += 1
-        doc_id = ""
-        source: dict = {}
-        for i, col in enumerate(headers):
-            if not col or i >= len(row):
-                continue
-            cell = row[i]
-            if id_col and col == id_col:
-                doc_id = cell.strip()
-            if col in meta_cols:
-                continue                   # metadata, not a document field
-            val = _coerce_cell(cell)
-            if val is not _MISSING:
-                source[col] = val
-        batch.append((doc_id, source))
-        if len(batch) >= BULK_CHUNK:
-            ok, errs = _flush_batch(es, name, batch, refresh=False)
+    # Bulk requests can fail outright (connection refused, 4xx/5xx from ES) as
+    # opposed to reporting per-document errors — report what was already
+    # indexed instead of losing the whole response to a 500.
+    try:
+        for row in reader:
+            if not row or all(c == "" for c in row):
+                continue                       # skip blank lines
+            rows += 1
+            doc_id = ""
+            source: dict = {}
+            for i, col in enumerate(headers):
+                if not col or i >= len(row):
+                    continue
+                cell = row[i]
+                if id_col and col == id_col:
+                    doc_id = cell.strip()
+                if col in meta_cols:
+                    continue                   # metadata, not a document field
+                val = _coerce_cell(cell)
+                if val is not _MISSING:
+                    source[col] = val
+            batch.append((doc_id, source))
+            if len(batch) >= BULK_CHUNK:
+                ok, errs = _flush_batch(es, name, batch, refresh=False)
+                indexed += ok
+                failed  += len(errs)
+                take_errors(errs)
+                batch = []
+
+        if batch:
+            # Refresh on the final chunk so the imported docs are visible at once.
+            ok, errs = _flush_batch(es, name, batch, refresh=True)
             indexed += ok
             failed  += len(errs)
             take_errors(errs)
-            batch = []
-
-    if batch:
-        # Refresh on the final chunk so the imported docs are visible at once.
-        ok, errs = _flush_batch(es, name, batch, refresh=True)
-        indexed += ok
-        failed  += len(errs)
-        take_errors(errs)
-    elif indexed:
-        try:
-            es.post(f"/{name}/_refresh")
-        except Exception:
-            pass
+        elif indexed:
+            try:
+                es.post(f"/{name}/_refresh")
+            except Exception:
+                pass
+    except Exception as e:
+        return {"error": f"import into {name!r} failed after {indexed} document(s): "
+                         f"{_es_error(e)}",
+                "index": name, "rows": rows, "indexed": indexed,
+                "failed": failed, "errors": errors}
 
     return {"ok": failed == 0, "index": name, "rows": rows,
             "indexed": indexed, "failed": failed, "errors": errors,

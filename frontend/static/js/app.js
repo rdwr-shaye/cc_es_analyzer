@@ -4194,8 +4194,48 @@ async function doImportCsv(indexName, file) {
   showToast(msg, res.failed ? 'bg-warning' : 'bg-success');
   if (res.failed && Array.isArray(res.errors) && res.errors.length) {
     console.warn('CSV import errors (first few):', res.errors);
+    // Show them too: a toast saying "N failed" with the reason hidden in the
+    // console leaves no way to tell a mapping clash from a bad column.
+    showImportErrors(indexName, res);
   }
   refreshCurrentIndex();
+}
+
+/** Why an import rejected documents — Elasticsearch's own message per failure.
+ *  Reasons are almost always a value that does not fit the target mapping
+ *  (a date field given a non-date, a number field given text, …). */
+function showImportErrors(indexName, res) {
+  document.querySelector('.rt-modal-overlay.rt-import-errors')?.remove();
+  const wrap = document.createElement('div');
+  wrap.className = 'rt-modal-overlay rt-import-errors';
+  const rows = (res.errors || []).map(e =>
+    `<li class="mb-1 font-monospace" style="font-size:0.76rem;word-break:break-word;">${esc(e)}</li>`).join('');
+  wrap.innerHTML = `<div class="rt-modal" style="min-width:520px;width:760px;max-width:95vw;">
+      <div class="rt-modal-title"><i class="bi bi-exclamation-triangle text-warning me-1"></i>
+        ${res.failed} of ${res.rows} row(s) rejected by
+        <span class="font-monospace">${esc(indexName)}</span></div>
+      <div class="rt-modal-body" style="max-height:50vh;overflow:auto;">
+        <div class="small text-secondary mb-2">Elasticsearch refused these documents — the
+          reason is normally a value that does not match the field's mapping. Showing the
+          first ${(res.errors || []).length}:</div>
+        <ul class="mb-0 ps-3">${rows}</ul>
+      </div>
+      <div class="rt-modal-actions">
+        <button class="btn btn-sm btn-outline-secondary" data-act="copy">Copy</button>
+        <button class="btn btn-sm btn-primary" data-act="close">Close</button>
+      </div></div>`;
+  document.body.appendChild(wrap);
+  const close = () => wrap.remove();
+  wrap.addEventListener('click', (e) => {
+    if (e.target === wrap) return close();
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.act === 'close') close();
+    if (b.dataset.act === 'copy') {
+      navigator.clipboard?.writeText((res.errors || []).join('\n'));
+      showToast('Errors copied', 'bg-secondary');
+    }
+  });
 }
 
 /* ── Artificial data generator ───────────────────────────────────────────── */
@@ -6536,9 +6576,23 @@ async function confirmSharedCc(action, doc) {
 /* ══════════════════════════════════════════════════════════════════════════
    UTILITIES
    ══════════════════════════════════════════════════════════════════════════ */
+/** Fetch + parse JSON. A non-JSON body — a bare "Internal Server Error" from an
+ *  unhandled exception, or a proxy/gateway error page — is reported as the
+ *  app's usual {error} shape instead of throwing a SyntaxError at the caller,
+ *  which surfaced to users as "Unexpected token 'I', "Internal S"...". */
 async function api(url, opts = {}) {
   const res = await fetch(appUrl(url), opts);
-  return res.json();
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    if (res.ok && !text.trim()) return {};          // empty 2xx body
+    const detail = text.trim().slice(0, 200);
+    return { error: res.ok
+      ? `unexpected non-JSON response from ${url}${detail ? `: ${detail}` : ''}`
+      : `HTTP ${res.status}${res.statusText ? ' ' + res.statusText : ''}`
+        + (detail ? ` — ${detail}` : '') };
+  }
 }
 function setText(id, val) {
   const el = document.getElementById(id);
@@ -6713,7 +6767,10 @@ async function runUpdate(wrap) {
   while (Date.now() - started < 12 * 60 * 1000) {
     await new Promise(r => setTimeout(r, 2500));
     let job = null;
-    try { job = await api('/api/update/job'); restarting = false; }
+    // Anything short of a clean job payload means the app is still coming back:
+    // fetch rejects while the port is closed, and a proxy in front answers 502
+    // with an HTML page, which api() now reports as {error} rather than throwing.
+    try { job = await api('/api/update/job'); restarting = !!(job && job.error); }
     catch { restarting = true; }          // expected while the container restarts
 
     const steps = (job?.steps || []).map(s =>
