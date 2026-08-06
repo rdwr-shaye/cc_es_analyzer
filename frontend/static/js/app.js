@@ -16,6 +16,80 @@ function appUrl(path) {
   return path.startsWith('/') ? APP_BASE + path : path;
 }
 
+/* ── Capability policy ──────────────────────────────────────────────────
+   Which features this deployment carries (GET /api/policy, backed by
+   services/policy.py). Used ONLY to avoid offering an action the server
+   would refuse — the real control is that a disabled capability has no
+   route to call. Never gate anything on this alone.
+   Defaults to "on" so a failed policy fetch degrades to today's behaviour
+   rather than blanking the UI; the server still answers 404. */
+let CAPS = null;
+
+function can(capId) {
+  if (!CAPS) return true;
+  return CAPS[capId] === undefined ? true : !!CAPS[capId];
+}
+
+/* Rail tree: which groups the user collapsed. Persisted because re-collapsing
+   the tree on every page load would make collapsing not worth doing. */
+const LS_DB_TREE = 'cc_admin_db_tree';
+
+function _dbTreeState() {
+  try { return JSON.parse(localStorage.getItem(LS_DB_TREE)) || {}; }
+  catch { return {}; }
+}
+
+/** Collapse/expand a datastore group in the rail. Groups nest, so collapsing
+ *  "Databases" hides the stores, and collapsing a store hides its screens. */
+function toggleDbGroup(id, force) {
+  const btn = document.getElementById(`db-${id}-toggle`);
+  const kids = document.getElementById(`db-${id}-children`);
+  if (!btn || !kids) return;
+  const collapsed = force === undefined ? !kids.classList.contains('collapsed') : !!force;
+  kids.classList.toggle('collapsed', collapsed);
+  btn.classList.toggle('collapsed', collapsed);
+  if (force === undefined) {
+    const st = _dbTreeState();
+    st[id] = collapsed;
+    try { localStorage.setItem(LS_DB_TREE, JSON.stringify(st)); } catch { /* private mode */ }
+  }
+}
+
+/** Re-apply the persisted collapse state. Default is expanded. */
+function initDbTree() {
+  const st = _dbTreeState();
+  for (const id of ['root', 'es']) if (st[id]) toggleDbGroup(id, true);
+}
+
+/** Mirror connection state onto the Elasticsearch group's status dot. */
+function syncDbStatus() {
+  const dot = document.getElementById('db-es-dot');
+  if (dot) dot.className = 'conn-dot ops-db-dot ' + (isConnected ? 'connected' : 'disconnected');
+}
+
+/** Apply the capability policy to the chrome. Called once the policy is in. */
+function applyPolicyToChrome() {
+  // Embedded on a CC there is exactly one datastore — the one running beside
+  // the app — so a connection screen offers a choice that does not exist.
+  if (!can('es.connect')) {
+    document.getElementById('nav-connection')?.classList.add('d-none');
+    document.getElementById('sidebarConnBox')
+      ?.querySelector('[onclick*="connection"]')?.classList.add('d-none');
+    document.querySelector('#connectedPill [onclick*="disconnect"]')?.classList.add('d-none');
+  }
+}
+
+async function loadPolicy() {
+  try {
+    const p = await api('/api/policy');
+    if (p && p.capabilities) {
+      CAPS = {};
+      for (const [id, v] of Object.entries(p.capabilities)) CAPS[id] = !!v.enabled;
+      window.APP_PROFILE = p.profile;
+    }
+  } catch { /* leave CAPS null — everything stays offered */ }
+}
+
 /* ── App state ──────────────────────────────────────────────────────────── */
 let allIndices   = [];
 let chartCategory = null;
@@ -2133,8 +2207,8 @@ function popOutResults() {
   if (!resultsWindow) { showToast('Pop-up blocked — allow pop-ups for this site', 'bg-danger'); return; }
   resultsWindow.document.write(`<!DOCTYPE html><html lang="en" data-bs-theme="dark"><head><meta charset="utf-8"/>
     <title>CC ES Analyzer — Results</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"/>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
+    <link href="${appUrl('/static/vendor/bootstrap.min.css')}" rel="stylesheet"/>
+    <link href="${appUrl('/static/vendor/bootstrap-icons.min.css')}" rel="stylesheet"/>
     <link rel="stylesheet" href="${appUrl('/static/css/style.css')}"/>
     <style>
       body{margin:0;background:#1e2530;color:#c9d1d9;font-family:Consolas,'Courier New',monospace;}
@@ -2362,6 +2436,7 @@ function disconnect() {
    ══════════════════════════════════════════════════════════════════════════ */
 
 function onConnected(settings, info) {
+  syncDbStatus();
   const displayHost = settings.label || settings.host;
   const cluster     = info.cluster_name || '';
   const version     = info.es_version   || '';
@@ -2378,7 +2453,11 @@ function onConnected(settings, info) {
   const box = document.getElementById('sidebarConnBox');
   box.classList.remove('d-none');
   document.getElementById('sidebarMachine').textContent = displayHost;
-  document.getElementById('sidebarCluster').textContent = `${machineStr} · ${cluster}`;
+  // Embedded there is no host:port worth showing — the datastore is fixed and
+  // local, so the cluster (and version) is the only useful identity here.
+  document.getElementById('sidebarCluster').textContent =
+    can('es.connect') ? `${machineStr} · ${cluster}`
+                      : [cluster, version && `ES ${version}`].filter(Boolean).join(' · ');
 }
 
 function onDisconnected() {
@@ -3566,9 +3645,9 @@ function renderIndicesTable(indices) {
         <td>${idx.store_size || '—'}</td>
         <td>${cat}</td>
         <td class="text-end text-nowrap">
-          <button class="btn btn-sm btn-outline-info py-0 px-1 me-1"
+          ${can('es.index.duplicate') ? `<button class="btn btn-sm btn-outline-info py-0 px-1 me-1"
                   onclick="event.stopPropagation(); duplicateIndex('${jsq(idx.name)}')"
-                  title="Duplicate this index (optionally shifting dates)"><i class="bi bi-copy"></i></button>
+                  title="Duplicate this index (optionally shifting dates)"><i class="bi bi-copy"></i></button>` : ''}
           <button class="btn btn-sm btn-outline-danger py-0 px-1 me-1"
                   onclick="event.stopPropagation(); deleteIndexByName('${jsq(idx.name)}')"
                   title="Delete this index"><i class="bi bi-trash"></i></button>
@@ -3664,6 +3743,9 @@ async function createIndex() {
 /** "+Add" entry point: empty index by name, or a possible CC index from the
  *  live catalog filled with artificial data. */
 async function addIndexChoice() {
+  // Without the artificial-data capability there is only one thing this can
+  // do, so skip the menu rather than offering a choice that leads to a 404.
+  if (!can('es.artificial')) return createIndex();
   const choice = await uiChoice(document, {
     title: 'Add index',
     message: 'Create an empty index by name, or pick one of the CC indices this '
@@ -6807,12 +6889,38 @@ async function runUpdate(wrap) {
    INIT — auto-connect from localStorage on page load
    ══════════════════════════════════════════════════════════════════════════ */
 (async function init() {
+  // First — the rest of the UI is built from what this deployment may do.
+  await loadPolicy();
+  applyPolicyToChrome();
+  initDbTree();
   initUiPrefs();
   initQuerySplitter();
   initAutoRefresh();
   renderProfiles();
   startPresence();
-  startUpdateChecks();
+  if (can('app.self_update')) startUpdateChecks();
+
+  // Embedded on a CC the server is already bound to the Elasticsearch running
+  // beside it (ES_HOST in the compose file), so there is nothing to restore
+  // and nothing to ask: go straight to the data. Without this a fresh browser
+  // on the appliance would land on a connection form for a choice it does not
+  // have — the first thing a support engineer would have to click past.
+  if (!can('es.connect')) {
+    const health = await api('/api/health');
+    if (health && health.connected) {
+      isConnected = true;
+      // Label it for what it is. Echoing the cluster name as the "machine"
+      // renders as "vision-es · vision-es", which tells the engineer nothing.
+      onConnected({ label: 'This CC', host: '', port: '', scheme: 'http' }, {
+        cluster_name: health.cluster_name,
+        es_version:   health.es_version,
+      });
+      syncDbStatus();
+      showView('dashboard');
+      refreshAll();
+      return;
+    }
+  }
 
   // Try to restore last-used connection
   const saved = localStorage.getItem(LS_ACTIVE);

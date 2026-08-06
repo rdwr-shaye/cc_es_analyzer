@@ -63,10 +63,20 @@ HOST_STAGE       = "/opt/cc_es_analyzer/nginx"
 DEFAULT_APP_PORT = "8801"          # host-published port of the analyzer container
 UPSTREAM_TOKEN   = "__CC_UPSTREAM__"
 SCHEME_TOKEN     = "__CC_SCHEME__"     # http, or https when the app serves TLS
+PATH_TOKEN       = "__CC_PATH__"
+# URL path the app is published at. The tool outgrew "es analyzer" — it is
+# becoming one console over every CC datastore — so the path is cc_admin.
+# Override with --url-path; it is a single token in the snippet, not a name
+# baked into the config, so changing it later is one flag.
+DEFAULT_URL_PATH = "cc_admin"
 # Preferred line to insert our location block after. When it isn't there, the
 # default server block is located from `nginx -T` instead (see _insert_point).
 DEFAULT_ANCHOR   = "server_name _;"
 
+# Markers delimiting our managed block. Kept at the old name deliberately: an
+# instance published before the cc_admin rename already has THESE markers in
+# its nginx config, and _apply_block finds the existing block by them. Changing
+# them would leave the old block orphaned in place and insert a second one.
 MARK_BEGIN = "# >>> cc_es_analyzer path (managed) >>>"
 MARK_END   = "# <<< cc_es_analyzer path (managed) <<<"
 
@@ -210,6 +220,10 @@ def main() -> int:
     ap.add_argument("--upstream", default=os.getenv("CC_UPSTREAM"),
                     help="Explicit upstream host:port for proxy_pass (e.g. 172.17.0.1:8801 or "
                          "cc_es_analyzer:8000). AUTO-DETECTED if omitted.")
+    ap.add_argument("--url-path", default=os.getenv("CC_URL_PATH", DEFAULT_URL_PATH),
+                    help=f"URL path to publish at, without slashes (default "
+                         f"{DEFAULT_URL_PATH!r}). Served on the proxy's existing "
+                         f"port — 443 on a CC — so it needs no new port opened.")
     ap.add_argument("--template-path", default=os.getenv("CC_PROXY_TEMPLATE", TEMPLATE_PATH),
                     help="Host path to the proxy's nginx source template, for a durable edit. "
                          "Skipped (with a note) if it doesn't exist.")
@@ -320,9 +334,12 @@ def main() -> int:
             scheme, why_s = _pick_scheme(run, args.app_port)
         print(f"[nginx-path] Upstream scheme: {scheme}  ({why_s}).")
 
+        url_path = args.url_path.strip().strip("/")
+        print(f"[nginx-path] Publishing at /{url_path}/ on the proxy's own port.")
         snippet = (snippet_raw
                    .replace(UPSTREAM_TOKEN, upstream)
-                   .replace(SCHEME_TOKEN, scheme))
+                   .replace(SCHEME_TOKEN, scheme)
+                   .replace(PATH_TOKEN, url_path))
         block = f"{MARK_BEGIN}\n{snippet.rstrip()}\n{MARK_END}"
 
         # 2) Durable edit of the source template — best-effort, skipped if absent.

@@ -1,0 +1,35 @@
+# CC Admin — capability unlocks
+#
+# Install as:  /opt/radware/mgt-server/properties/cc_admin.properties
+#              (root:root 0644, matching the 26 sibling property files)
+#
+# Presence of this file unlocks capabilities the running profile does not
+# carry. It is NOT in the image and NOT created by any installer — it exists
+# only where someone entitled to it put it there deliberately. The container
+# mounts the properties directory READ-ONLY, so the app can never write its
+# own unlock.
+#
+# A restart is required: routes are registered at startup, so the route table
+# and the policy can never disagree, and an unlock is a visible event rather
+# than a silent runtime flip.
+#
+#   docker compose -f /deploy/tools/kvision-infra-monitoring/docker-compose.yaml \
+#       up -d --force-recreate cc-admin
+#
+# IMPORTANT — "embedded" is a deployment shape, not a trust level. An embedded
+# instance on an INTERNAL LAB CC is a perfectly good place to fabricate test
+# data. An embedded instance on a CUSTOMER's production CC is not: synthetic
+# documents are indistinguishable from real ones once written, which is the
+# one outcome support must never cause. This file is how that judgement gets
+# made per box instead of per build.
+
+# Generate artificial documents into an index.
+capability.es.artificial=true
+
+# Copy an index to a new name, optionally shifting every date field.
+capability.es.index.duplicate=true
+
+# Not unlockable by design — an appliance follows the CC release train and
+# cannot reach git from a customer network. Listed here only so nobody spends
+# an afternoon wondering why it has no effect; it is ignored with a warning.
+# capability.app.self_update=true

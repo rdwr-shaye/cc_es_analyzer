@@ -3,9 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>CC ES Analyzer</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"/>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
+  <title>CC Admin</title>
+  <!-- Vendored, NOT from a CDN. A customer's data centre is air-gapped: an
+       appliance that fetched these from jsdelivr would render as raw unstyled
+       HTML on every install. Same pinned versions, served from the app. -->
+  <link href="static/vendor/bootstrap.min.css" rel="stylesheet"/>
+  <link href="static/vendor/bootstrap-icons.min.css" rel="stylesheet"/>
   <!-- Relative path so the app works both at "/" and behind a proxy prefix
        (e.g. /cc_es_analyzer/) -->
   <!-- ?v=… is substituted by main.py with a hash of the app version + asset
@@ -23,7 +26,7 @@
       <i class="bi bi-list fs-4"></i>
     </button>
     <span class="navbar-brand mb-0 fw-bold fs-5">
-      <i class="bi bi-layers-half text-info me-2"></i>CC ES Analyzer
+      <i class="bi bi-layers-half text-info me-2"></i>CC Admin
     </span>
     <!-- Clickable: the update dialog is otherwise unreachable when no update is
          available, which is exactly when you want to see why the check failed. -->
@@ -89,43 +92,78 @@
 
     <!-- Nav buttons -->
     <div class="p-2 pt-1">
+      <!-- Datastores. The tool is growing from "the ES analyzer" into one
+           console over every CC datastore, so the screens live UNDER the store
+           they belong to rather than at the top level: adding PostgreSQL and
+           MariaDB is then a sibling of the Elasticsearch group, not a
+           renegotiation of the whole nav. -->
       <div class="sidebar-section mb-1">
-        <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-connection"
+
+        <!-- Level 1 — Databases. Collapsing it hides every datastore. -->
+        <button class="ops-db-toggle ops-lvl1" id="db-root-toggle" onclick="toggleDbGroup('root')"
+                title="Datastores on this CC">
+          <i class="bi bi-caret-down-fill ops-caret"></i>
+          <i class="bi bi-hdd-stack"></i>
+          <span class="ops-db-name">Databases</span>
+          <span class="ops-db-count" id="db-count">1</span>
+        </button>
+
+        <div class="ops-db-children" id="db-root-children">
+
+          <!-- Level 2 — one entry per datastore. PostgreSQL and MariaDB become
+               siblings of this button in Phase 2; nothing else has to move. -->
+          <button class="ops-db-toggle" id="db-es-toggle" onclick="toggleDbGroup('es')"
+                  title="Elasticsearch / OpenSearch on this CC">
+            <i class="bi bi-caret-down-fill ops-caret"></i>
+            <i class="bi bi-database"></i>
+            <span class="ops-db-name">Elasticsearch</span>
+            <span class="conn-dot disconnected ops-db-dot" id="db-es-dot"></span>
+          </button>
+
+          <!-- Level 3 — what you can DO with that store. The index list lives
+               here too: the indices belong to Elasticsearch, so leaving them
+               on screen after collapsing it would contradict the hierarchy. -->
+          <div class="ops-db-children" id="db-es-children">
+            <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-dashboard"
+                    onclick="showView('dashboard')">
+              <i class="bi bi-speedometer2 me-2"></i>Dashboard
+            </button>
+            <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-summary"
+                    onclick="showView('summary')">
+              <i class="bi bi-bar-chart-line me-2"></i>Summary Analytics
+            </button>
+            <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-attacks"
+                    onclick="showView('attacks')">
+              <i class="bi bi-shield-exclamation me-2"></i>Attacks View
+            </button>
+            <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-query"
+                    onclick="showView('query')">
+              <i class="bi bi-terminal me-2"></i>Query Editor
+            </button>
+
+            <div class="d-flex align-items-center justify-content-between ps-2 pe-1 mt-2 mb-1">
+              <div class="d-flex align-items-center gap-1">
+                <span class="ops-group-label p-0">Indices</span>
+                <button class="btn btn-outline-success py-0 px-1" onclick="createIndex()"
+                        title="Create a new index" style="font-size:0.7rem;line-height:1.2;">
+                  <i class="bi bi-plus-lg"></i>
+                </button>
+              </div>
+              <input id="indexSearch" type="text" class="form-control form-control-sm"
+                     placeholder="Filter…" style="width:76px;font-size:0.72rem;padding:2px 6px;"/>
+            </div>
+            <div id="sidebarIndices">
+              <div class="text-secondary small px-2 py-2">Connect to see indices</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Hidden in the embedded profile: ES runs beside the app on the CC,
+             so there is nothing to choose. See services/policy.py es.connect. -->
+        <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn mt-2" id="nav-connection"
                 onclick="showView('connection')">
           <i class="bi bi-hdd-network me-2"></i>Connection
         </button>
-        <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-dashboard"
-                onclick="showView('dashboard')">
-          <i class="bi bi-speedometer2 me-2"></i>Dashboard
-        </button>
-        <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-summary"
-                onclick="showView('summary')">
-          <i class="bi bi-bar-chart-line me-2"></i>Summary Analytics
-        </button>
-        <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-attacks"
-                onclick="showView('attacks')">
-          <i class="bi bi-shield-exclamation me-2"></i>Attacks View
-        </button>
-        <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-query"
-                onclick="showView('query')">
-          <i class="bi bi-terminal me-2"></i>Query Editor
-        </button>
-      </div>
-
-      <hr class="border-secondary my-1"/>
-      <div class="d-flex align-items-center justify-content-between px-2 mb-1">
-        <div class="d-flex align-items-center gap-1">
-          <p class="text-secondary mb-0" style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.05em">Indices</p>
-          <button class="btn btn-outline-success py-0 px-1" onclick="createIndex()" title="Create a new index"
-                  style="font-size:0.7rem;line-height:1.2;">
-            <i class="bi bi-plus-lg"></i>
-          </button>
-        </div>
-        <input id="indexSearch" type="text" class="form-control form-control-sm bg-dark text-light border-secondary"
-               placeholder="Filter…" style="width:80px;font-size:0.75rem;padding:2px 6px;"/>
-      </div>
-      <div id="sidebarIndices">
-        <div class="text-secondary small px-2 py-2">Connect to see indices</div>
       </div>
     </div>
   </aside>
@@ -935,8 +973,8 @@
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="static/vendor/bootstrap.bundle.min.js"></script>
+<script src="static/vendor/chart.umd.min.js"></script>
 <script src="static/js/app.js?v=__ASSET_V__"></script>
 </body>
 </html>

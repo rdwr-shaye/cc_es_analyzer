@@ -9,7 +9,7 @@ import logging
 import logging.handlers
 import os
 from config import settings
-from services import sessions, updater
+from services import policy, sessions, updater
 from services.es_client import POOL_SIZE, reset_session, set_session
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
@@ -62,7 +62,10 @@ async def _widen_threadpool() -> None:
     logger.info("CC ES Analyzer %s (update mode: %s)",
                 updater.local_version(), updater.mode())
     # Look for a newer version off the request path, now and every few hours.
-    updater.start_background_checks()
+    # An appliance follows the CC release train, so the poll would only spend
+    # itself failing to reach git from inside a customer network.
+    if policy.enabled("app.self_update"):
+        updater.start_background_checks()
 
 
 # ── Session / presence middleware ─────────────────────────────────────────────
@@ -136,13 +139,38 @@ async def session_middleware(request: Request, call_next):
 
 
 # ── API Routers ───────────────────────────────────────────────────────────────
+# Capability-gated routers are included only when the running profile carries
+# them (services/policy.py). This is registration, not a runtime check: in a
+# profile without the capability the path does not exist at all — no OpenAPI
+# entry, 404 to a direct call — so there is nothing to bypass.
 app.include_router(health.router)
 app.include_router(indices.router)
 app.include_router(query.router)
 app.include_router(exports.router)
-app.include_router(artificial.router)
 app.include_router(presence.router)
-app.include_router(update.router)
+
+if policy.enabled("es.index.duplicate"):
+    app.include_router(indices.gated_router)
+if policy.enabled("es.artificial"):
+    app.include_router(artificial.router)
+if policy.enabled("app.self_update"):
+    app.include_router(update.router)
+
+policy.log_startup()
+
+# ── Unknown API paths ────────────────────────────────────────────────────────
+# Registered after every router and before the SPA catch-all: without it, a
+# path whose capability is switched off would fall through to the catch-all
+# below and answer 200 with the SPA's HTML, which reads as "it worked" to a
+# caller and as an odd finding to a reviewer. A gated endpoint must 404, and
+# so should any mistyped API path.
+@app.api_route("/api/{full_path:path}", include_in_schema=False,
+               methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"])
+def api_not_found(full_path: str):
+    return Response(
+        content=json.dumps({"error": f"no such endpoint: /api/{full_path}"}),
+        status_code=404, media_type="application/json")
+
 
 # ── Static files + SPA catch-all ─────────────────────────────────────────────
 app.mount("/static", StaticFiles(directory="frontend/static"), name="static")

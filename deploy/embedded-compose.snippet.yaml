@@ -1,0 +1,43 @@
+# Service definition for the CC's monitoring compose file.
+#
+#   /opt/radware/storage/dc_config/kvision-infra-monitoring/docker-compose.yaml
+#   (that path is a symlink to /var/lib/docker/radware-storage/dc_config/…,
+#    so the two paths people quote are the same file)
+#
+# NOT applied automatically — this is the reviewed source of what CI/CD should
+# render into that file. Conventions below are copied from the services already
+# in it rather than invented: the kvision-* logging tag, `restart: always`, an
+# image from the internal registry, and a port published on 127.0.0.1 only so
+# nginx stays the single ingress.
+#
+# Two things here are still open and marked TODO: the service name (the rename
+# is a Phase 0/1 decision and propagates into the image path, container name and
+# logging tag) and the image build number, which CI/CD supplies.
+
+  cc-analyzer:                              # TODO: final service name
+    logging:
+      options:
+        tag: "kvision-cc-analyzer"          # TODO: track the rename
+    # kvision services come from :18441; :17111 is the third-party mirror
+    # (prometheus, grafana, …), so ours belongs on 18441.
+    image: reg.radware.com:18441/kvision/kvision_cc_analyzer/dev:1
+    container_name: cc-analyzer
+    restart: always
+    environment:
+      # THE line that matters for security review. Without it the app falls
+      # back to the "lab" profile and would register the data-fabricating
+      # endpoints. See services/policy.py.
+      - "ANALYZER_PROFILE=embedded"
+      - "ES_HOST=kvision-infra-efk"
+      - "ES_PORT=9200"
+    volumes:
+      # Read-only, and only the properties directory: this is where an
+      # entitled operator drops cc_analyzer.properties to unlock the lab
+      # capabilities. Read-only means the app can never create its own unlock.
+      - "/opt/radware/mgt-server/properties:/opt/radware/mgt-server/properties:ro"
+      # Archives survive container rebuilds.
+      - "/opt/radware/storage/data/cc-analyzer/exports:/app/exports"
+    # Bound to loopback like every other service here — reached through nginx,
+    # never exposed on the appliance's external interface directly.
+    ports:
+      - "127.0.0.1:8801:8000"

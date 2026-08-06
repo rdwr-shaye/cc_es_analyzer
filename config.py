@@ -21,6 +21,24 @@ class Settings(BaseSettings):
     ssl_certfile: str = Field(default="", alias="SSL_CERTFILE")
     ssl_keyfile:  str = Field(default="", alias="SSL_KEYFILE")
 
+    # ── Deployment profile (services/policy.py) ──────────────────────────────
+    # "lab" (default) carries every capability; "embedded" is the copy that
+    # ships inside a CyberController and leaves the data-fabricating features
+    # unregistered. The CC's docker-compose is what pins an appliance to
+    # "embedded" — defaulting to "lab" keeps a plain `python main.py` working.
+    profile: str = Field(default="lab", alias="ANALYZER_PROFILE")
+
+    # Property file on the system filesystem that unlocks capabilities the
+    # profile does not carry (see services/policy.py). Absent on every
+    # instance except those an entitled operator has deliberately unlocked.
+    # The directory is the CC's existing convention — 26 sibling .properties
+    # files live there (root:root 0644), so operators already know it and the
+    # format is the one they read everywhere else in the product. The file
+    # name tracks the service name, so it changes when the app is renamed.
+    policy_file: str = Field(
+        default="/opt/radware/mgt-server/properties/cc_analyzer.properties",
+        alias="POLICY_FILE")
+
     # Where server-side index archives (<index>.csv.gz) are stored. In Docker
     # this is a mounted volume so archives survive container rebuilds.
     exports_dir: str = Field(

@@ -12,6 +12,12 @@ from services.field_types import date_fields, exact_field_map, resolve_exact
 
 router = APIRouter(prefix="/api/indices", tags=["indices"])
 
+# Endpoints that fabricate data rather than read or correct it. They live in a
+# separate router so main.py can leave them unregistered in profiles that must
+# not carry them — an absent route 404s and never appears in the OpenAPI
+# schema, which is a far stronger claim than a hidden button.
+gated_router = APIRouter(prefix="/api/indices", tags=["indices"])
+
 
 @router.get("")
 def list_indices(cc_only: bool = Query(default=False)):
@@ -356,7 +362,7 @@ _SHIFT_UNIT_MS = {
 }
 
 
-@router.post("/{index_name}/duplicate")
+@gated_router.post("/{index_name}/duplicate")
 def duplicate_index(index_name: str, req: DuplicateIndexRequest):
     """
     Copy ``index_name`` into a NEW index ``req.target``: settings (shards /

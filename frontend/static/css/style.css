@@ -661,3 +661,255 @@ body.qedit-resizing { cursor: col-resize; user-select: none; }
   border-radius: 4px; padding: 0 4px;
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════════
+   OPS CONSOLE THEME
+   ═══════════════════════════════════════════════════════════════════════
+   Flat enterprise admin look: light neutral page, navy rail, white cards
+   with gray header strips, colour reserved for status. Loaded LAST so it
+   wins over the earlier dark-theme rules by cascade order rather than by
+   !important — the old rules stay readable and can be deleted in passes.
+
+   Dense on purpose (11-13px): this is an operations tool where an engineer
+   wants many rows on screen, not a consumer app. */
+:root {
+  --ops-navy:      #0F4C81;   /* rail + headings */
+  --ops-navy-soft: #1a5d96;   /* active rail item */
+  --ops-blue:      #0052CC;   /* primary action */
+  --ops-page:      #F4F5F7;
+  --ops-card:      #ffffff;
+  --ops-border:    #DFE1E6;
+  --ops-text:      #333333;
+  --ops-muted:     #6B778C;
+  --ops-strip:     #FAFBFC;   /* card header strip */
+
+  --ops-ok-bg:  #E3FCEF; --ops-ok-fg:  #006644;
+  --ops-warn-bg:#FFF7E6; --ops-warn-fg:#974F0C;
+  --ops-err-bg: #FFEBE6; --ops-err-fg: #BF2600;
+  --ops-info-bg:#DEEBFF; --ops-info-fg:#0747A6;
+
+  --ops-mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+
+body {
+  background: var(--ops-page);
+  color: var(--ops-text);
+  font-size: 13px;
+}
+
+/* ── Top bar ─────────────────────────────────────────────────────────── */
+.navbar.bg-dark {
+  background: var(--ops-card) !important;
+  border-bottom: 1px solid var(--ops-border);
+  height: 52px;
+}
+.navbar .navbar-brand { color: var(--ops-navy); font-size: 15px; }
+.navbar .navbar-brand i { color: var(--ops-blue) !important; }
+.navbar #sidebarToggle { color: var(--ops-muted) !important; }
+.navbar .text-secondary { color: var(--ops-muted) !important; }
+
+/* Connection pill becomes a status pill: light green field, dark green text. */
+.conn-pill {
+  background: var(--ops-ok-bg);
+  border: 1px solid transparent;
+  color: var(--ops-ok-fg);
+  font-size: 12px;
+}
+.conn-pill .text-white,
+.conn-pill .fw-semibold { color: var(--ops-ok-fg) !important; }
+.conn-pill .text-info { color: var(--ops-ok-fg) !important; opacity: .8; }
+#disconnectedPill { background: #EBECF0; color: var(--ops-muted); }
+#disconnectedPill .text-white { color: var(--ops-muted) !important; }
+.conn-dot.connected { background: #36B37E; box-shadow: none; animation: ops-pulse 2s infinite; }
+@keyframes ops-pulse { 0%,100%{opacity:1} 50%{opacity:.45} }
+
+/* ── Left rail ───────────────────────────────────────────────────────── */
+#sidebar.bg-dark {
+  background: var(--ops-navy) !important;
+  border-right: none;
+}
+#sidebar .text-secondary { color: #A7C4DE !important; }
+#sidebar hr { border-color: rgba(255,255,255,.14) !important; opacity: 1; }
+
+.sidebar-nav-btn {
+  color: #C7DCEE;
+  border-radius: 5px;
+  font-size: 12.5px;
+  border: none;
+}
+.sidebar-nav-btn:hover { background: rgba(255,255,255,.08); color: #fff; }
+.sidebar-nav-btn.active { background: var(--ops-navy-soft); color: #fff; font-weight: 600; }
+
+.sidebar-conn-box { border-bottom: 1px solid rgba(255,255,255,.14); }
+
+/* Sidebar index rows */
+#sidebarIndices .idx-row, #sidebarIndices a, #sidebarIndices .list-group-item {
+  color: #C7DCEE; font-family: var(--ops-mono); font-size: 11.5px;
+}
+#sidebarIndices .idx-row:hover { background: rgba(255,255,255,.08); }
+#indexSearch {
+  background: rgba(255,255,255,.10) !important;
+  border-color: rgba(255,255,255,.18) !important;
+  color: #fff !important;
+}
+#indexSearch::placeholder { color: #8FB2CE; }
+
+/* ── Cards ───────────────────────────────────────────────────────────── */
+.card {
+  background: var(--ops-card);
+  border: 1px solid var(--ops-border);
+  border-radius: 8px;
+  box-shadow: none;
+}
+.card-header {
+  background: var(--ops-strip);
+  border-bottom: 1px solid var(--ops-border);
+  color: var(--ops-navy);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: .02em;
+}
+.card-body { padding: 14px; }
+
+/* Stat tiles */
+.stat-card {
+  background: var(--ops-card);
+  border: 1px solid var(--ops-border);
+  border-radius: 8px;
+  padding: 10px 16px;
+}
+.stat-value { color: var(--ops-navy); font-weight: 700; }
+.stat-label {
+  color: var(--ops-muted); font-size: 10.5px;
+  text-transform: uppercase; letter-spacing: .06em;
+}
+
+/* ── Tables: muted uppercase head, monospace body ────────────────────── */
+.table { color: var(--ops-text); font-size: 12px; }
+.table > thead > tr > th {
+  background: var(--ops-strip) !important;
+  color: var(--ops-muted) !important;
+  text-transform: uppercase;
+  font-size: 10.5px;
+  letter-spacing: .05em;
+  font-weight: 600;
+  border-bottom: 1px solid var(--ops-border) !important;
+}
+.table > tbody > tr > td {
+  font-family: var(--ops-mono);
+  font-size: 11.5px;
+  border-color: #EDEFF2 !important;
+  vertical-align: middle;
+}
+.table > tbody > tr:hover > td { background: #F7F9FB; }
+
+/* ── Semantic pills ──────────────────────────────────────────────────── */
+.badge {
+  border-radius: 10px; font-weight: 600; font-size: 10.5px;
+  padding: 2px 8px; letter-spacing: .01em;
+}
+.badge.bg-success { background: var(--ops-ok-bg)   !important; color: var(--ops-ok-fg)   !important; }
+.badge.bg-warning { background: var(--ops-warn-bg) !important; color: var(--ops-warn-fg) !important; }
+.badge.bg-danger  { background: var(--ops-err-bg)  !important; color: var(--ops-err-fg)  !important; }
+.badge.bg-info    { background: var(--ops-info-bg) !important; color: var(--ops-info-fg) !important; }
+.badge.bg-secondary { background: #EBECF0 !important; color: var(--ops-muted) !important; }
+
+/* ── Buttons ─────────────────────────────────────────────────────────── */
+.btn { font-size: 12px; border-radius: 5px; }
+.btn-primary { background: var(--ops-blue); border-color: var(--ops-blue); }
+.btn-primary:hover { background: #0043A6; border-color: #0043A6; }
+.btn-outline-info    { color: var(--ops-info-fg); border-color: #9DC0F0; }
+.btn-outline-info:hover    { background: var(--ops-info-bg); color: var(--ops-info-fg); }
+.btn-outline-danger  { color: var(--ops-err-fg);  border-color: #F5A99B; }
+.btn-outline-danger:hover  { background: var(--ops-err-bg);  color: var(--ops-err-fg); }
+.btn-outline-success { color: var(--ops-ok-fg);   border-color: #93DFBB; }
+.btn-outline-success:hover { background: var(--ops-ok-bg);   color: var(--ops-ok-fg); }
+.btn-outline-warning { color: var(--ops-warn-fg); border-color: #F5CD8D; }
+.btn-outline-warning:hover { background: var(--ops-warn-bg); color: var(--ops-warn-fg); }
+.btn-outline-secondary { color: var(--ops-muted); border-color: var(--ops-border); }
+
+/* ── Panels / headings / forms ───────────────────────────────────────── */
+.view-panel h5, .view-panel h6 { color: var(--ops-navy); }
+.view-panel { color: var(--ops-text); }
+.form-control, .form-select {
+  font-size: 12px; border-color: var(--ops-border); color: var(--ops-text);
+  background: var(--ops-card);
+}
+.form-control:focus, .form-select:focus {
+  border-color: var(--ops-blue);
+  box-shadow: 0 0 0 2px rgba(0,82,204,.15);
+}
+/* Terminal aesthetic for query/code surfaces — kept dark on purpose. */
+#queryResults, #queryResultsCsv, .rt-console, pre.rt-code {
+  background: #0B1220; color: #7EE787;
+  font-family: var(--ops-mono); border-radius: 6px;
+}
+
+/* ── Datastore tree in the rail ──────────────────────────────────────── */
+.ops-group-label {
+  color: #8FB2CE;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  font-weight: 600;
+  padding: 4px 8px 3px;
+}
+
+.ops-db-toggle {
+  display: flex; align-items: center; gap: 7px;
+  width: 100%;
+  background: none; border: none;
+  color: #E4EFF9;
+  font-size: 12.5px; font-weight: 600;
+  padding: 5px 8px;
+  border-radius: 5px;
+  text-align: left;
+}
+.ops-db-toggle:hover { background: rgba(255,255,255,.08); }
+.ops-db-name { flex: 1 1 auto; }
+.ops-caret { font-size: 9px; transition: transform .15s ease; opacity: .75; }
+.ops-db-toggle.collapsed .ops-caret { transform: rotate(-90deg); }
+.ops-db-dot { width: 7px; height: 7px; }
+
+/* Children indent under a hairline, so the hierarchy reads at a glance
+   without needing a heavier treatment. */
+.ops-db-children {
+  margin-left: 13px;
+  padding-left: 8px;
+  border-left: 1px solid rgba(255,255,255,.16);
+  overflow: hidden;
+}
+.ops-db-children.collapsed { display: none; }
+.ops-db-children .sidebar-nav-btn { font-size: 12px; }
+
+/* Stat tiles: the dashboard shows five of these side by side, so they have to
+   stay compact enough to read as a ribbon rather than five hero numbers. */
+.stat-card { padding: 8px 14px; min-width: 96px; }
+.stat-value { font-size: 20px; line-height: 1.15; }
+.stat-card.health-card .stat-value { font-size: 15px; text-transform: uppercase; }
+
+/* Dashboard toolbar buttons sit on one line at normal widths. */
+.view-panel .btn-sm { padding: 2px 8px; }
+
+/* Level 1 (Databases) reads as the section head; level 2 (a store) sits under
+   it. Both use the same toggle mechanics so a third store is just markup. */
+.ops-db-toggle.ops-lvl1 {
+  color: #8FB2CE;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+}
+.ops-db-toggle.ops-lvl1:hover { color: #D8E8F5; }
+.ops-db-count {
+  background: rgba(255,255,255,.14);
+  color: #C7DCEE;
+  border-radius: 9px;
+  padding: 0 6px;
+  font-size: 9.5px;
+  font-weight: 700;
+}
+/* The store level sits flush with the rail; only its own children indent, so
+   three levels cost one indent step rather than two. */
+#db-root-children { margin-left: 4px; padding-left: 4px; border-left: none; }
+#db-es-children   { margin-left: 12px; padding-left: 7px; }
+#sidebarIndices   { max-height: 42vh; overflow-y: auto; }
