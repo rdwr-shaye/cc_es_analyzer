@@ -867,6 +867,22 @@ body {
 }
 .ops-db-toggle:hover { background: rgba(255,255,255,.08); }
 .ops-db-name { flex: 1 1 auto; }
+
+/* A store's name with its identity underneath. min-width:0 lets the truncation
+   below actually engage — without it the flex item refuses to shrink and a long
+   cluster name pushes the status dot off the sidebar. */
+.ops-db-label { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.ops-db-meta {
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: .01em;
+  color: #8FB2CE;
+  line-height: 1.25;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Nothing to say yet (disconnected): collapse rather than leave a gap that
+   makes the row look vertically misaligned against its siblings. */
+.ops-db-meta:empty { display: none; }
 .ops-caret { font-size: 9px; transition: transform .15s ease; opacity: .75; }
 .ops-db-toggle.collapsed .ops-caret { transform: rotate(-90deg); }
 .ops-db-dot { width: 7px; height: 7px; }

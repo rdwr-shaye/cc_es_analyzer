@@ -76,6 +76,29 @@ function applyPolicyToChrome() {
     document.getElementById('sidebarConnBox')
       ?.querySelector('[onclick*="connection"]')?.classList.add('d-none');
     document.querySelector('#connectedPill [onclick*="disconnect"]')?.classList.add('d-none');
+    // Reachable only when the co-located ES is down — the one moment the tool
+    // is least able to explain itself. Sending the user to a connection screen
+    // that does not exist here wastes the trip: nothing is theirs to configure,
+    // the datastore beside them is simply not answering.
+    document.getElementById('disconnectedConfigure')?.remove();
+    const pill = document.querySelector('#disconnectedPill .text-secondary');
+    if (pill) pill.textContent = 'Elasticsearch not responding';
+  }
+
+  // Embedded, the tool is a service of the CC: it arrives in the ISO/OVA and
+  // upgrades when the CC upgrades, so there is nothing for a user to update
+  // here and /api/update/* is not registered at all. Show the version — it is
+  // what identifies the build — but strip the update affordance from it, or
+  // the navbar keeps a clickable element whose dialog can only 404.
+  if (!can('app.self_update')) {
+    const ver = document.getElementById('appVersion');
+    if (ver) {
+      ver.textContent = window.APP_VERSION ? 'v' + window.APP_VERSION : '';
+      ver.title = 'Installed version — upgrades with the CC';
+      ver.removeAttribute('onclick');
+      ver.style.cursor = 'default';
+    }
+    document.getElementById('updateBtn')?.remove();
   }
 }
 
@@ -86,6 +109,7 @@ async function loadPolicy() {
       CAPS = {};
       for (const [id, v] of Object.entries(p.capabilities)) CAPS[id] = !!v.enabled;
       window.APP_PROFILE = p.profile;
+      window.APP_VERSION = p.version || '';
     }
   } catch { /* leave CAPS null — everything stays offered */ }
 }
@@ -2442,30 +2466,49 @@ function onConnected(settings, info) {
   const version     = info.es_version   || '';
   const machineStr  = `${settings.host}:${settings.port}`;
 
-  // Navbar pills
+  // Navbar pill — the MACHINE we are pointed at, and nothing about a
+  // particular store on it. Cluster name and engine version moved to the
+  // Elasticsearch node in the sidebar tree: they describe one datastore, and
+  // once Postgres and MariaDB sit beside it a single version up here could
+  // only ever be right about one of them.
   document.getElementById('connectedPill').classList.remove('d-none');
   document.getElementById('disconnectedPill').classList.add('d-none');
   document.getElementById('pillMachine').textContent = displayHost;
-  document.getElementById('pillCluster').textContent = cluster ? `(${cluster})` : '';
-  document.getElementById('pillVersion').textContent = version ? `ES ${version}` : '';
 
-  // Sidebar box
+  // The store's own identity, on the store's own row.
+  const meta = document.getElementById('db-es-meta');
+  if (meta) {
+    meta.textContent = [cluster, version && `ES ${version}`].filter(Boolean).join(' · ');
+    meta.title = meta.textContent;   // full text when the sidebar truncates it
+  }
+
+  // Sidebar box — machine identity only, so it earns its space in standalone
+  // (which host am I on?) and is redundant embedded, where the answer is
+  // always "this CC" and the navbar already says so.
   const box = document.getElementById('sidebarConnBox');
-  box.classList.remove('d-none');
-  document.getElementById('sidebarMachine').textContent = displayHost;
-  // Embedded there is no host:port worth showing — the datastore is fixed and
-  // local, so the cluster (and version) is the only useful identity here.
-  document.getElementById('sidebarCluster').textContent =
-    can('es.connect') ? `${machineStr} · ${cluster}`
-                      : [cluster, version && `ES ${version}`].filter(Boolean).join(' · ');
+  if (can('es.connect')) {
+    box.classList.remove('d-none');
+    document.getElementById('sidebarMachine').textContent = displayHost;
+    document.getElementById('sidebarCluster').textContent = machineStr;
+  } else {
+    box.classList.add('d-none');
+  }
 }
 
 function onDisconnected() {
   document.getElementById('connectedPill').classList.add('d-none');
   document.getElementById('disconnectedPill').classList.remove('d-none');
   document.getElementById('sidebarConnBox').classList.add('d-none');
-  document.getElementById('sidebarIndices').innerHTML =
-    '<div class="text-secondary small px-2 py-2">Connect to see indices</div>';
+  // Clear the store's identity with the connection — a stale cluster name and
+  // version under a disconnected node reads as if it were still live.
+  const meta = document.getElementById('db-es-meta');
+  if (meta) { meta.textContent = ''; meta.title = ''; }
+  // "Connect to see indices" is an instruction only where connecting is a
+  // thing the user does. Embedded it is not — the connection is the compose
+  // file's — so say what is actually true.
+  document.getElementById('sidebarIndices').innerHTML = can('es.connect')
+    ? '<div class="text-secondary small px-2 py-2">Connect to see indices</div>'
+    : '<div class="text-secondary small px-2 py-2">Indices unavailable</div>';
   allIndices = [];
 }
 
@@ -6920,6 +6963,15 @@ async function runUpdate(wrap) {
       refreshAll();
       return;
     }
+    // ES beside us is not answering. Still terminal: there is no saved
+    // connection to fall back to and no form worth showing, so stop here
+    // rather than falling through to the standalone path below and landing
+    // on a connection screen this profile has already hidden.
+    isConnected = false;
+    onDisconnected();
+    syncDbStatus();
+    showView('dashboard');
+    return;
   }
 
   // Try to restore last-used connection

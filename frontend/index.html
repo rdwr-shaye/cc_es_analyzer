@@ -37,9 +37,9 @@
   <!-- Active connection pill (shown when connected) -->
   <div id="connectedPill" class="conn-pill d-none">
     <span class="conn-dot connected"></span>
+    <!-- Which MACHINE. Cluster name and engine version live on the
+         Elasticsearch node in the sidebar, where they belong to one store. -->
     <span id="pillMachine" class="fw-semibold text-white"></span>
-    <span id="pillCluster" class="text-info small"></span>
-    <span id="pillVersion" class="badge bg-info text-dark ms-1" style="font-size:0.65rem;"></span>
     <button class="btn btn-link btn-sm text-danger p-0 ms-2" onclick="disconnect()" title="Disconnect">
       <i class="bi bi-x-circle"></i>
     </button>
@@ -49,7 +49,8 @@
   <div id="disconnectedPill" class="conn-pill">
     <span class="conn-dot disconnected"></span>
     <span class="text-secondary small">Not connected</span>
-    <button class="btn btn-sm btn-outline-info ms-2 py-0 px-2" onclick="showView('connection')" style="font-size:0.75rem;">
+    <button id="disconnectedConfigure" class="btn btn-sm btn-outline-info ms-2 py-0 px-2"
+            onclick="showView('connection')" style="font-size:0.75rem;">
       <i class="bi bi-plug me-1"></i>Configure
     </button>
   </div>
@@ -116,7 +117,14 @@
                   title="Elasticsearch / OpenSearch on this CC">
             <i class="bi bi-caret-down-fill ops-caret"></i>
             <i class="bi bi-database"></i>
-            <span class="ops-db-name">Elasticsearch</span>
+            <span class="ops-db-label">
+              <span class="ops-db-name">Elasticsearch</span>
+              <!-- Cluster name and engine version belong to THIS store, not to
+                   the app: once Postgres and MariaDB are siblings here, one
+                   version in the navbar could only ever describe one of them.
+                   Empty until connected — the CSS collapses it. -->
+              <span class="ops-db-meta" id="db-es-meta"></span>
+            </span>
             <span class="conn-dot disconnected ops-db-dot" id="db-es-dot"></span>
           </button>
 
