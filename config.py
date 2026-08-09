@@ -12,6 +12,35 @@ class Settings(BaseSettings):
     es_password: str = Field(default="", alias="ES_PASSWORD")
     es_verify_certs: bool = Field(default=False, alias="ES_VERIFY_CERTS")
 
+    # ── MariaDB (modules/maria) ──────────────────────────────────────────
+    # Embedded, the CC's MariaDB sits on the same `vision` docker network, so
+    # the container name resolves and no port has to be published for us.
+    #
+    # Credentials are RESOLVED AT RUNTIME, not taken from here — see
+    # modules/maria/credentials.py. Preference is MARIA_USER/MARIA_PASSWORD
+    # environment, then the CC's own mysql wrapper (below), then these
+    # defaults. Reading the wrapper is what lets a CC that changes the account
+    # be followed without a rebuild.
+    #
+    # The wrapper is the appliance's `mysql` command — a two-line shell script
+    # that execs the client with -u/-p inline. It is bind-mounted read-only.
+    # There is no better source: the CC has no credential store for this, and
+    # the same account is hardcoded in five other product scripts.
+    maria_cred_file: str = Field(default="/usr/local/bin/mysql", alias="MARIA_CRED_FILE")
+    maria_host: str = Field(default="config_kvision-infra-mariadb_1", alias="MARIA_HOST")
+    maria_port: int = Field(default=3306, alias="MARIA_PORT")
+    # Last-resort fallback only. The CC's shipped default — a default, not a
+    # secret, since anyone with the product has it. Still worth flagging rather
+    # than burying: a credential in source is something a product security
+    # review raises, and the answer that holds up is a dedicated read-only
+    # account per install, with these as the fallback for a CC without one.
+    maria_user: str = Field(default="common_host", alias="MARIA_USER")
+    maria_password: str = Field(default="radware", alias="MARIA_PASSWORD")
+    # Guard rails that apply to every statement this module runs. Both exist so
+    # a careless query on a customer's production CC cannot become an outage.
+    maria_timeout_s: int = Field(default=15, alias="MARIA_TIMEOUT_S")
+    maria_max_rows: int = Field(default=1000, alias="MARIA_MAX_ROWS")
+
     service_host: str = Field(default="0.0.0.0", alias="SERVICE_HOST")
     service_port: int = Field(default=8000, alias="SERVICE_PORT")
 

@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 # Order matters only for route registration; keep it readable.
 ENABLED: tuple[str, ...] = (
     "modules.es",
-    # Phase 2: "modules.pg", "modules.maria"
+    "modules.maria",
+    # Phase 2: "modules.pg"
     # Phase 3: "modules.diag", "modules.kb"
 )
 

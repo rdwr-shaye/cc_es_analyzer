@@ -38,6 +38,12 @@
       - "/opt/radware/mgt-server/properties:/opt/radware/mgt-server/properties:ro"
       # Archives survive container rebuilds.
       - "/opt/radware/storage/data/cc-analyzer/exports:/app/exports"
+      # The appliance's own `mysql` wrapper, read-only. It is where the CC
+      # states which account reaches MariaDB, so reading it means a CC that
+      # changes that account is followed without rebuilding this image
+      # (modules/maria/credentials.py). One file, not the directory: nothing
+      # else in /usr/local/bin is ours to see.
+      - "/usr/local/bin/mysql:/usr/local/bin/mysql:ro"
     # Bound to loopback like every other service here — reached through nginx,
     # never exposed on the appliance's external interface directly.
     ports:

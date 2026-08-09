@@ -58,6 +58,20 @@ def connect(req: ConnectionRequest):
     from core.remote.ssh_tunnel import start_tunnel, stop_tunnel
 
     def _connected(info, **extra):
+        # Record WHICH APPLIANCE this session is now pointed at, and how to
+        # reach it over SSH. Elasticsearch does not need this — it already has
+        # a working client — but the CC's other datastores do: MariaDB is on
+        # the same box, usually behind the same closed ports, and re-asking the
+        # user for a host and SSH credentials they have already supplied would
+        # be a second source of truth waiting to drift.
+        try:
+            client = get_client()
+            client.cc_host = req.host
+            client.ssh = ({"user": req.ssh_user, "password": req.ssh_password,
+                           "port": req.ssh_port} if req.ssh_enabled and req.ssh_user
+                          else None)
+        except Exception:      # never fail a good connection over bookkeeping
+            logger.warning("[connect] could not record CC target", exc_info=True)
         return {"connected": True,
                 "es_version": info.get("version", {}).get("number"),
                 "cluster_name": info.get("cluster_name"), **extra}

@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 _active: "_Tunnel | None" = None
 _lock = threading.Lock()
 
+# Tunnels are now keyed by NAME, because one CC needs more than one forward:
+# Elasticsearch on 9200 and MariaDB on 3306 are different ports on the same
+# box, and a single-slot registry meant opening the second silently tore down
+# the first. The default name is "es" so every existing caller keeps its
+# behaviour without passing anything.
+_tunnels: dict[str, "_Tunnel"] = {}
+DEFAULT_NAME = "es"
+
 
 class _Handler(socketserver.BaseRequestHandler):
     """Relays one accepted local connection to the remote over an SSH channel.
@@ -97,9 +105,11 @@ class _Tunnel:
 def start_tunnel(ssh_host: str, ssh_user: str, ssh_password: str,
                  ssh_port: int = 22, remote_host: str = "127.0.0.1",
                  remote_port: int = 9200, local_host: str = "127.0.0.1",
-                 timeout: float = 20.0) -> dict:
+                 timeout: float = 20.0, name: str = DEFAULT_NAME) -> dict:
     """
-    (Re)start the SSH tunnel. Any existing tunnel is torn down first.
+    (Re)start the SSH tunnel called `name`. Only that one is torn down first —
+    other names keep running, so an ES tunnel and a MariaDB tunnel to the same
+    CC coexist.
 
     Returns {"ok": True, "local_host", "local_port"} or {"ok": False, "error"}.
     """
@@ -108,7 +118,7 @@ def start_tunnel(ssh_host: str, ssh_user: str, ssh_password: str,
     except ImportError:
         return {"ok": False, "error": "paramiko is not installed (see requirements.txt)."}
 
-    stop_tunnel()
+    stop_tunnel(name)
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -146,26 +156,43 @@ def start_tunnel(ssh_host: str, ssh_user: str, ssh_password: str,
     thread.start()
 
     global _active
+    tunnel = _Tunnel(client, server, thread, local_host, local_port, {
+        "ssh_host": ssh_host, "ssh_port": ssh_port,
+        "remote": f"{remote_host}:{remote_port}", "name": name,
+    })
     with _lock:
-        _active = _Tunnel(client, server, thread, local_host, local_port, {
-            "ssh_host": ssh_host, "ssh_port": ssh_port,
-            "remote": f"{remote_host}:{remote_port}",
-        })
+        _tunnels[name] = tunnel
+        if name == DEFAULT_NAME:
+            _active = tunnel      # kept for callers that predate named tunnels
 
-    logger.info("[ssh-tunnel] up: %s:%s -> (ssh %s@%s:%s) -> %s:%s",
-                local_host, local_port, ssh_user, ssh_host, ssh_port,
+    logger.info("[ssh-tunnel] %s up: %s:%s -> (ssh %s@%s:%s) -> %s:%s",
+                name, local_host, local_port, ssh_user, ssh_host, ssh_port,
                 remote_host, remote_port)
-    return {"ok": True, "local_host": local_host, "local_port": local_port}
+    return {"ok": True, "local_host": local_host, "local_port": local_port,
+            "name": name}
 
 
-def stop_tunnel() -> None:
+def stop_tunnel(name: str = DEFAULT_NAME) -> None:
     global _active
     with _lock:
-        if _active is not None:
-            _active.close()
-            logger.info("[ssh-tunnel] closed")
+        tunnel = _tunnels.pop(name, None)
+        if tunnel is not None:
+            tunnel.close()
+            logger.info("[ssh-tunnel] %s closed", name)
+        if name == DEFAULT_NAME:
             _active = None
 
 
-def active_tunnel() -> "_Tunnel | None":
-    return _active
+def stop_all_tunnels() -> None:
+    for name in list(_tunnels):
+        stop_tunnel(name)
+
+
+def active_tunnel(name: str = DEFAULT_NAME) -> "_Tunnel | None":
+    tunnel = _tunnels.get(name)
+    # A tunnel whose thread has died is worse than no tunnel: it still answers
+    # on the local port and every connection through it hangs.
+    if tunnel is not None and not tunnel.alive():
+        stop_tunnel(name)
+        return None
+    return tunnel

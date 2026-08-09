@@ -883,6 +883,32 @@ body {
 /* Nothing to say yet (disconnected): collapse rather than leave a gap that
    makes the row look vertically misaligned against its siblings. */
 .ops-db-meta:empty { display: none; }
+
+/* Rows in the MariaDB schema/table pickers. Full-width buttons rather than a
+   list so the whole row is the target — these are picked constantly while
+   navigating, and a text-only hit area makes that tedious. */
+.maria-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--bs-border-color, rgba(0,0,0,.08));
+  padding: 6px 10px;
+  font-size: 12.5px;
+  color: inherit;
+}
+.maria-item:hover { background: rgba(0, 82, 204, .06); }
+.maria-item.active {
+  background: rgba(0, 82, 204, .11);
+  box-shadow: inset 3px 0 0 var(--ops-blue, #0052CC);
+}
+.maria-desc {
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--bs-secondary-color, #6c757d);
+  margin-top: 2px;
+}
 .ops-caret { font-size: 9px; transition: transform .15s ease; opacity: .75; }
 .ops-db-toggle.collapsed .ops-caret { transform: rotate(-90deg); }
 .ops-db-dot { width: 7px; height: 7px; }

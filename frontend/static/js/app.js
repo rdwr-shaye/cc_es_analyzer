@@ -58,7 +58,16 @@ function toggleDbGroup(id, force) {
 /** Re-apply the persisted collapse state. Default is expanded. */
 function initDbTree() {
   const st = _dbTreeState();
-  for (const id of ['root', 'es']) if (st[id]) toggleDbGroup(id, true);
+  for (const id of ['root', 'es', 'maria']) if (st[id]) toggleDbGroup(id, true);
+}
+
+/** The count badge on "Databases" must be what is actually listed, not a
+ *  literal — a hardcoded 2 becomes a lie the moment a store is gated off. */
+function syncDbCount() {
+  const badge = document.getElementById('db-count');
+  if (!badge) return;
+  badge.textContent = String(
+    document.querySelectorAll('#db-root-children > .ops-db-toggle:not(.d-none)').length);
 }
 
 /** Mirror connection state onto the Elasticsearch group's status dot. */
@@ -100,6 +109,18 @@ function applyPolicyToChrome() {
     }
     document.getElementById('updateBtn')?.remove();
   }
+
+  // A datastore whose routes are not registered must not appear in the tree at
+  // all. Hiding the node rather than disabling it: an entry that 404s on click
+  // is worse than no entry.
+  if (!can('maria.read')) {
+    document.getElementById('db-maria-toggle')?.classList.add('d-none');
+    document.getElementById('db-maria-children')?.classList.add('d-none');
+  }
+  if (!can('maria.query.raw')) {
+    document.getElementById('nav-mariaquery')?.classList.add('d-none');
+  }
+  syncDbCount();
 }
 
 async function loadPolicy() {
@@ -155,6 +176,11 @@ function showView(name) {
   if (name === 'summary'  && isConnected) loadSummary();
   // Sort options depend on the index pattern's real date fields.
   if (name === 'query' && isConnected && typeof loadSortFields === 'function') loadSortFields();
+
+  // MariaDB does not ride the ES connection — it is a separate store with its
+  // own reachability, so these must NOT be gated on isConnected.
+  if (name === 'maria' && !mariaSchemas.length) loadMariaSchemas();
+  if (name === 'mariaquery' && !mariaSchemas.length) loadMariaSchemas();
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -2474,6 +2500,13 @@ function onConnected(settings, info) {
   document.getElementById('connectedPill').classList.remove('d-none');
   document.getElementById('disconnectedPill').classList.add('d-none');
   document.getElementById('pillMachine').textContent = displayHost;
+
+  // Standalone, MariaDB lives on the machine we just connected to, so its
+  // reachability changes with this connection — re-probe rather than leaving
+  // the node reporting what was true for the previous CC.
+  loadMariaHealth();
+  mariaSchemas = [];        // they belonged to the previous CC
+  mariaTableList = [];
 
   // The store's own identity, on the store's own row.
   const meta = document.getElementById('db-es-meta');
@@ -6734,6 +6767,371 @@ function esc(s) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   MARIADB — the CC's relational store
+   ══════════════════════════════════════════════════════════════════════════
+   Deliberately not a schema tree with 175 leaves. The left pane is the curated
+   catalog (which schema holds what), and only once you pick one do its tables
+   appear. Same shape as the ES side: the curation is the product, the browse
+   screens on top of it are generic.
+
+   Every endpoint answers {error: ...} at HTTP 200 for operational failures —
+   an unreachable database is a normal state of a CC being debugged — so these
+   handlers check for `.error` rather than relying on a rejected fetch. */
+
+let mariaSchemas   = [];
+let mariaTableList = [];
+let mariaSchema    = '';     // selected schema
+let mariaTable     = '';     // selected table
+
+/* Delegated once on the panes rather than per row: the lists are re-rendered
+   on every filter keystroke, and re-binding hundreds of listeners each time is
+   both wasteful and easy to leak. */
+function initMariaPanes() {
+  document.getElementById('mariaSchemas')?.addEventListener('click', ev => {
+    const btn = ev.target.closest('[data-schema]');
+    if (btn) selectMariaSchema(btn.dataset.schema);
+  });
+  document.getElementById('mariaTables')?.addEventListener('click', ev => {
+    const btn = ev.target.closest('[data-table]');
+    if (btn) selectMariaTable(btn.dataset.table);
+  });
+  // Blob cells appear in both the sample pane and the query results, so the
+  // listener goes on document rather than being duplicated per pane.
+  document.addEventListener('click', ev => {
+    const btn = ev.target.closest('[data-blob-qs]');
+    if (btn) { ev.preventDefault(); showBlobViewer(btn.dataset.blobQs); }
+  });
+}
+
+/** Decoded view of one binary column value. */
+async function showBlobViewer(qs) {
+  const body = document.getElementById('blobViewerBody');
+  const dl   = document.getElementById('blobViewerDownload');
+  if (dl) dl.href = appUrl('/api/maria/blob?' + qs);
+  body.innerHTML = '<div class="text-secondary small p-3">Decoding…</div>';
+  const modal = new bootstrap.Modal(document.getElementById('blobViewerModal'));
+  modal.show();
+
+  const d = await api('/api/maria/blob/preview?' + qs);
+  if (!d || d.error) {
+    body.innerHTML = `<div class="alert alert-warning py-2 px-3 small mb-0">`
+      + `${esc((d && d.error) || 'could not decode')}</div>`;
+    return;
+  }
+
+  document.getElementById('blobViewerTitle').textContent =
+    `${d.schema}.${d.table}.${d.column}`;
+
+  const header = `<div class="small text-secondary mb-2">
+      ${esc(d.label)} · ${_fmtBytes(d.size)}</div>`;
+
+  let main = '';
+  if (d.json !== null && d.json !== undefined) {
+    // The payload, pretty-printed. This is the thing worth reading; the
+    // serialisation framing around it is not.
+    main = `<div class="small fw-semibold text-secondary mb-1">JSON payload</div>
+      <pre class="bg-body-tertiary p-2 rounded" style="font-size:.75rem;max-height:45vh;
+           overflow:auto;white-space:pre-wrap;word-break:break-word;">${
+        esc(JSON.stringify(d.json, null, 2))}</pre>`;
+  } else if (d.text) {
+    main = `<pre class="bg-body-tertiary p-2 rounded" style="font-size:.75rem;
+             max-height:45vh;overflow:auto;white-space:pre-wrap;">${esc(d.text)}</pre>`;
+  }
+
+  const strings = (d.strings || []).length
+    ? `<details ${d.json ? '' : 'open'} class="mt-2">
+         <summary class="small text-secondary">Readable strings (${d.strings.length})</summary>
+         <pre class="bg-body-tertiary p-2 rounded mt-1" style="font-size:.72rem;
+              max-height:30vh;overflow:auto;white-space:pre-wrap;">${
+           esc(d.strings.join('\n'))}</pre>
+       </details>`
+    : '';
+
+  const nothing = (!main && !strings)
+    ? '<div class="text-secondary small">Nothing readable in these bytes — '
+      + 'download it if you need the raw content.</div>' : '';
+
+  body.innerHTML = header + main + strings + nothing;
+}
+
+/** Version + reachability onto the MariaDB node in the rail. */
+async function loadMariaHealth() {
+  if (!can('maria.read')) return;
+  const dot  = document.getElementById('db-maria-dot');
+  const meta = document.getElementById('db-maria-meta');
+  const d = await api('/api/maria/health');
+  const ok = !!(d && d.connected);
+  if (dot) dot.className = 'conn-dot ops-db-dot ' + (ok ? 'connected' : 'disconnected');
+  if (meta) {
+    // Trim MariaDB's long build suffix ("11.8.6-MariaDB-ubu2404"): the rail has
+    // ~150px and the distro tag is not what anyone is checking.
+    const v = ok ? String(d.version || '').split('-')[0] : '';
+    meta.textContent = ok ? (v ? `MariaDB ${v}` : 'connected') : 'not responding';
+    meta.title = ok ? `${d.version || ''} · ${d.user || ''} (${d.credential_source || ''})`
+                    : (d && d.error) || 'not responding';
+  }
+  const badge = document.getElementById('mariaServer');
+  if (badge) badge.textContent = ok ? `${d.version} · ${d.host}:${d.port}` : '';
+}
+
+function _mariaError(id, msg) {
+  const box = document.getElementById(id);
+  if (!box) return;
+  box.classList.toggle('d-none', !msg);
+  box.textContent = msg || '';
+}
+
+async function loadMariaSchemas() {
+  const showSystem = !!document.getElementById('mariaShowSystem')?.checked;
+  const pane = document.getElementById('mariaSchemas');
+  if (pane) pane.innerHTML = '<div class="text-secondary small p-3">Loading…</div>';
+
+  const d = await api(`/api/maria/schemas?include_system=${showSystem}`);
+  if (!d || d.error) {
+    _mariaError('mariaError', (d && d.error) || 'could not list schemas');
+    if (pane) pane.innerHTML = '<div class="text-secondary small p-3">—</div>';
+    return;
+  }
+  _mariaError('mariaError', '');
+  mariaSchemas = d.schemas || [];
+  renderMariaSchemas();
+  _fillMariaQuerySchemas();
+}
+
+function renderMariaSchemas() {
+  const pane = document.getElementById('mariaSchemas');
+  if (!pane) return;
+  if (!mariaSchemas.length) {
+    pane.innerHTML = '<div class="text-secondary small p-3">No schemas.</div>';
+    return;
+  }
+  // Identifiers go in a data- attribute and are read back through the DOM,
+  // never interpolated into an onclick. esc() escapes < > & but NOT quotes, so
+  // a table or schema name containing an apostrophe — which MySQL permits in a
+  // backtick-quoted identifier — would otherwise close the attribute and run
+  // as script. Nothing on this CC is named that way today; the point is that
+  // the names come from the database rather than from us, so the rendering
+  // must not depend on what they happen to contain.
+  pane.innerHTML = mariaSchemas.map(s => `
+    <button class="maria-item ${s.name === mariaSchema ? 'active' : ''}"
+            data-schema="${esc(s.name)}">
+      <div class="d-flex align-items-center gap-2">
+        <span class="fw-semibold">${esc(s.title)}</span>
+        ${s.catalogued ? '' : '<span class="badge bg-warning-subtle text-warning-emphasis" '
+          + 'style="font-size:.6rem;" title="Not in the curated catalog — worth adding">new</span>'}
+        <span class="ms-auto text-secondary" style="font-size:.68rem;">
+          ${s.tables} tbl · ${s.size_mb} MB
+        </span>
+      </div>
+      ${s.description
+        ? `<div class="maria-desc">${esc(s.description)}</div>`
+        : `<div class="maria-desc font-monospace">${esc(s.name)}</div>`}
+    </button>`).join('');
+}
+
+async function selectMariaSchema(name) {
+  mariaSchema = name;
+  mariaTable  = '';
+  // Drop the previous schema's tables NOW rather than leaving them on screen
+  // under the new schema's heading while the request is in flight — that reads
+  // as "these are quartz's tables" when they are still vision_ng's.
+  mariaTableList = [];
+  renderMariaSchemas();
+  document.getElementById('mariaTablesTitle').textContent = `Tables — ${name}`;
+  document.getElementById('mariaDetailTitle').textContent = 'Table';
+  document.getElementById('mariaDetail').innerHTML =
+    '<div class="text-secondary small p-3">Pick a table.</div>';
+  const search = document.getElementById('mariaTableSearch');
+  if (search) search.value = '';        // a filter from the last schema is not meant for this one
+
+  const pane = document.getElementById('mariaTables');
+  pane.innerHTML = '<div class="text-secondary small p-3">Loading…</div>';
+  const d = await api(`/api/maria/tables?schema=${encodeURIComponent(name)}`);
+
+  // Two clicks in quick succession: the first response can land after the
+  // second, and without this the pane would end up showing the schema the user
+  // did NOT select — with a heading naming the one they did.
+  if (mariaSchema !== name) return;
+
+  if (!d || d.error) {
+    pane.innerHTML = `<div class="text-danger small p-3">${esc((d && d.error) || 'failed')}</div>`;
+    return;
+  }
+  mariaTableList = d.tables || [];
+  renderMariaTables();
+}
+
+function renderMariaTables() {
+  const pane = document.getElementById('mariaTables');
+  if (!pane) return;
+  const q = (document.getElementById('mariaTableSearch')?.value || '').toLowerCase();
+  const rows = mariaTableList.filter(t => !q || t.name.toLowerCase().includes(q));
+  if (!rows.length) {
+    pane.innerHTML = '<div class="text-secondary small p-3">No matching tables.</div>';
+    return;
+  }
+  pane.innerHTML = rows.map(t => `
+    <button class="maria-item ${t.name === mariaTable ? 'active' : ''}"
+            data-table="${esc(t.name)}">
+      <div class="d-flex align-items-center gap-2">
+        <span class="font-monospace" style="font-size:.75rem;">${esc(t.name)}</span>
+        <span class="ms-auto text-secondary" style="font-size:.68rem;"
+              title="InnoDB row counts are estimates">~${t.row_estimate} rows</span>
+      </div>
+      ${t.comment ? `<div class="maria-desc">${esc(t.comment)}</div>` : ''}
+    </button>`).join('');
+}
+
+async function selectMariaTable(name) {
+  mariaTable = name;
+  renderMariaTables();
+  document.getElementById('mariaDetailTitle').textContent = `${mariaSchema}.${name}`;
+  const pane = document.getElementById('mariaDetail');
+  pane.innerHTML = '<div class="text-secondary small p-3">Loading…</div>';
+
+  const qs = `schema=${encodeURIComponent(mariaSchema)}&table=${encodeURIComponent(name)}`;
+  const [cols, sample] = await Promise.all([
+    api(`/api/maria/columns?${qs}`),
+    api(`/api/maria/sample?${qs}&size=25`),
+  ]);
+
+  if (mariaTable !== name) return;      // superseded by a later click
+
+  if (cols && cols.error) {
+    pane.innerHTML = `<div class="text-danger small p-3">${esc(cols.error)}</div>`;
+    return;
+  }
+
+  const colRows = (cols.columns || []).map(c => `
+    <tr>
+      <td class="font-monospace">${esc(c.name)}</td>
+      <td class="text-secondary">${esc(c.type)}</td>
+      <td>${c.key_type ? `<span class="badge bg-secondary-subtle text-secondary-emphasis"
+            style="font-size:.6rem;">${esc(c.key_type)}</span>` : ''}</td>
+      <td class="text-secondary">${c.nullable === 'YES' ? 'null' : ''}</td>
+    </tr>`).join('');
+
+  const sampleHtml = (sample && sample.error)
+    ? `<div class="text-danger small p-2">${esc(sample.error)}</div>`
+    : _mariaTable(sample.columns || [], sample.rows || [], sample.truncated,
+                  {schema: mariaSchema, table: name,
+                   primaryKey: sample.primary_key || []});
+
+  pane.innerHTML = `
+    <div class="p-2">
+      <div class="small fw-semibold text-secondary mb-1">Columns (${(cols.columns || []).length})</div>
+      <div style="max-height:240px;overflow:auto;">
+        <table class="table table-sm table-hover mb-0" style="font-size:.74rem;">
+          <thead class="table-light"><tr>
+            <th>Name</th><th>Type</th><th>Key</th><th></th>
+          </tr></thead>
+          <tbody>${colRows}</tbody>
+        </table>
+      </div>
+      <div class="small fw-semibold text-secondary mt-3 mb-1">First rows</div>
+      ${sampleHtml}
+    </div>`;
+}
+
+/* Byte sizes are formatted by _fmtBytes, already defined for the archive
+   screens — one formatter, so a blob and an export report sizes the same way. */
+
+/** Shared result-grid renderer for sample rows and query results.
+ *  `ctx` (optional) carries {schema, table, primaryKey} — present only for a
+ *  table sample, which is the one case where a row can be addressed well
+ *  enough to download a binary column from it. */
+function _mariaTable(columns, rows, truncated, ctx) {
+  if (!rows.length) return '<div class="text-secondary small p-2">No rows.</div>';
+  const pk = (ctx && ctx.primaryKey) || [];
+  const head = columns.map(c => `<th class="text-nowrap">${esc(c)}</th>`).join('');
+  const body = rows.map(r => '<tr>' + columns.map(c => {
+    const v = r[c];
+    // null is a fact about the row, not an empty cell — say so, or a NULL and
+    // an empty string look identical and mean very different things.
+    if (v === null || v === undefined)
+      return '<td class="text-secondary fst-italic">null</td>';
+
+    // Binary column. The server sends a marker rather than the bytes, because
+    // a BLOB is not text — quartz's JOB_DATA is a serialised Java object, and
+    // decoding it as UTF-8 is what used to make this row a 500.
+    if (v && typeof v === 'object' && v.__blob__) {
+      const size = _fmtBytes(v.bytes || 0);
+      if (!v.bytes) return `<td class="text-secondary fst-italic">empty blob</td>`;
+      // Downloadable only when the row can actually be named.
+      if (!pk.length || !ctx)
+        return `<td class="text-secondary" title="No primary key, so this row `
+             + `cannot be addressed for download">binary · ${size}</td>`;
+      const key = {}; for (const k of pk) key[k] = r[k];
+      const qs = 'schema=' + encodeURIComponent(ctx.schema)
+        + '&table=' + encodeURIComponent(ctx.table)
+        + '&column=' + encodeURIComponent(c)
+        + '&key=' + encodeURIComponent(JSON.stringify(key));
+      // View first, download second. These blobs are Java-serialised objects
+      // wrapping a JSON payload, so the file on its own is unreadable — the
+      // decoded view is what someone actually came for.
+      return `<td class="text-nowrap">
+                <button class="btn btn-link btn-sm p-0 text-decoration-none"
+                        data-blob-qs="${esc(qs)}" title="View ${esc(c)} (${size})">
+                  <i class="bi bi-eye me-1"></i>${size}</button>
+                <a href="${esc(appUrl('/api/maria/blob?' + qs))}" download
+                   class="ms-2 text-secondary" title="Download raw bytes">
+                   <i class="bi bi-download"></i></a></td>`;
+    }
+
+    const s = String(v);
+    return `<td class="text-nowrap" title="${esc(s)}">${esc(s.length > 80 ? s.slice(0, 80) + '…' : s)}</td>`;
+  }).join('') + '</tr>').join('');
+  return `
+    <div style="overflow:auto;">
+      <table class="table table-sm table-hover mb-0 font-monospace" style="font-size:.72rem;">
+        <thead class="table-light"><tr>${head}</tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>
+    ${truncated ? '<div class="small text-warning-emphasis px-2 py-1">'
+      + 'More rows exist — this result was capped.</div>' : ''}`;
+}
+
+function _fillMariaQuerySchemas() {
+  const sel = document.getElementById('mariaQuerySchema');
+  if (!sel) return;
+  const keep = sel.value;
+  sel.innerHTML = '<option value="">(none)</option>'
+    + mariaSchemas.map(s => `<option value="${esc(s.name)}">${esc(s.name)}</option>`).join('');
+  // Default to the largest non-system schema — on a CC that is vision_ng, and
+  // starting there saves the first click of nearly every session.
+  sel.value = keep || (mariaSchemas.find(s => !s.system)?.name || '');
+}
+
+async function runMariaQuery() {
+  const sql = (document.getElementById('mariaQuerySql')?.value || '').trim();
+  if (!sql) return;
+  const schema = document.getElementById('mariaQuerySchema')?.value || '';
+  const limit = parseInt(document.getElementById('mariaQueryLimit')?.value, 10) || null;
+
+  const out  = document.getElementById('mariaQueryResults');
+  const meta = document.getElementById('mariaQueryMeta');
+  out.innerHTML = '<div class="text-secondary small p-3">Running…</div>';
+  meta.textContent = '';
+  _mariaError('mariaQueryError', '');
+
+  const d = await api('/api/maria/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql, schema_: schema, limit }),
+  });
+
+  if (!d || d.error) {
+    _mariaError('mariaQueryError', (d && d.error) || 'query failed');
+    out.innerHTML = '<div class="text-secondary small p-3">—</div>';
+    return;
+  }
+  meta.textContent = `${d.count} row(s) · ${d.took_ms} ms`
+    + (d.truncated ? ` · capped at ${d.row_cap}` : '');
+  out.innerHTML = _mariaTable(d.columns || [], d.rows || [], d.truncated);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    UPDATES — "a newer version of this tool is in the repository"
    ══════════════════════════════════════════════════════════════════════════
    The server checks the repository in the background (core/updater.py);
@@ -6936,12 +7334,16 @@ async function runUpdate(wrap) {
   await loadPolicy();
   applyPolicyToChrome();
   initDbTree();
+  initMariaPanes();
   initUiPrefs();
   initQuerySplitter();
   initAutoRefresh();
   renderProfiles();
   startPresence();
   if (can('app.self_update')) startUpdateChecks();
+  // Its own store with its own reachability — probed independently of ES, and
+  // not awaited, so a slow or dead MariaDB cannot hold up the whole app.
+  loadMariaHealth();
 
   // Embedded on a CC the server is already bound to the Elasticsearch running
   // beside it (ES_HOST in the compose file), so there is nothing to restore

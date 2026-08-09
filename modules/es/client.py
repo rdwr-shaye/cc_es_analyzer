@@ -42,6 +42,18 @@ class ESHttpClient:
 
     def __init__(self, host: str, port: int, scheme: str = "http",
                  user: str = "", password: str = "", verify_certs: bool = False):
+        # Kept alongside base_url because other modules need to know WHICH
+        # MACHINE this session is pointed at, not just how to reach ES on it —
+        # standalone, the CC's MariaDB is on that same host.
+        self.host     = host
+        self.port     = port
+        # The APPLIANCE's address, which is not always `host`: when ES is
+        # reached through an SSH tunnel, `host` is 127.0.0.1 and the CC is
+        # somewhere else entirely. Other datastores on that CC need the real
+        # one, and `ssh` is how they get there when their port is closed too.
+        # Set by the connect endpoint; defaults keep a plain .env run honest.
+        self.cc_host  = host
+        self.ssh: dict | None = None
         self.base_url = f"{scheme}://{host}:{port}"
         self.auth     = HTTPBasicAuth(user, password) if user else None
         self.verify   = verify_certs

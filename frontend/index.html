@@ -164,6 +164,32 @@
               <div class="text-secondary small px-2 py-2">Connect to see indices</div>
             </div>
           </div>
+
+          <!-- Level 2 — MariaDB. A sibling of the Elasticsearch group, which is
+               the whole point of the tree: adding a store is markup here plus a
+               module on the server, and nothing above has to move.
+               Hidden entirely when maria.read is off (its routes 404 then). -->
+          <button class="ops-db-toggle mt-1" id="db-maria-toggle" onclick="toggleDbGroup('maria')"
+                  title="MariaDB on this CC">
+            <i class="bi bi-caret-down-fill ops-caret"></i>
+            <i class="bi bi-database"></i>
+            <span class="ops-db-label">
+              <span class="ops-db-name">MariaDB</span>
+              <span class="ops-db-meta" id="db-maria-meta"></span>
+            </span>
+            <span class="conn-dot disconnected ops-db-dot" id="db-maria-dot"></span>
+          </button>
+
+          <div class="ops-db-children" id="db-maria-children">
+            <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-maria"
+                    onclick="showView('maria')">
+              <i class="bi bi-diagram-3 me-2"></i>Schemas &amp; Tables
+            </button>
+            <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-mariaquery"
+                    onclick="showView('mariaquery')">
+              <i class="bi bi-terminal me-2"></i>SQL Query
+            </button>
+          </div>
         </div>
 
         <!-- Hidden in the embedded profile: ES runs beside the app on the CC,
@@ -968,7 +994,135 @@
       </div><!-- /qeditSplit -->
     </div>
 
+    <!-- ── MARIADB: SCHEMAS & TABLES ──────────────────────────────────────
+         Three panes left to right: schemas on this CC, the tables in the
+         selected one, then the selected table's columns and first rows.
+         Curated descriptions come from modules/maria/catalog.py — the point
+         being that 175 tables is not an answer to "where do I look". -->
+    <div id="view-maria" class="view-panel p-3 d-none">
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <h5 class="mb-0"><i class="bi bi-diagram-3 me-2 text-primary"></i>MariaDB — Schemas &amp; Tables</h5>
+        <span id="mariaServer" class="badge bg-secondary" style="font-size:.65rem;"></span>
+        <div class="ms-auto d-flex align-items-center gap-2">
+          <div class="form-check form-switch mb-0">
+            <input class="form-check-input" type="checkbox" id="mariaShowSystem"
+                   onchange="loadMariaSchemas()">
+            <label class="form-check-label small text-secondary" for="mariaShowSystem">
+              System schemas
+            </label>
+          </div>
+          <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+                  onclick="loadMariaSchemas()" style="font-size:.75rem;">
+            <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+          </button>
+        </div>
+      </div>
+
+      <div id="mariaError" class="alert alert-warning py-2 px-3 small d-none"></div>
+
+      <div class="row g-2">
+        <div class="col-12 col-lg-3">
+          <div class="card h-100">
+            <div class="card-header py-1 px-2 small fw-semibold text-secondary">Schemas</div>
+            <div class="card-body p-0" id="mariaSchemas" style="max-height:70vh;overflow:auto;">
+              <div class="text-secondary small p-3">Loading…</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-12 col-lg-4">
+          <div class="card h-100">
+            <div class="card-header py-1 px-2 d-flex align-items-center gap-2">
+              <span class="small fw-semibold text-secondary" id="mariaTablesTitle">Tables</span>
+              <input id="mariaTableSearch" type="text" class="form-control form-control-sm ms-auto"
+                     placeholder="Filter…" oninput="renderMariaTables()"
+                     style="width:110px;font-size:.72rem;padding:2px 6px;">
+            </div>
+            <div class="card-body p-0" id="mariaTables" style="max-height:70vh;overflow:auto;">
+              <div class="text-secondary small p-3">Pick a schema.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-12 col-lg-5">
+          <div class="card h-100">
+            <div class="card-header py-1 px-2 small fw-semibold text-secondary" id="mariaDetailTitle">
+              Table
+            </div>
+            <div class="card-body p-0" id="mariaDetail" style="max-height:70vh;overflow:auto;">
+              <div class="text-secondary small p-3">Pick a table.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── MARIADB: SQL QUERY ─────────────────────────────────────────────
+         The escape hatch, not the front door. Read-only is enforced on the
+         server (modules/maria/client.py) at the transaction as well as the
+         statement; the note below states that rather than letting the user
+         discover it by having a DELETE rejected. -->
+    <div id="view-mariaquery" class="view-panel p-3 d-none">
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <h5 class="mb-0"><i class="bi bi-terminal me-2 text-primary"></i>MariaDB — SQL Query</h5>
+        <span class="badge bg-secondary-subtle text-secondary-emphasis" style="font-size:.65rem;">
+          read-only
+        </span>
+      </div>
+
+      <div class="card mb-2">
+        <div class="card-body p-2">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <label class="small text-secondary mb-0">Schema</label>
+            <select id="mariaQuerySchema" class="form-select form-select-sm" style="width:220px;font-size:.78rem;"></select>
+            <label class="small text-secondary mb-0 ms-2">Max rows</label>
+            <input id="mariaQueryLimit" type="number" min="1" max="10000" value="200"
+                   class="form-control form-control-sm" style="width:90px;font-size:.78rem;">
+            <button class="btn btn-sm btn-primary ms-auto py-0 px-3" onclick="runMariaQuery()"
+                    style="font-size:.78rem;">
+              <i class="bi bi-play-fill me-1"></i>Run
+            </button>
+          </div>
+          <textarea id="mariaQuerySql" class="form-control font-monospace" rows="5"
+                    style="font-size:.8rem;"
+                    placeholder="SELECT * FROM devicestatus LIMIT 20"></textarea>
+          <div class="form-text" style="font-size:.7rem;">
+            SELECT, SHOW, DESCRIBE, EXPLAIN and WITH only. One statement at a time.
+          </div>
+        </div>
+      </div>
+
+      <div id="mariaQueryError" class="alert alert-warning py-2 px-3 small d-none"></div>
+      <div id="mariaQueryMeta" class="small text-secondary mb-1"></div>
+      <div class="card">
+        <div class="card-body p-0" id="mariaQueryResults" style="max-height:60vh;overflow:auto;">
+          <div class="text-secondary small p-3">Run a query to see results here…</div>
+        </div>
+      </div>
+    </div>
+
   </main>
+</div>
+
+<!-- ── BLOB VIEWER ────────────────────────────────────────────────────
+     A BLOB in the CC is usually a Java-serialised object wrapping a JSON
+     payload, so the downloaded file is unreadable in an editor. This shows the
+     payload; the download stays one click away for the raw bytes. -->
+<div class="modal fade" id="blobViewerModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title font-monospace" id="blobViewerTitle">Binary column</h6>
+        <a id="blobViewerDownload" href="#" download
+           class="btn btn-sm btn-outline-secondary ms-auto me-2 py-0 px-2"
+           style="font-size:.75rem;">
+          <i class="bi bi-download me-1"></i>Download raw
+        </a>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="blobViewerBody"></div>
+    </div>
+  </div>
 </div>
 
 <!-- ── DISCONNECT CONFIRM TOAST ──────────────────────────────────────── -->

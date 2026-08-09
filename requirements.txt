@@ -7,4 +7,8 @@ pydantic-settings>=2.0.0
 paramiko>=3.0.0
 python-multipart>=0.0.6
 cryptography>=41.0.0
+# MariaDB driver (modules/maria). PyMySQL is pure Python on purpose: mysqlclient
+# and mariadb need a C toolchain and libmariadb headers at build time, which the
+# CC's CI/CD base-image rules are unlikely to welcome in a slim image.
+PyMySQL>=1.1.0
 
