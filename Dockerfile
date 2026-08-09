@@ -17,8 +17,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # VERSION must be here: it is what the running app reports as its own version
 # and what the update check compares against the repository.
 COPY main.py config.py VERSION ./
-COPY routers ./routers
-COPY services ./services
+# core/ is product-level (policy, sessions, jobs, remote access); modules/ holds
+# one package per datastore or feature. Adding a module needs no change here.
+COPY core ./core
+COPY modules ./modules
 COPY frontend ./frontend
 
 # Runtime log directory (also used as a mount point in docker-compose).

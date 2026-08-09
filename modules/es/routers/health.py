@@ -1,19 +1,10 @@
 import logging
 
 from fastapi import APIRouter
-from services import policy
-from services.es_client import ping, get_client
+from modules.es.client import ping, get_client
 
 router = APIRouter(prefix="/api", tags=["health"])
 logger = logging.getLogger(__name__)
-
-
-@router.get("/policy")
-def deployment_policy():
-    """Which capabilities this instance carries, so the UI can avoid offering
-    what it cannot do. This is a convenience for the frontend, NOT the control:
-    a disabled capability has no route to call in the first place."""
-    return policy.snapshot()
 
 
 def _unhealthy_indices(es) -> list:

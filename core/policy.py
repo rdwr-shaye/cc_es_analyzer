@@ -1,12 +1,20 @@
 """Deployment profile and capability policy.
 
-One image ships to a lab machine and to a customer's CyberController, so what
-an instance may do cannot be decided by which build it is. It is decided at
-startup from two inputs:
+CC Admin has TWO SUPPORTED DEPLOYMENT MODES, and both are products — neither
+is a stepping stone to the other:
 
-  1. the PROFILE — ``lab`` for a developer/lab run, ``embedded`` for the copy
-     that rides the CC's monitoring compose. Comes from ANALYZER_PROFILE, so
-     the compose file is what pins an appliance to ``embedded``;
+  * ``standalone`` — the original remote tool. An engineer runs it on their own
+    machine and connects it to a CC over the network. This is how support
+    reaches CyberControllers that do not carry the embedded build, which
+    includes every CC already in the field. It is not going away.
+  * ``embedded`` — the copy that rides a modern CC's monitoring compose and
+    talks to the datastores running beside it.
+
+One image serves both, so what an instance may do cannot be decided by which
+build it is. It is decided at startup from two inputs:
+
+  1. the PROFILE, from ANALYZER_PROFILE — the compose file is what pins an
+     appliance to ``embedded``; anything else defaults to ``standalone``;
   2. an optional PROPERTY FILE on the system filesystem, following the
      product's existing convention. Its presence unlocks the capabilities a
      customer instance does not carry by default. Only personnel who know it
@@ -19,7 +27,7 @@ exist is. That distinction is what this module exists to make possible, and it
 is what a product security review will actually be checking.
 
 Adding a capability later (SQL browsing, log collection, guided remediation)
-means one entry in CAPABILITIES plus a conditional include_router — the shape
+means one Module declaring its own capabilities and routers — the shape
 that keeps the later phases of the roadmap cheap.
 """
 
@@ -34,12 +42,18 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 # ── Profiles ─────────────────────────────────────────────────────────────────
-LAB = "lab"
+STANDALONE = "standalone"
 EMBEDDED = "embedded"
-PROFILES = (LAB, EMBEDDED)
+PROFILES = (STANDALONE, EMBEDDED)
 
-_BOTH = (LAB, EMBEDDED)
-_LAB_ONLY = (LAB,)
+# "lab" was this profile's name before it was clear that the remote tool is a
+# shipping product in its own right rather than developer scaffolding. Accepted
+# so an existing ANALYZER_PROFILE=lab keeps working instead of silently
+# falling back; drop it once nothing sets it.
+_PROFILE_ALIASES = {"lab": STANDALONE}
+
+_BOTH = (STANDALONE, EMBEDDED)
+_STANDALONE_ONLY = (STANDALONE,)
 
 
 @dataclass(frozen=True)
@@ -58,84 +72,69 @@ class Capability:
     note: str = ""
 
 
+@dataclass(frozen=True)
+class Module:
+    """One feature area of CC Admin — a datastore, or a cross-cutting concern
+    such as log collection or the knowledge base.
+
+    A module owns its capabilities and its routers, so adding PostgreSQL means
+    one new package plus one entry in modules/__init__.py: neither main.py nor
+    this file has to learn about it. `routers` pairs each router with the
+    capability that gates it (None = always registered)."""
+
+    id: str
+    title: str
+    capabilities: tuple[Capability, ...] = ()
+    routers: tuple = ()
+
+
 # ── The registry ─────────────────────────────────────────────────────────────
-# Read access and edits to data that ALREADY EXISTS are part of debugging a
-# live system, so they ship enabled. What does not ship enabled is anything
-# that FABRICATES data — on a customer's production CC, synthetic documents
-# are indistinguishable from real ones once written, which is exactly the
-# outcome support must never cause.
-CAPABILITIES: tuple[Capability, ...] = (
-    Capability(
-        id="es.read",
-        title="Browse and query Elasticsearch/OpenSearch",
-        profiles=_BOTH,
-    ),
-    Capability(
-        id="es.connect",
-        title="Choose which Elasticsearch to connect to",
-        profiles=_LAB_ONLY,
-        note="Embedded on a CC, the datastore is the one running beside it — "
-             "ES_HOST is set by the compose file and there is nothing to pick. "
-             "A connection screen there would only invite pointing a CC's "
-             "console at someone else's cluster.",
-    ),
-    Capability(
-        id="es.doc.write",
-        title="Edit, bulk-update, bulk-delete and import documents",
-        profiles=_BOTH,
-        note="Changes existing data; gated by authorisation and audit once "
-             "those land, not by profile.",
-    ),
-    Capability(
-        id="es.index.admin",
-        title="Create and delete indices",
-        profiles=_BOTH,
-    ),
-    Capability(
-        id="es.index.duplicate",
-        title="Duplicate an index, optionally shifting its dates",
-        profiles=_LAB_ONLY,
-        unlockable=True,
-        note="Produces a synthetic copy of real data — lab/reproduction tool.",
-    ),
-    Capability(
-        id="es.artificial",
-        title="Generate artificial documents",
-        profiles=_LAB_ONLY,
-        unlockable=True,
-        note="Fabricates data outright. Never on by default at a customer.",
-    ),
-    Capability(
-        id="archive.export",
-        title="Export and archive index data",
-        profiles=_BOTH,
-        note="Moves customer data off the box — needs a data-residency policy "
-             "and an audit record in the embedded profile.",
-    ),
-    Capability(
-        id="archive.restore",
-        title="Restore an archive into an index",
-        profiles=_BOTH,
-    ),
+# Product-level capabilities only. Anything belonging to a datastore or feature
+# lives with that module and arrives via register() — see modules/es/__init__.py.
+#
+# The governing rule wherever they are declared: read access and edits to data
+# that ALREADY EXISTS are part of debugging a live system, so they ship enabled.
+# What does not is anything that FABRICATES data — on a customer's production
+# CC, synthetic documents are indistinguishable from real ones once written,
+# which is exactly the outcome support must never cause.
+CORE_CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         id="app.self_update",
         title="Check for and apply in-app updates",
-        profiles=_LAB_ONLY,
+        profiles=_STANDALONE_ONLY,
         unlockable=False,
         note="An appliance follows the CC release train; the updater cannot "
-             "reach git from a customer network.",
+             "reach git from a customer network. Standalone keeps it.",
     ),
 )
 
-_BY_ID = {c.id: c for c in CAPABILITIES}
+_BY_ID: dict[str, Capability] = {c.id: c for c in CORE_CAPABILITIES}
+
+
+def register(module: "Module") -> None:
+    """Add a module's capabilities to the registry. Called before any route is
+    registered; a duplicate id is a programming error, not a merge of two."""
+    global _state
+    for cap in module.capabilities:
+        if cap.id in _BY_ID and _BY_ID[cap.id] != cap:
+            raise ValueError(f"capability {cap.id!r} declared twice — "
+                             f"module {module.id!r} clashes with an existing one")
+        _BY_ID[cap.id] = cap
+    _state = None       # force re-resolution now the registry has grown
+
+
+def capabilities() -> tuple[Capability, ...]:
+    return tuple(_BY_ID.values())
 
 
 def capability(cap_id: str) -> Capability:
     try:
         return _BY_ID[cap_id]
     except KeyError:
-        raise KeyError(f"unknown capability {cap_id!r} — add it to "
-                       f"services/policy.CAPABILITIES") from None
+        raise KeyError(f"unknown capability {cap_id!r} — declare it in its "
+                       f"module's MODULE.capabilities, or in "
+                       f"core.policy.CORE_CAPABILITIES if it is product-level"
+                       ) from None
 
 
 # ── Resolution ───────────────────────────────────────────────────────────────
@@ -175,11 +174,12 @@ def _truthy(value: str) -> bool:
 
 
 def _resolve() -> dict:
-    profile = (settings.profile or LAB).strip().lower()
+    profile = (settings.profile or STANDALONE).strip().lower()
+    profile = _PROFILE_ALIASES.get(profile, profile)
     if profile not in PROFILES:
         logger.warning("[policy] unknown profile %r — falling back to %r",
-                       profile, LAB)
-        profile = LAB
+                       profile, STANDALONE)
+        profile = STANDALONE
 
     path = settings.policy_file
     props = _read_property_file(path)
@@ -201,7 +201,7 @@ def _resolve() -> dict:
         unlocked.add(cap_id)
 
     enabled = {
-        c.id for c in CAPABILITIES
+        c.id for c in capabilities()
         if profile in c.profiles or c.id in unlocked
     }
     return {
@@ -249,14 +249,14 @@ def snapshot() -> dict:
                 "enabled": c.id in st["enabled"],
                 "title": c.title,
             }
-            for c in CAPABILITIES
+            for c in capabilities()
         },
     }
 
 
 def log_startup() -> None:
     st = state()
-    off = sorted(c.id for c in CAPABILITIES if c.id not in st["enabled"])
+    off = sorted(c.id for c in capabilities() if c.id not in st["enabled"])
     logger.info("[policy] profile=%s · capabilities on: %s",
                 st["profile"], len(st["enabled"]))
     if st["unlocked"]:

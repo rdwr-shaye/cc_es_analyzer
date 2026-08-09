@@ -5,7 +5,7 @@ The UI polls /api/update/status (cheap — it reads a cached result) and shows a
 badge when the deployment is behind the repository. Pressing Update calls
 /api/update/apply, which either asks the host agent to pull+rebuild or does the
 fast-forward itself, depending on how this instance is deployed. See
-services/updater.py for the three modes.
+core/updater.py for the three modes.
 
 Because an update restarts the app for EVERYONE, the other connected users are
 told before it happens.
@@ -14,7 +14,7 @@ import logging
 
 from fastapi import APIRouter, Request
 
-from services import sessions, updater
+from core import sessions, updater
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/update", tags=["update"])

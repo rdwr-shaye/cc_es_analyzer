@@ -32,8 +32,8 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from services.es_client import get_client
-from routers.exports import _new_job, _finish_job, _JobCancelled, _err_text
+from modules.es.client import get_client
+from modules.es.routers.exports import _new_job, _finish_job, _JobCancelled, _err_text
 
 router = APIRouter(prefix="/api/artificial", tags=["artificial"])
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ _BULK_LINES = 2000                     # 1000 docs per bulk request
 def _guess_portion(slice_no: int, now_s: float) -> tuple[str, int]:
     """Pick the portion whose current slice number is relatively closest to
     *slice_no* (the time_slice.sh heuristic). Returns (label, seconds).
-    FALLBACK ONLY — the live catalog (services/index_discovery.py) is the
+    FALLBACK ONLY — the live catalog (modules/es/discovery.py) is the
     authoritative slice-size source; this runs when it doesn't know the family."""
     best = None
     best_score = None
@@ -113,7 +113,7 @@ def _parse_slice(index_name: str, now_s: float | None = None, es=None) -> dict |
 
     secs, source, guessed = None, None, False
     if es is not None:
-        from services.index_discovery import slice_for_index
+        from modules.es.discovery import slice_for_index
         minutes, src = slice_for_index(es, index_name)
         if minutes:
             secs, source = minutes * 60, src
@@ -410,7 +410,7 @@ def artificial_info(index_name: str):
     index template (which ES applies automatically on first write)."""
     try:
         es = get_client()
-        from routers.query import _collect_date_fields, _pick_date_field
+        from modules.es.routers.query import _collect_date_fields, _pick_date_field
         exists = _index_exists(es, index_name)
         if exists:
             # A fresh index can have an EMPTY mapping (dynamic) — still usable:
@@ -418,7 +418,7 @@ def artificial_info(index_name: str):
             all_fields = _field_types(es, index_name)
             date_fields = [n for n, _s in _collect_date_fields(es, index_name)]
         else:
-            from services.index_discovery import catalog_entry_for_index
+            from modules.es.discovery import catalog_entry_for_index
             entry = catalog_entry_for_index(es, index_name)
             if entry is None:
                 return {"error": f"index {index_name!r} not found and no CC "
@@ -623,7 +623,7 @@ def start_artificial(req: ArtificialRequest):
     if not types:
         # Not-yet-existing index: types come from the family's template so
         # random/increment values (and coercion) match what ES will apply.
-        from services.index_discovery import catalog_entry_for_index
+        from modules.es.discovery import catalog_entry_for_index
         entry = catalog_entry_for_index(es, index)
         if entry:
             types = dict(entry.get("fields", {}))
@@ -749,7 +749,7 @@ def start_artificial(req: ArtificialRequest):
 
 def _run_artificial_job(job: dict, es, plan: dict) -> None:
     import random
-    from routers.query import _scroll_hits
+    from modules.es.routers.query import _scroll_hits
     main = plan["main_field"]
     fields = plan["field_names"]
     special = plan.get("special", [])

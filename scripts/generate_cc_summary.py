@@ -17,7 +17,7 @@ override with flags or env vars.
     python3 generate_cc_summary.py --host 10.1.2.3 --port 9200 --output /tmp/s.json
     ES_HOST=... ES_PORT=... ES_USER=... ES_PASSWORD=... python3 generate_cc_summary.py
 
-This is a faithful port of routers/query.py::cc_summary + cc_summary_export; the
+This is a faithful port of modules/es/routers/query.py::cc_summary + cc_summary_export; the
 query bodies, rounding, and output key order match the service byte-for-byte
 (aside from the live `generated_at` timestamp and the `elasticsearch.host` value).
 """
@@ -73,7 +73,7 @@ class ES:
         return self._req("POST", f"/{index}/_search", body)
 
 
-# ── Helpers (verbatim from routers/query.py) ─────────────────────────────────
+# ── Helpers (verbatim from modules/es/routers/query.py) ─────────────────────────────────
 
 def _val(v):
     if v is None or str(v).strip() in ("N_A", "null", ""):
@@ -137,7 +137,7 @@ def _compute_gaps(sorted_timestamps):
     # Count every consecutive interval, INCLUDING 0-length gaps from attacks that
     # started at the same instant, so min_s can be 0 and the average reflects the
     # overall pacing across all attacks (gap_count = attacks - 1). Kept byte-for-
-    # byte in sync with _compute_gaps in routers/query.py.
+    # byte in sync with _compute_gaps in modules/es/routers/query.py.
     if len(sorted_timestamps) < 2:
         return {"attack_count": len(sorted_timestamps), "gap_count": 0,
                 "min_s": None, "max_s": None, "avg_s": None}

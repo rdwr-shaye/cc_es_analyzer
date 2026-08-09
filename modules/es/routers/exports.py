@@ -28,7 +28,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from config import settings
-from services.es_client import get_client
+from modules.es.client import get_client
 
 router = APIRouter(prefix="/api/exports", tags=["exports"])
 
@@ -159,7 +159,7 @@ def start_export(req: ExportRequest):
 
 
 def _run_export_job(job: dict, es) -> None:
-    from routers.query import _scroll_hits, _collect_top_fields, _csv_cell
+    from modules.es.routers.query import _scroll_hits, _collect_top_fields, _csv_cell
     source = _source_host(es)
     try:
         for item in job["items"]:
@@ -237,7 +237,7 @@ async def start_restore(file: UploadFile | None = File(default=None),
     assign one — a separate flag because FastAPI resolves an empty-string Form
     value to the field's default, so `id_column=""` can never reach us.
     """
-    from routers.indices import _valid_index_name
+    from modules.es.routers.indices import _valid_index_name
 
     if file is not None and file.filename:
         name = os.path.basename(file.filename)
@@ -304,7 +304,7 @@ async def start_restore(file: UploadFile | None = File(default=None),
 
 def _run_restore_job(job: dict, es, path: str, target: str,
                      id_col: str = "_id") -> None:
-    from routers.indices import _coerce_cell, _flush_batch, _MISSING
+    from modules.es.routers.indices import _coerce_cell, _flush_batch, _MISSING
     item = job["items"][0]
     meta_cols = {"_id", "_index"}
     try:
@@ -406,7 +406,7 @@ class SnapshotRestoreRequest(BaseModel):
 def _resolve_creds(host: str, ssh: SnapshotSSH | None):
     """Stored or freshly-supplied SSH credentials for *host*; None → the UI
     must prompt (need_credentials handshake)."""
-    from services import cred_store
+    from core.remote import cred_store
     if ssh is not None and ssh.password:
         if ssh.remember:
             cred_store.save(host, ssh.user or "root", ssh.password)
@@ -502,7 +502,7 @@ def _snap_cleanup(name: str, es=None, ssh=None) -> bool:
 def start_snapshot(req: SnapshotRequest):
     """Archive indices via a native snapshot: repo+snapshot named after the
     user's chosen name, zipped on the ES host, pulled into EXPORTS_DIR."""
-    from services.ssh_ops import check_login
+    from core.remote.ssh_ops import check_login
 
     name = (req.name or "").strip()
     if not _SNAP_NAME.match(name):
@@ -550,7 +550,7 @@ def start_snapshot(req: SnapshotRequest):
 
 def _run_snapshot_export_job(job: dict, es, host: str, name: str,
                              indices: list, creds: dict) -> None:
-    from services.ssh_ops import SSHSession
+    from core.remote.ssh_ops import SSHSession
     item = job["items"][0]
     p = _snap_paths(name)
     ssh = None
@@ -654,7 +654,7 @@ def _cleanup_after_failure(name: str, es, ssh, part: str) -> None:
 def start_snapshot_restore(req: SnapshotRestoreRequest):
     """Restore a snapshot archive (.zip in EXPORTS_DIR) into the machine of the
     currently-connected ES: push zip, unzip, register repo, native _restore."""
-    from services.ssh_ops import check_login
+    from core.remote.ssh_ops import check_login
 
     fname = os.path.basename(req.filename or "")
     if not fname.endswith(".zip") or not _SAFE_NAME.match(fname):
@@ -707,7 +707,7 @@ class _RestoreStalled(Exception):
 
 def _run_snapshot_restore_job(job: dict, es, host: str, name: str, creds: dict,
                               selected: list | None = None) -> None:
-    from services.ssh_ops import SSHSession
+    from core.remote.ssh_ops import SSHSession
     jid = job["id"]
     item = job["items"][0]
     p = _snap_paths(name)
@@ -1163,13 +1163,13 @@ def archive_meta(name: str):
 @router.get("/ssh-creds")
 def list_ssh_creds():
     """Hosts with remembered SSH credentials — never the secrets themselves."""
-    from services import cred_store
+    from core.remote import cred_store
     return {"hosts": cred_store.hosts()}
 
 
 @router.delete("/ssh-creds/{host}")
 def delete_ssh_creds(host: str):
-    from services import cred_store
+    from core.remote import cred_store
     return {"ok": cred_store.delete(host), "host": host}
 
 

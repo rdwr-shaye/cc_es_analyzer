@@ -25,8 +25,9 @@
     restart: always
     environment:
       # THE line that matters for security review. Without it the app falls
-      # back to the "lab" profile and would register the data-fabricating
-      # endpoints. See services/policy.py.
+      # back to the "standalone" profile — the remote tool, which carries every
+      # capability — and would register the data-fabricating endpoints.
+      # See core/policy.py.
       - "ANALYZER_PROFILE=embedded"
       - "ES_HOST=kvision-infra-efk"
       - "ES_PORT=9200"

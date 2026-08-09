@@ -18,7 +18,7 @@ function appUrl(path) {
 
 /* ── Capability policy ──────────────────────────────────────────────────
    Which features this deployment carries (GET /api/policy, backed by
-   services/policy.py). Used ONLY to avoid offering an action the server
+   core/policy.py). Used ONLY to avoid offering an action the server
    would refuse — the real control is that a disabled capability has no
    route to call. Never gate anything on this alone.
    Defaults to "on" so a failed policy fetch degrades to today's behaviour
@@ -4349,7 +4349,7 @@ function _adPlaceholder(name, type) {
 }
 
 /** Random-value kind from name + mapping type — mirror of the backend's
- *  _rand_kind (routers/artificial.py); keep the two in sync. */
+ *  _rand_kind (modules/es/routers/artificial.py); keep the two in sync. */
 function _adRandKind(name, type) {
   const l = (name || '').split('.').pop().toLowerCase();
   const isNum = /^(long|integer|short|byte|double|float|half_float|scaled_float)$/.test(type);
@@ -4412,7 +4412,7 @@ function _isoWeek(d) {
   return 1 + Math.round((t - firstThu) / (7 * 86400000));
 }
 
-/** Preview-only mirror of the backend routers/artificial.py::_derive — computes
+/** Preview-only mirror of the backend modules/es/routers/artificial.py::_derive — computes
  *  a derived value from an epoch-millis timestamp (UTC + tz offset minutes).
  *  The authoritative computation is server-side; this drives the live preview. */
 function _derivePreview(rule, tsMs, tzMin) {
@@ -4732,7 +4732,7 @@ async function createArtificialData(indexName) {
   updateEstimate();
 
   /* ── Document _id ──────────────────────────────────────────────────────────
-   * Mirrors routers/artificial.py::_build_id_rule / _doc_id: the id can only be
+   * Mirrors modules/es/routers/artificial.py::_build_id_rule / _doc_id: the id can only be
    * built from fields this job actually writes, so the picker and the preview
    * are both driven by the live form state. */
 
@@ -6693,7 +6693,7 @@ function esc(s) {
 /* ══════════════════════════════════════════════════════════════════════════
    UPDATES — "a newer version of this tool is in the repository"
    ══════════════════════════════════════════════════════════════════════════
-   The server checks the repository in the background (services/updater.py);
+   The server checks the repository in the background (core/updater.py);
    here we just render what it found and, when the deployment supports it, ask
    it to pull + restart. The update restarts the app for everyone, so the other
    connected users are notified by the server before it happens. */

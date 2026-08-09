@@ -9,8 +9,8 @@ would be affected.
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
-from services import sessions
-from services.es_client import session_target
+from core import sessions
+from modules.es.client import session_target
 
 router = APIRouter(prefix="/api/presence", tags=["presence"])
 

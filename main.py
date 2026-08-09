@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import Response
-from routers import artificial, exports, health, indices, presence, query, update
 import json
 import re
 import uvicorn
@@ -9,8 +8,10 @@ import logging
 import logging.handlers
 import os
 from config import settings
-from services import policy, sessions, updater
-from services.es_client import POOL_SIZE, reset_session, set_session
+import modules
+from core import policy, sessions, updater
+from core.routers import policy as policy_router, presence, update
+from modules.es.client import POOL_SIZE, reset_session, set_session
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 LOG_DIR  = os.path.join(os.path.dirname(__file__), "logs")
@@ -139,20 +140,21 @@ async def session_middleware(request: Request, call_next):
 
 
 # ── API Routers ───────────────────────────────────────────────────────────────
-# Capability-gated routers are included only when the running profile carries
-# them (services/policy.py). This is registration, not a runtime check: in a
-# profile without the capability the path does not exist at all — no OpenAPI
-# entry, 404 to a direct call — so there is nothing to bypass.
-app.include_router(health.router)
-app.include_router(indices.router)
-app.include_router(query.router)
-app.include_router(exports.router)
+# Assembled from whatever modules are enabled — main.py deliberately names no
+# datastore, so adding PostgreSQL is a new package under modules/ and nothing
+# here changes.
+#
+# Gating happens by REGISTRATION, not by a runtime check: in a profile without
+# the capability the path does not exist at all — no OpenAPI entry, 404 to a
+# direct call — so there is nothing to bypass. See core/policy.py.
+app.include_router(policy_router.router)
 app.include_router(presence.router)
 
-if policy.enabled("es.index.duplicate"):
-    app.include_router(indices.gated_router)
-if policy.enabled("es.artificial"):
-    app.include_router(artificial.router)
+for module in modules.discover():
+    for router, gating_capability in module.routers:
+        if gating_capability is None or policy.enabled(gating_capability):
+            app.include_router(router)
+
 if policy.enabled("app.self_update"):
     app.include_router(update.router)
 
@@ -256,7 +258,7 @@ if __name__ == "__main__":
 
     ssl_kwargs = {}
     if settings.service_ssl:
-        from services.tls import ensure_cert
+        from core.tls import ensure_cert
         cert, key = ensure_cert(settings.ssl_certfile, settings.ssl_keyfile)
         ssl_kwargs = {"ssl_certfile": cert, "ssl_keyfile": key}
         logger.info("Serving HTTPS on https://%s:%s (cert=%s)",

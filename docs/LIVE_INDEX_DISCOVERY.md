@@ -5,7 +5,7 @@ including families that have no live index yet — with the **correct slice dura
 and **field mappings**, extracted entirely from a live machine. No source-code access required.
 
 This is the authoritative replacement for the slice-length *guessing* currently done in
-`routers/artificial.py` (name-token heuristics + `scripts/time_slice.sh` relative-closeness).
+`modules/es/routers/artificial.py` (name-token heuristics + `scripts/time_slice.sh` relative-closeness).
 Everything below was validated against a live QA machine (`10.205.189.20`, cluster `vision-es`,
 OpenSearch 1.3.14) and cross-checked against the KVision source (`kvision_libs`).
 

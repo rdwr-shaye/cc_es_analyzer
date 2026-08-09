@@ -4,7 +4,7 @@ Thin paramiko wrapper for the snapshot-archive flows.
 The snapshot files are written by ES/OpenSearch itself on the ES MACHINE; this
 module moves them between that machine and the analyzer's storage (zip, SFTP,
 cleanup) over SSH as root. Connections are short-lived — one per job phase set —
-and credentials come from services.cred_store or a one-time UI prompt.
+and credentials come from core.remote.cred_store or a one-time UI prompt.
 """
 import logging
 import os

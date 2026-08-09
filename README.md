@@ -249,7 +249,7 @@ The app knows its own version (the `VERSION` file at the repo root, also shown i
 navbar) and tells users when the repository has a newer one — a green **Update to x.y.z**
 badge that opens a dialog listing what changed, with a one-click **Update now**.
 
-How that works depends on how the instance is deployed (`services/updater.py` picks
+How that works depends on how the instance is deployed (`core/updater.py` picks
 automatically; the mode is shown in the version tooltip):
 
 | Mode | When | Check | One-click update |

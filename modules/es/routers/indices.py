@@ -6,9 +6,9 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query, UploadFile, File
 from pydantic import BaseModel
-from services.es_client import get_client
-from services.cc_indices import CC_INDEX_CATALOG, CATEGORIES, resolve_prefix
-from services.field_types import date_fields, exact_field_map, resolve_exact
+from modules.es.client import get_client
+from modules.es.catalog import CC_INDEX_CATALOG, CATEGORIES, resolve_prefix
+from modules.es.field_types import date_fields, exact_field_map, resolve_exact
 
 router = APIRouter(prefix="/api/indices", tags=["indices"])
 
@@ -89,7 +89,7 @@ def possible_indices(refresh: bool = Query(default=False)):
     name / category / color / description; the LIVE data wins for slice size,
     doc types, and field mappings.
     """
-    from services.index_discovery import discover
+    from modules.es.discovery import discover
     try:
         es = get_client()
         cat = discover(es, refresh=refresh)
@@ -372,7 +372,7 @@ def duplicate_index(index_name: str, req: DuplicateIndexRequest):
     epoch-millisecond numbers and ISO-8601 strings are both handled; values
     that can't be parsed are copied unchanged.
     """
-    from routers.query import _collect_date_fields, _scroll_hits
+    from modules.es.routers.query import _collect_date_fields, _scroll_hits
 
     source = (index_name or "").strip()
     target = (req.target or "").strip()

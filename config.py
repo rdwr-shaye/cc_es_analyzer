@@ -21,15 +21,18 @@ class Settings(BaseSettings):
     ssl_certfile: str = Field(default="", alias="SSL_CERTFILE")
     ssl_keyfile:  str = Field(default="", alias="SSL_KEYFILE")
 
-    # ── Deployment profile (services/policy.py) ──────────────────────────────
-    # "lab" (default) carries every capability; "embedded" is the copy that
-    # ships inside a CyberController and leaves the data-fabricating features
-    # unregistered. The CC's docker-compose is what pins an appliance to
-    # "embedded" — defaulting to "lab" keeps a plain `python main.py` working.
-    profile: str = Field(default="lab", alias="ANALYZER_PROFILE")
+    # ── Deployment profile (core/policy.py) ──────────────────────────────
+    # Two supported modes, both products. "standalone" (default) is the remote
+    # tool an engineer points at a CC over the network — the only way to reach
+    # the CCs already in the field, which do not carry the embedded build.
+    # "embedded" is the copy that ships inside a CyberController and leaves the
+    # data-fabricating features unregistered. The CC's docker-compose is what
+    # pins an appliance to "embedded"; defaulting to "standalone" keeps a plain
+    # `python main.py` working.
+    profile: str = Field(default="standalone", alias="ANALYZER_PROFILE")
 
     # Property file on the system filesystem that unlocks capabilities the
-    # profile does not carry (see services/policy.py). Absent on every
+    # profile does not carry (see core/policy.py). Absent on every
     # instance except those an entitled operator has deliberately unlocked.
     # The directory is the CC's existing convention — 26 sibling .properties
     # files live there (root:root 0644), so operators already know it and the
@@ -52,7 +55,7 @@ class Settings(BaseSettings):
     snap_host_dir: str = Field(default="/opt/radware/tmp/es", alias="SNAP_HOST_DIR")
     snap_es_dir: str = Field(default="/usr/share/opensearch/backup", alias="SNAP_ES_DIR")
 
-    # ── Update checks (services/updater.py) ──────────────────────────────────
+    # ── Update checks (core/updater.py) ──────────────────────────────────
     # Directory shared with the host updater agent (deploy/update_agent.sh):
     # it reports what `git fetch` found there, and we drop the update request
     # into it. Bind-mounted into the container by docker-compose.yml.

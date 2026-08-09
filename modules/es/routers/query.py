@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
-from services.es_client import get_client, update_client
+from modules.es.client import get_client, update_client
 import json
 import logging
 import re
@@ -55,7 +55,7 @@ def connect(req: ConnectionRequest):
          box blocks the ES port but permits SSH, or ES only listens on the
          remote loopback).
     """
-    from services.ssh_tunnel import start_tunnel, stop_tunnel
+    from core.remote.ssh_tunnel import start_tunnel, stop_tunnel
 
     def _connected(info, **extra):
         return {"connected": True,
@@ -82,7 +82,7 @@ def connect(req: ConnectionRequest):
     # ── 2) SSH-open the ES port on the box (only if not already open), then
     #       retry the direct connection. If it was already open, opening again
     #       won't help — skip straight to the tunnel.
-    from services.ssh_opener import ensure_port_open_via_ssh
+    from core.remote.ssh_opener import ensure_port_open_via_ssh
     logger.info("[connect] direct failed; checking/opening port %s on %s via SSH",
                 req.port, req.host)
     open_res = ensure_port_open_via_ssh(

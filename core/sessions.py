@@ -24,7 +24,7 @@ import time
 import uuid
 from collections import deque
 
-from services.es_client import drop_session, session_target
+from modules.es.client import drop_session, session_target
 
 logger = logging.getLogger(__name__)
 
