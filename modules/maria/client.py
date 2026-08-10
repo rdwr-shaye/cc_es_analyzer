@@ -30,6 +30,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 import pymysql
+from pymysql.constants import FIELD_TYPE
 from pymysql.cursors import DictCursor
 
 from config import settings
@@ -208,11 +209,16 @@ _TUNNEL = "maria"
 
 
 @contextmanager
-def connection(schema: str = ""):
-    """A read-only connection to the CC's MariaDB.
+def connection(schema: str = "", readonly: bool = True):
+    """A connection to the CC's MariaDB, read-only unless asked otherwise.
 
     `schema` only sets the default database for unqualified names; it grants
     nothing, and every catalog query names its schema explicitly anyway.
+
+    `readonly=False` exists for exactly one caller — modules/maria/writes.py,
+    reached only when the `maria.write` capability is unlocked, whose route is
+    not registered otherwise. It is a keyword with a read-only default so that
+    a connection nobody deliberately asked to write through cannot write.
     """
     creds = credentials.resolve()
     cc_host, why = resolve_host()
@@ -252,9 +258,10 @@ def connection(schema: str = ""):
 
     try:
         with conn.cursor() as cur:
-            # Layer 1. Belt and braces: the session cannot write, and neither
-            # can this transaction.
-            cur.execute("SET SESSION TRANSACTION READ ONLY")
+            if readonly:
+                # Layer 1. Belt and braces: the session cannot write, and
+                # neither can this transaction.
+                cur.execute("SET SESSION TRANSACTION READ ONLY")
             cur.execute(f"SET SESSION max_statement_time={int(settings.maria_timeout_s)}")
         yield conn
     finally:
@@ -270,6 +277,34 @@ def connection(schema: str = ""):
 # JOB_DATA holds serialised Java objects (they start 0xAC 0xED), so this is the
 # normal case for that table, not an exotic one.
 BLOB_KEY = "__blob__"
+
+
+def bit_value(v):
+    """A BIT column as the number it represents.
+
+    The driver hands BIT back as raw bytes — b"\\x01" for a bit(1) — which is
+    technically what the wire carries and useless to read. Untreated it reached
+    _jsonable(), was classified as binary, and a boolean flag like
+    `c_user_mgt.is_admin` rendered as a 0.0 KB download link that could never
+    have worked: the server does not count `bit` among its blob types, so the
+    download would have been refused for a column the UI had just offered.
+
+    Big-endian, and width-agnostic, so bit(1) and bit(64) both come back as an
+    integer — the same thing you would get from CAST(col AS UNSIGNED).
+    """
+    if v is None:
+        return None
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        return int.from_bytes(bytes(v), "big")
+    return int(v)
+
+
+def _bit_columns(description) -> set[str]:
+    """Names of the BIT columns in a result set, from the driver's own
+    per-column type codes rather than from a second catalog lookup — this has
+    to be right for arbitrary SQL from the query screen too, where there is no
+    single table to look up."""
+    return {d[0] for d in (description or ()) if d[1] == FIELD_TYPE.BIT}
 
 
 def _jsonable(value):
@@ -303,11 +338,13 @@ def run(sql: str, params: tuple = (), schema: str = "",
             try:
                 cur.execute(body, params or None)
                 rows = cur.fetchmany(cap + 1)
+                bits = _bit_columns(cur.description)
             except pymysql.Error as exc:
                 raise MariaError(str(exc)) from exc
 
     truncated = len(rows) > cap
-    clean = [{k: _jsonable(v) for k, v in row.items()} for row in rows[:cap]]
+    clean = [{k: (bit_value(v) if k in bits else _jsonable(v))
+              for k, v in row.items()} for row in rows[:cap]]
     return clean, truncated
 
 

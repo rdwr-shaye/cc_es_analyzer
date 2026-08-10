@@ -112,9 +112,13 @@ def maria_columns(schema: str = Query(...), table: str = Query(...)):
     """Column definitions for one table."""
     try:
         rows, _ = run(
+            # `extra` and `data_type` travel with the definition so the UI can
+            # decide which cells to OFFER as editable without a round-trip per
+            # column. It is not the authority on what may be written —
+            # modules/maria/writes.py re-checks all of it server-side.
             "SELECT column_name AS name, column_type AS type, is_nullable AS nullable, "
             "       column_key AS key_type, column_default AS default_value, "
-            "       column_comment AS comment "
+            "       column_comment AS comment, extra, data_type "
             "FROM information_schema.columns "
             "WHERE table_schema = %s AND table_name = %s "
             "ORDER BY ordinal_position",
@@ -155,6 +159,161 @@ def maria_sample(schema: str = Query(...), table: str = Query(...),
             "rows": rows, "count": len(rows), "truncated": truncated,
             "primary_key": _primary_key(schema, table),
             "blob_columns": _blob_columns(schema, table)}
+
+
+@router.get("/keys")
+def maria_keys(schema: str = Query(...), table: str = Query(...)):
+    """What the PRI / UNI / MUL flags on a column actually mean for this table.
+
+    A key badge on its own says a column is indexed but not what it is indexed
+    WITH — and on a composite key that is the whole question. So this returns
+    the indexes with their column order, plus the relationships:
+
+      * ``outbound`` — this table's declared foreign keys.
+      * ``inbound``  — other tables whose foreign keys point AT this one, which
+        is what tells you a row cannot simply be deleted.
+      * ``candidates`` — same-named columns elsewhere in the schema.
+
+    That last one exists because of what the CC's data model actually is: a
+    schema can carry a full set of MUL columns and no FOREIGN KEY constraints
+    at all, and then ``outbound``/``inbound`` are both empty and the screen
+    would imply the table is unrelated to anything. Name matching is a guess,
+    and is labelled a guess — but ``device_id`` in eleven tables is exactly the
+    join an engineer is looking for. The two are kept in separate fields so
+    nobody mistakes the inference for a declaration.
+    """
+    exists, err = _table_exists(schema, table)
+    if not exists:
+        return {"error": err or f"no table {schema}.{table} on this CC"}
+
+    try:
+        idx_rows, _ = run(
+            "SELECT index_name AS name, non_unique, seq_in_index, column_name AS col "
+            "FROM information_schema.statistics "
+            "WHERE table_schema = %s AND table_name = %s "
+            "ORDER BY index_name, seq_in_index",
+            (schema, table), limit=1000)
+
+        out_rows, _ = run(
+            "SELECT k.constraint_name AS name, k.column_name AS col, "
+            "       k.referenced_table_schema AS ref_schema, "
+            "       k.referenced_table_name AS ref_table, "
+            "       k.referenced_column_name AS ref_col, k.ordinal_position AS pos "
+            "FROM information_schema.key_column_usage k "
+            "WHERE k.table_schema = %s AND k.table_name = %s "
+            "  AND k.referenced_table_name IS NOT NULL "
+            "ORDER BY k.constraint_name, k.ordinal_position",
+            (schema, table), limit=500)
+
+        in_rows, _ = run(
+            "SELECT k.constraint_name AS name, k.table_schema AS from_schema, "
+            "       k.table_name AS from_table, k.column_name AS from_col, "
+            "       k.referenced_column_name AS col, k.ordinal_position AS pos "
+            "FROM information_schema.key_column_usage k "
+            "WHERE k.referenced_table_schema = %s AND k.referenced_table_name = %s "
+            "ORDER BY k.table_name, k.constraint_name, k.ordinal_position",
+            (schema, table), limit=500)
+    except MariaError as exc:
+        return {"error": str(exc)}
+
+    # Indexes, rebuilt from the one-row-per-column listing.
+    indexes: dict[str, dict] = {}
+    for r in idx_rows:
+        entry = indexes.setdefault(r["name"], {
+            "name": r["name"],
+            "unique": not int(r["non_unique"] or 0),
+            "primary": r["name"] == "PRIMARY",
+            "columns": [],
+        })
+        entry["columns"].append(r["col"])
+    index_list = sorted(indexes.values(),
+                        key=lambda i: (not i["primary"], not i["unique"], i["name"]))
+
+    outbound = _group_fk(out_rows, lambda r: {
+        "ref_schema": r["ref_schema"], "ref_table": r["ref_table"]},
+        col_key="col", ref_key="ref_col")
+    inbound = _group_fk(in_rows, lambda r: {
+        "from_schema": r["from_schema"], "from_table": r["from_table"]},
+        col_key="from_col", ref_key="col")
+
+    return {
+        "schema": schema, "table": table,
+        "indexes": index_list,
+        "outbound": outbound,
+        "inbound": inbound,
+        "declared": bool(outbound or inbound),
+        "candidates": _candidate_relations(schema, table, index_list),
+    }
+
+
+def _group_fk(rows: list[dict], ident, col_key: str, ref_key: str) -> list[dict]:
+    """Collapse one-row-per-column FK listings into one entry per constraint,
+    preserving column order so a composite key reads correctly."""
+    grouped: dict[tuple, dict] = {}
+    for r in rows:
+        info = ident(r)
+        gid = (r["name"],) + tuple(info.values())
+        entry = grouped.setdefault(gid, {"constraint": r["name"], **info,
+                                         "columns": [], "ref_columns": []})
+        entry["columns"].append(r[col_key])
+        entry["ref_columns"].append(r[ref_key])
+    return list(grouped.values())
+
+
+# Cap on how many tables a single candidate column will name. A column called
+# `id` or `name` exists nearly everywhere, and listing 90 tables is noise that
+# buries the columns where the match means something.
+_CANDIDATE_TABLE_CAP = 25
+
+
+def _candidate_relations(schema: str, table: str,
+                         indexes: list[dict]) -> list[dict]:
+    """Same-named columns in other tables of this schema, for the indexed
+    columns of this one. An inference, never presented as a declaration.
+
+    Restricted to columns that are part of an index here: an unindexed column
+    sharing a name is far more likely to be a coincidence (`name`, `status`)
+    than a join, and including them made the list useless on vision_ng.
+    """
+    keyed: list[str] = []
+    for idx in indexes:
+        for col in idx["columns"]:
+            if col not in keyed:
+                keyed.append(col)
+    if not keyed:
+        return []
+
+    placeholders = ", ".join(["%s"] * len(keyed))
+    try:
+        rows, _ = run(
+            f"SELECT column_name AS col, table_name AS name "
+            f"FROM information_schema.columns "
+            f"WHERE table_schema = %s AND table_name <> %s "
+            f"  AND column_name IN ({placeholders}) "
+            f"ORDER BY column_name, table_name",
+            (schema, table, *keyed), limit=5000)
+    except MariaError:
+        return []
+
+    by_col: dict[str, list[str]] = {}
+    for r in rows:
+        by_col.setdefault(r["col"], []).append(r["name"])
+
+    out = []
+    for col in keyed:
+        tables = by_col.get(col, [])
+        if not tables:
+            continue
+        out.append({
+            "column": col,
+            "count": len(tables),
+            "tables": tables[:_CANDIDATE_TABLE_CAP],
+            "truncated": len(tables) > _CANDIDATE_TABLE_CAP,
+        })
+    # Fewest matches first: a column in 2 other tables is a far stronger signal
+    # about the data model than one in 60.
+    out.sort(key=lambda c: c["count"])
+    return out
 
 
 def _primary_key(schema: str, table: str) -> list[str]:

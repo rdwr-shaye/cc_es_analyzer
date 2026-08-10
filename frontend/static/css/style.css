@@ -909,6 +909,195 @@ body {
   color: var(--bs-secondary-color, #6c757d);
   margin-top: 2px;
 }
+
+/* ── MariaDB browser: three panes filling the viewport ──────────────────
+   Same fill-to-bottom approach as #view-index and #view-attacks, but the
+   scrollers are three side-by-side pane bodies rather than one table, so the
+   flex chain has to run through the strip, each pane, its card and the card
+   body. min-height/min-width:0 at every level is what actually permits the
+   shrink — without them a flex item refuses to go below its content size and
+   the panes push past the bottom of the screen instead of scrolling. */
+#view-maria {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.maria-panes {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+.maria-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  flex: 0 0 auto;
+  width: 23%;                 /* starting widths; the splitter overwrites these */
+}
+#mariaPaneTables { width: 30%; }
+/* The detail pane takes whatever the other two leave, so the strip always
+   spans the full width no matter where the splitters were dragged to. */
+.maria-pane-grow { flex: 1 1 auto; width: auto; }
+.maria-pane > .card {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 6px;
+}
+.maria-pane > .card > .card-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+/* The detail pane's body is a column (columns block · relations · grid) and
+   must NOT scroll as a whole — the grid inside it does, which is what lets the
+   grid's header stay pinned while rows move under it. */
+.maria-pane > .card > .card-body.maria-detail-body {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Splitters ──────────────────────────────────────────────────────────
+   A 7px hit area with a 1px visual line: anything thinner is genuinely hard
+   to grab, and the wider target does not have to look wide. */
+.maria-splitter {
+  flex: 0 0 7px;
+  cursor: col-resize;
+  position: relative;
+  background: transparent;
+  align-self: stretch;
+}
+.maria-splitter::after {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; left: 3px;
+  width: 1px;
+  background: var(--bs-border-color, rgba(0,0,0,.12));
+  transition: background .12s ease, box-shadow .12s ease;
+}
+.maria-splitter:hover::after,
+.maria-splitter:focus-visible::after,
+.maria-splitter.dragging::after {
+  background: var(--ops-blue, #0052CC);
+  box-shadow: 0 0 0 1px rgba(0, 82, 204, .25);
+}
+.maria-splitter:focus-visible { outline: none; }
+/* While dragging, the pointer is captured and may travel over text and
+   iframes; killing selection stops the whole page highlighting behind it. */
+body.maria-resizing { cursor: col-resize; user-select: none; }
+
+/* ── Detail pane internals ──────────────────────────────────────────────
+   The three stacked blocks compete for one pane's height, and the rows grid
+   must win: it is what the screen is for. So the two upper sections SHRINK
+   (`0 1 auto` + min-height:0) and scroll internally, while the rows section
+   keeps a floor. With `0 0 auto` here the sections refused to give way, took
+   34vh each, and drove the grid to zero height and out of the pane entirely. */
+.maria-detail-section {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.maria-detail-head { flex: 0 0 auto; }
+.maria-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--bs-tertiary-bg, #f6f8fa);
+  border: 0;
+  border-bottom: 1px solid var(--bs-border-color, rgba(0,0,0,.08));
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  color: var(--bs-secondary-color, #6c757d);
+  text-align: left;
+}
+button.maria-detail-head { cursor: pointer; }
+button.maria-detail-head:hover { background: rgba(0, 82, 204, .07); }
+.maria-detail-head .ops-caret { margin-left: auto; }
+.maria-detail-head.collapsed .ops-caret { transform: rotate(-90deg); }
+/* Collapsed: the body is removed from the flow entirely so the rows grid
+   claims the height, which is the point of collapsing it. */
+.maria-detail-body-section {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: auto;
+  max-height: 34vh;
+}
+.maria-detail-body-section.d-none { display: none !important; }
+
+/* The rows grid is the one part that grows, so the pane always ends at the
+   bottom of the screen regardless of how much is collapsed above it. The
+   floor is what guarantees it never gets squeezed out by the blocks above. */
+.maria-rows-section {
+  flex: 1 1 auto;
+  min-height: 132px;
+  display: flex;
+  flex-direction: column;
+}
+.maria-grid-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+/* Pinned header. Opaque background is load-bearing — rows scrolling under a
+   translucent header is unreadable. */
+.maria-grid thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #212529;
+  color: #fff;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.maria-grid tbody td { vertical-align: top; }
+
+/* An edited cell, until the row is reloaded. */
+.maria-cell-edited { background: rgba(25, 135, 84, .13); }
+.maria-cell-editable { cursor: text; }
+.maria-cell-editable:hover { box-shadow: inset 0 0 0 1px rgba(0, 82, 204, .45); }
+.maria-cell-input {
+  width: 100%;
+  min-width: 90px;
+  font: inherit;
+  padding: 1px 3px;
+  border: 1px solid var(--ops-blue, #0052CC);
+  border-radius: 3px;
+}
+
+/* ── Relations ──────────────────────────────────────────────────────── */
+.maria-rel-row {
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--bs-border-color, rgba(0,0,0,.06));
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.maria-rel-row:last-child { border-bottom: 0; }
+.maria-chip {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--bs-secondary-bg, #e9ecef);
+  font-family: var(--bs-font-monospace, monospace);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+.maria-chip-link {
+  background: rgba(0, 82, 204, .1);
+  color: var(--ops-blue, #0052CC);
+  border: 0;
+  cursor: pointer;
+}
+.maria-chip-link:hover { background: rgba(0, 82, 204, .2); }
 .ops-caret { font-size: 9px; transition: transform .15s ease; opacity: .75; }
 .ops-db-toggle.collapsed .ops-caret { transform: rotate(-90deg); }
 .ops-db-dot { width: 7px; height: 7px; }

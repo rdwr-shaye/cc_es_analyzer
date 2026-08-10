@@ -83,6 +83,7 @@ _MANIPULATIONS: list[tuple[str, re.Pattern, str]] = [
     ("POST",   re.compile(r"^/api/docs/bulk-update$"),              "modified query results"),
     ("POST",   re.compile(r"^/api/artificial$"),                    "generated artificial data"),
     ("POST",   re.compile(r"^/api/exports/restore$"),               "restored an archive"),
+    ("POST",   re.compile(r"^/api/maria/cell$"),                    "edited a MariaDB cell"),
 ]
 
 

@@ -1020,36 +1020,51 @@
 
       <div id="mariaError" class="alert alert-warning py-2 px-3 small d-none"></div>
 
-      <div class="row g-2">
-        <div class="col-12 col-lg-3">
-          <div class="card h-100">
+      <!-- Three panes filling the viewport, separated by draggable splitters.
+           Widths are inline because the splitter writes them there; the CSS
+           only supplies the starting values. -->
+      <div class="maria-panes" id="mariaPanes">
+        <div class="maria-pane" id="mariaPaneSchemas">
+          <div class="card">
             <div class="card-header py-1 px-2 small fw-semibold text-secondary">Schemas</div>
-            <div class="card-body p-0" id="mariaSchemas" style="max-height:70vh;overflow:auto;">
+            <div class="card-body p-0" id="mariaSchemas">
               <div class="text-secondary small p-3">Loading…</div>
             </div>
           </div>
         </div>
 
-        <div class="col-12 col-lg-4">
-          <div class="card h-100">
+        <div class="maria-splitter" data-split="0" role="separator"
+             tabindex="0" aria-orientation="vertical"
+             title="Drag to resize · double-click to reset"></div>
+
+        <div class="maria-pane" id="mariaPaneTables">
+          <div class="card">
             <div class="card-header py-1 px-2 d-flex align-items-center gap-2">
-              <span class="small fw-semibold text-secondary" id="mariaTablesTitle">Tables</span>
+              <span class="small fw-semibold text-secondary text-truncate" id="mariaTablesTitle">Tables</span>
               <input id="mariaTableSearch" type="text" class="form-control form-control-sm ms-auto"
                      placeholder="Filter…" oninput="renderMariaTables()"
                      style="width:110px;font-size:.72rem;padding:2px 6px;">
             </div>
-            <div class="card-body p-0" id="mariaTables" style="max-height:70vh;overflow:auto;">
+            <div class="card-body p-0" id="mariaTables">
               <div class="text-secondary small p-3">Pick a schema.</div>
             </div>
           </div>
         </div>
 
-        <div class="col-12 col-lg-5">
-          <div class="card h-100">
-            <div class="card-header py-1 px-2 small fw-semibold text-secondary" id="mariaDetailTitle">
-              Table
+        <div class="maria-splitter" data-split="1" role="separator"
+             tabindex="0" aria-orientation="vertical"
+             title="Drag to resize · double-click to reset"></div>
+
+        <div class="maria-pane maria-pane-grow" id="mariaPaneDetail">
+          <div class="card">
+            <div class="card-header py-1 px-2 d-flex align-items-center gap-2">
+              <span class="small fw-semibold text-secondary text-truncate"
+                    id="mariaDetailTitle">Table</span>
             </div>
-            <div class="card-body p-0" id="mariaDetail" style="max-height:70vh;overflow:auto;">
+            <!-- Not a single scroller: the detail pane is itself a column of
+                 (columns block · relations · rows grid), and only the grid
+                 scrolls, so its header can stay pinned. -->
+            <div class="card-body p-0 maria-detail-body" id="mariaDetail">
               <div class="text-secondary small p-3">Pick a table.</div>
             </div>
           </div>

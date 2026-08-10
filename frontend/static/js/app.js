@@ -2507,6 +2507,10 @@ function onConnected(settings, info) {
   loadMariaHealth();
   mariaSchemas = [];        // they belonged to the previous CC
   mariaTableList = [];
+  mariaSchema = ''; mariaTable = '';
+  // The detail pane too, or the new CC's screen opens showing the previous
+  // one's columns and rows under a heading that names neither.
+  mariaColumns = []; mariaSample = null; mariaRelations = null;
 
   // The store's own identity, on the store's own row.
   const meta = document.getElementById('db-es-meta');
@@ -6782,6 +6786,32 @@ let mariaSchemas   = [];
 let mariaTableList = [];
 let mariaSchema    = '';     // selected schema
 let mariaTable     = '';     // selected table
+let mariaColumns   = [];     // column definitions for the selected table
+let mariaSample    = null;   // last /sample payload for the selected table
+let mariaRelations = null;   // last /keys payload for the selected table
+
+/* Which columns are hidden, per table: 'schema.table' -> [names]. Kept per
+   table because the useful subset of device_interface says nothing about the
+   useful subset of quartz's triggers, and one global hidden-set would apply
+   the wrong one to both. */
+let mariaHiddenCols = _mariaLoad('ccadmin.maria.hiddenCols', {});
+/* Collapsed state of the detail sections, and the pane widths. Remembered
+   because both are a working preference, not a per-visit choice. */
+let mariaCollapsed  = _mariaLoad('ccadmin.maria.collapsed', {});
+let mariaPaneWidths = _mariaLoad('ccadmin.maria.paneWidths', null);
+
+function _mariaLoad(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
+  catch { return fallback; }
+}
+function _mariaSave(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode */ }
+}
+
+function _mariaTableKey() { return `${mariaSchema}.${mariaTable}`; }
+function _mariaHiddenSet() {
+  return new Set(mariaHiddenCols[_mariaTableKey()] || []);
+}
 
 /* Delegated once on the panes rather than per row: the lists are re-rendered
    on every filter keystroke, and re-binding hundreds of listeners each time is
@@ -6801,6 +6831,101 @@ function initMariaPanes() {
     const btn = ev.target.closest('[data-blob-qs]');
     if (btn) { ev.preventDefault(); showBlobViewer(btn.dataset.blobQs); }
   });
+
+  const detail = document.getElementById('mariaDetail');
+  detail?.addEventListener('click', ev => {
+    const head = ev.target.closest('[data-sect]');
+    if (head) { toggleMariaSection(head.dataset.sect); return; }
+    // Jump to a related table from the relations block.
+    const jump = ev.target.closest('[data-goto-table]');
+    if (jump) { selectMariaTable(jump.dataset.gotoTable); return; }
+    if (ev.target.closest('[data-maria-cols]')) openMariaColumnPicker();
+  });
+  // Double-click to edit, so a single click can still select text in a cell.
+  detail?.addEventListener('dblclick', ev => {
+    const td = ev.target.closest('td[data-editcol]');
+    if (td) beginMariaCellEdit(td);
+  });
+
+  initMariaSplitters();
+}
+
+/* ── Resizable panes ──────────────────────────────────────────────────────
+   Pointer events rather than mouse events, and setPointerCapture, so a fast
+   drag that outruns the cursor keeps delivering moves to the splitter instead
+   of dropping them on whatever element the pointer crossed. */
+function initMariaSplitters() {
+  const strip = document.getElementById('mariaPanes');
+  if (!strip) return;
+  const panes = [document.getElementById('mariaPaneSchemas'),
+                 document.getElementById('mariaPaneTables')];
+
+  if (Array.isArray(mariaPaneWidths)) {
+    panes.forEach((p, i) => { if (p && mariaPaneWidths[i]) p.style.width = mariaPaneWidths[i] + 'px'; });
+  }
+
+  strip.querySelectorAll('.maria-splitter').forEach(sp => {
+    const idx  = parseInt(sp.dataset.split, 10);
+    const pane = panes[idx];
+    if (!pane) return;
+
+    // Reset to the CSS defaults, for when a drag has left the layout unusable.
+    sp.addEventListener('dblclick', () => {
+      panes.forEach(p => { if (p) p.style.width = ''; });
+      mariaPaneWidths = null;
+      _mariaSave('ccadmin.maria.paneWidths', null);
+    });
+
+    sp.addEventListener('pointerdown', ev => {
+      ev.preventDefault();
+      const startX = ev.clientX;
+      const startW = pane.getBoundingClientRect().width;
+      sp.setPointerCapture(ev.pointerId);
+      sp.classList.add('dragging');
+      document.body.classList.add('maria-resizing');
+
+      const onMove = e => {
+        // Floors keep a pane from being dragged to nothing (from which it
+        // cannot be dragged back); the ceiling keeps the detail pane usable.
+        const max = Math.max(160, strip.getBoundingClientRect().width - 320);
+        pane.style.width = Math.min(max, Math.max(140, startW + e.clientX - startX)) + 'px';
+      };
+      const onUp = () => {
+        sp.removeEventListener('pointermove', onMove);
+        sp.removeEventListener('pointerup', onUp);
+        sp.removeEventListener('pointercancel', onUp);
+        sp.classList.remove('dragging');
+        document.body.classList.remove('maria-resizing');
+        mariaPaneWidths = panes.map(p => p ? Math.round(p.getBoundingClientRect().width) : 0);
+        _mariaSave('ccadmin.maria.paneWidths', mariaPaneWidths);
+      };
+      sp.addEventListener('pointermove', onMove);
+      sp.addEventListener('pointerup', onUp);
+      sp.addEventListener('pointercancel', onUp);
+    });
+
+    // Keyboard: a splitter that can only be dragged is unreachable without a
+    // pointer, and these panes are the whole navigation of the screen.
+    sp.addEventListener('keydown', ev => {
+      const step = ev.shiftKey ? 40 : 12;
+      if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+      ev.preventDefault();
+      const w = pane.getBoundingClientRect().width + (ev.key === 'ArrowRight' ? step : -step);
+      const max = Math.max(160, strip.getBoundingClientRect().width - 320);
+      pane.style.width = Math.min(max, Math.max(140, w)) + 'px';
+      mariaPaneWidths = panes.map(p => p ? Math.round(p.getBoundingClientRect().width) : 0);
+      _mariaSave('ccadmin.maria.paneWidths', mariaPaneWidths);
+    });
+  });
+}
+
+function toggleMariaSection(name) {
+  mariaCollapsed[name] = !mariaCollapsed[name];
+  _mariaSave('ccadmin.maria.collapsed', mariaCollapsed);
+  const head = document.querySelector(`[data-sect="${name}"]`);
+  const body = document.querySelector(`[data-sect-body="${name}"]`);
+  head?.classList.toggle('collapsed', !!mariaCollapsed[name]);
+  body?.classList.toggle('d-none', !!mariaCollapsed[name]);
 }
 
 /** Decoded view of one binary column value. */
@@ -6990,9 +7115,10 @@ async function selectMariaTable(name) {
   pane.innerHTML = '<div class="text-secondary small p-3">Loading…</div>';
 
   const qs = `schema=${encodeURIComponent(mariaSchema)}&table=${encodeURIComponent(name)}`;
-  const [cols, sample] = await Promise.all([
+  const [cols, sample, keys] = await Promise.all([
     api(`/api/maria/columns?${qs}`),
     api(`/api/maria/sample?${qs}&size=25`),
+    api(`/api/maria/keys?${qs}`),
   ]);
 
   if (mariaTable !== name) return;      // superseded by a later click
@@ -7002,35 +7128,246 @@ async function selectMariaTable(name) {
     return;
   }
 
-  const colRows = (cols.columns || []).map(c => `
+  mariaColumns   = cols.columns || [];
+  mariaSample    = (sample && !sample.error) ? sample : null;
+  mariaRelations = (keys && !keys.error) ? keys : null;
+  renderMariaDetail(sample && sample.error ? sample.error : '');
+}
+
+/** The detail pane: columns, relations, rows. Split from selectMariaTable so
+ *  hiding a column or editing a cell can redraw without re-fetching. */
+function renderMariaDetail(sampleError) {
+  const pane = document.getElementById('mariaDetail');
+  if (!pane) return;
+
+  const rowsHtml = sampleError
+    ? `<div class="text-danger small p-2">${esc(sampleError)}</div>`
+    : _mariaTable(mariaSample?.columns || [], mariaSample?.rows || [],
+                  mariaSample?.truncated,
+                  {schema: mariaSchema, table: mariaTable,
+                   primaryKey: mariaSample?.primary_key || [],
+                   blobColumns: mariaSample?.blob_columns || [],
+                   hidden: _mariaHiddenSet(), editable: true});
+
+  const hidden = _mariaHiddenSet();
+  const total  = (mariaSample?.columns || []).length;
+  const shown  = total - [...hidden].filter(c => (mariaSample?.columns || []).includes(c)).length;
+
+  pane.innerHTML = `
+    <div class="maria-detail-section">
+      ${_mariaHead('columns', `Columns (${mariaColumns.length})`)}
+      <div class="maria-detail-body-section ${mariaCollapsed.columns ? 'd-none' : ''}"
+           data-sect-body="columns">${_mariaColumnsTable()}</div>
+    </div>
+
+    <div class="maria-detail-section">
+      ${_mariaHead('relations', _mariaRelationsLabel())}
+      <div class="maria-detail-body-section ${mariaCollapsed.relations ? 'd-none' : ''}"
+           data-sect-body="relations">${_mariaRelations()}</div>
+    </div>
+
+    <div class="maria-rows-section">
+      <div class="maria-detail-head">
+        <span>First rows</span>
+        <span class="text-secondary" style="text-transform:none;font-weight:500;">
+          ${shown === total ? `${total} columns` : `${shown} of ${total} columns`}
+        </span>
+        <button class="btn btn-sm btn-outline-secondary ms-auto py-0 px-2"
+                data-maria-cols="1" style="font-size:.7rem;text-transform:none;"
+                title="Choose which columns to show">
+          <i class="bi bi-eye me-1"></i>Columns
+        </button>
+      </div>
+      <div class="maria-grid-scroll">${rowsHtml}</div>
+    </div>`;
+}
+
+function _mariaHead(id, label) {
+  return `<button class="maria-detail-head ${mariaCollapsed[id] ? 'collapsed' : ''}"
+                  data-sect="${id}" aria-expanded="${!mariaCollapsed[id]}">
+            <span>${esc(label)}</span>
+            <i class="bi bi-chevron-down ops-caret"></i>
+          </button>`;
+}
+
+function _mariaColumnsTable() {
+  if (!mariaColumns.length)
+    return '<div class="text-secondary small p-2">No columns.</div>';
+  const body = mariaColumns.map(c => `
     <tr>
       <td class="font-monospace">${esc(c.name)}</td>
       <td class="text-secondary">${esc(c.type)}</td>
-      <td>${c.key_type ? `<span class="badge bg-secondary-subtle text-secondary-emphasis"
-            style="font-size:.6rem;">${esc(c.key_type)}</span>` : ''}</td>
+      <td>${_mariaKeyBadge(c)}</td>
       <td class="text-secondary">${c.nullable === 'YES' ? 'null' : ''}</td>
     </tr>`).join('');
+  return `<table class="table table-sm table-hover mb-0" style="font-size:.74rem;">
+      <thead class="table-light"><tr>
+        <th>Name</th><th>Type</th><th>Key</th><th></th>
+      </tr></thead><tbody>${body}</tbody></table>`;
+}
 
-  const sampleHtml = (sample && sample.error)
-    ? `<div class="text-danger small p-2">${esc(sample.error)}</div>`
-    : _mariaTable(sample.columns || [], sample.rows || [], sample.truncated,
-                  {schema: mariaSchema, table: name,
-                   primaryKey: sample.primary_key || []});
+/** A key badge that says what the key IS, not just that there is one.
+ *  "MUL" alone is the least informative thing information_schema reports —
+ *  it means "first column of some non-unique index" and never says which. */
+function _mariaKeyBadge(col) {
+  if (!col.key_type) return '';
+  const idx = (mariaRelations?.indexes || [])
+    .filter(i => i.columns.includes(col.name));
+  const tip = idx.length
+    ? idx.map(i => `${i.name} (${i.columns.join(', ')})`).join('\n')
+    : {PRI: 'Primary key', UNI: 'Unique index', MUL: 'Indexed, non-unique'}[col.key_type] || '';
+  const tone = col.key_type === 'PRI' ? 'primary' : 'secondary';
+  return `<span class="badge bg-${tone}-subtle text-${tone}-emphasis"
+                style="font-size:.6rem;" title="${esc(tip)}">${esc(col.key_type)}</span>`;
+}
 
-  pane.innerHTML = `
-    <div class="p-2">
-      <div class="small fw-semibold text-secondary mb-1">Columns (${(cols.columns || []).length})</div>
-      <div style="max-height:240px;overflow:auto;">
-        <table class="table table-sm table-hover mb-0" style="font-size:.74rem;">
-          <thead class="table-light"><tr>
-            <th>Name</th><th>Type</th><th>Key</th><th></th>
-          </tr></thead>
-          <tbody>${colRows}</tbody>
-        </table>
+function _mariaRelationsLabel() {
+  const r = mariaRelations;
+  if (!r) return 'Keys & relations';
+  const n = (r.outbound?.length || 0) + (r.inbound?.length || 0);
+  return n ? `Keys & relations (${n} declared)` : 'Keys & relations';
+}
+
+function _mariaRelations() {
+  const r = mariaRelations;
+  if (!r) return '<div class="text-secondary small p-2">—</div>';
+
+  const idx = (r.indexes || []).map(i => `
+    <div class="maria-rel-row">
+      <span class="badge bg-${i.primary ? 'primary' : 'secondary'}-subtle
+                   text-${i.primary ? 'primary' : 'secondary'}-emphasis"
+            style="font-size:.6rem;">${i.primary ? 'PRIMARY' : (i.unique ? 'UNIQUE' : 'INDEX')}</span>
+      <span class="ms-1 text-secondary">${esc(i.primary ? '' : i.name)}</span>
+      <span class="ms-1">${i.columns.map(c => `<span class="maria-chip">${esc(c)}</span>`).join(' + ')}</span>
+    </div>`).join('');
+
+  const link = (schema, table, label) =>
+    schema === mariaSchema
+      ? `<button class="maria-chip maria-chip-link" data-goto-table="${esc(table)}"
+                 title="Open ${esc(table)}">${esc(label)}</button>`
+      : `<span class="maria-chip">${esc(schema)}.${esc(label)}</span>`;
+
+  const out = (r.outbound || []).map(f => `
+    <div class="maria-rel-row">
+      <i class="bi bi-arrow-right-short text-primary"></i>
+      ${f.columns.map(c => `<span class="maria-chip">${esc(c)}</span>`).join(' + ')}
+      <span class="text-secondary mx-1">references</span>
+      ${link(f.ref_schema, f.ref_table, f.ref_table)}
+      <span class="text-secondary">.</span>
+      ${f.ref_columns.map(c => `<span class="maria-chip">${esc(c)}</span>`).join(' + ')}
+    </div>`).join('');
+
+  const inb = (r.inbound || []).map(f => `
+    <div class="maria-rel-row">
+      <i class="bi bi-arrow-left-short text-success"></i>
+      ${link(f.from_schema, f.from_table, f.from_table)}
+      <span class="text-secondary">.</span>
+      ${f.columns.map(c => `<span class="maria-chip">${esc(c)}</span>`).join(' + ')}
+      <span class="text-secondary mx-1">references</span>
+      ${f.ref_columns.map(c => `<span class="maria-chip">${esc(c)}</span>`).join(' + ')}
+    </div>`).join('');
+
+  // The inferred half. Kept visually and verbally distinct from the declared
+  // half above: this is a guess from column names, and an engineer acting on
+  // it needs to know that before they treat it as the data model.
+  const cand = (r.candidates || []).map(c => `
+    <div class="maria-rel-row">
+      <span class="maria-chip">${esc(c.column)}</span>
+      <span class="text-secondary mx-1">also in ${c.count} table${c.count === 1 ? '' : 's'}:</span>
+      ${c.tables.map(t => link(mariaSchema, t, t)).join(' ')}
+      ${c.truncated ? '<span class="text-secondary"> …</span>' : ''}
+    </div>`).join('');
+
+  const section = (title, html, note) => html
+    ? `<div class="px-2 pt-2 pb-1 small fw-semibold text-secondary">${esc(title)}</div>
+       ${note ? `<div class="px-2 pb-1 text-secondary" style="font-size:10.5px;">${esc(note)}</div>` : ''}
+       ${html}` : '';
+
+  const body = section('Indexes', idx)
+    + section('References out', out)
+    + section('Referenced by', inb)
+    + section('Possibly related', cand,
+        'Matched on column name, not on a declared constraint — a strong hint '
+        + 'about where to look next, not a guarantee that the values line up.');
+
+  if (!body) return '<div class="text-secondary small p-2">No keys on this table.</div>';
+
+  const none = (!out.length && !inb.length)
+    ? `<div class="px-2 py-1 text-secondary" style="font-size:10.5px;">
+         This schema declares no FOREIGN KEY constraints on this table, so the
+         relationships below are inferred rather than read from the catalog.
+       </div>` : '';
+  return none + body;
+}
+
+/* ── Column visibility ────────────────────────────────────────────────────
+   Same modal furniture as the ES field picker (rt-modal-overlay / rt-field-row)
+   so the two screens behave identically — this is the same job, and learning
+   it twice would be the wrong kind of variety. */
+function openMariaColumnPicker() {
+  document.querySelector('.rt-modal-overlay.rt-mariacols')?.remove();
+  const wrap = document.createElement('div');
+  wrap.className = 'rt-modal-overlay rt-mariacols';
+  wrap.innerHTML = `<div class="rt-modal rt-modal-fields">
+      <div class="rt-modal-title"><i class="bi bi-eye me-1"></i>Columns —
+        <span class="font-monospace">${esc(mariaTable)}</span></div>
+      <input class="form-control form-control-sm rt-mariacols-search mb-2"
+             placeholder="search columns…"/>
+      <div class="rt-fieldvis-body rt-mariacols-body"></div>
+      <div class="rt-modal-actions">
+        <button class="btn btn-sm btn-outline-secondary" data-act="all">Show all</button>
+        <button class="btn btn-sm btn-secondary" data-act="close">Close</button>
       </div>
-      <div class="small fw-semibold text-secondary mt-3 mb-1">First rows</div>
-      ${sampleHtml}
     </div>`;
+  document.body.appendChild(wrap);
+
+  const done = () => { wrap.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') done(); };
+  document.addEventListener('keydown', onKey);
+
+  wrap.querySelector('.rt-mariacols-search').addEventListener('input', () => _drawMariaCols(wrap));
+  wrap.addEventListener('change', ev => {
+    const cb = ev.target.closest('input[data-col]');
+    if (!cb) return;
+    const key = _mariaTableKey();
+    const set = _mariaHiddenSet();
+    if (cb.checked) set.delete(cb.dataset.col); else set.add(cb.dataset.col);
+    mariaHiddenCols[key] = [...set];
+    _mariaSave('ccadmin.maria.hiddenCols', mariaHiddenCols);
+    renderMariaDetail();
+  });
+  wrap.addEventListener('click', ev => {
+    const act = ev.target.dataset.act;
+    if (act === 'close' || ev.target === wrap) { done(); return; }
+    if (act === 'all') {
+      delete mariaHiddenCols[_mariaTableKey()];
+      _mariaSave('ccadmin.maria.hiddenCols', mariaHiddenCols);
+      renderMariaDetail();
+      _drawMariaCols(wrap);
+    }
+  });
+  _drawMariaCols(wrap);
+}
+
+function _drawMariaCols(wrap) {
+  const host = wrap.querySelector('.rt-mariacols-body');
+  const q = (wrap.querySelector('.rt-mariacols-search')?.value || '').toLowerCase();
+  const hidden = _mariaHiddenSet();
+  const pk = mariaSample?.primary_key || [];
+  const cols = (mariaSample?.columns || []).length
+    ? mariaSample.columns : mariaColumns.map(c => c.name);
+  host.innerHTML = cols.filter(c => !q || c.toLowerCase().includes(q)).map(c => {
+    // Key columns stay visible whatever the box says, so the box must not
+    // pretend otherwise — an unchecked control that changes nothing reads as
+    // a bug. Disabled and labelled instead.
+    const locked = pk.includes(c);
+    return `<label class="rt-field-row" ${locked
+        ? 'title="Part of the primary key — always shown, because it is how a row is identified"' : ''}>
+      <input type="checkbox" data-col="${esc(c)}" ${locked ? 'checked disabled' : (hidden.has(c) ? '' : 'checked')}/>
+      <span class="rt-field-name">${esc(c)}</span>
+      ${locked ? '<span class="rt-field-badge">key</span>' : ''}
+    </label>`;
+  }).join('') || '<div class="text-secondary small p-2">No matching columns.</div>';
 }
 
 /* Byte sizes are formatted by _fmtBytes, already defined for the archive
@@ -7043,13 +7380,36 @@ async function selectMariaTable(name) {
 function _mariaTable(columns, rows, truncated, ctx) {
   if (!rows.length) return '<div class="text-secondary small p-2">No rows.</div>';
   const pk = (ctx && ctx.primaryKey) || [];
-  const head = columns.map(c => `<th class="text-nowrap">${esc(c)}</th>`).join('');
-  const body = rows.map(r => '<tr>' + columns.map(c => {
+  const hidden = (ctx && ctx.hidden) || new Set();
+  // Primary-key columns are never hidden: they are how a row is addressed for
+  // a blob download or an edit, and a grid where the key is invisible makes
+  // every row look interchangeable.
+  const visible = columns.filter(c => !hidden.has(c) || pk.includes(c));
+  if (!visible.length)
+    return '<div class="text-secondary small p-2">Every column is hidden — '
+         + 'use Columns to bring some back.</div>';
+
+  // Offered only when the capability is on AND this render is a table sample
+  // (query results are a join or a projection, where a row does not map back
+  // to one editable table row).
+  const canEdit = !!(ctx && ctx.editable) && can('maria.write') && pk.length > 0;
+
+  const head = visible.map(c => `<th class="text-nowrap">${esc(c)}</th>`).join('');
+  const body = rows.map(r => '<tr>' + visible.map(c => {
     const v = r[c];
     // null is a fact about the row, not an empty cell — say so, or a NULL and
     // an empty string look identical and mean very different things.
-    if (v === null || v === undefined)
-      return '<td class="text-secondary fst-italic">null</td>';
+    if (v === null || v === undefined) {
+      // Still editable when the capability is on: a column that is NULL today
+      // is exactly the one an engineer needs to set, and skipping it here made
+      // empty fields permanently unfillable.
+      if (!canEdit || !_mariaColEditable(c))
+        return '<td class="text-secondary fst-italic">null</td>';
+      const nkey = {}; for (const k of pk) nkey[k] = r[k];
+      return `<td class="text-secondary fst-italic maria-cell-editable"`
+           + ` title="NULL&#10;Double-click to edit" data-editcol="${esc(c)}"`
+           + ` data-rk="${esc(JSON.stringify(nkey))}" data-val="" data-null="1">null</td>`;
+    }
 
     // Binary column. The server sends a marker rather than the bytes, because
     // a BLOB is not text — quartz's JOB_DATA is a serialised Java object, and
@@ -7057,6 +7417,14 @@ function _mariaTable(columns, rows, truncated, ctx) {
     if (v && typeof v === 'object' && v.__blob__) {
       const size = _fmtBytes(v.bytes || 0);
       if (!v.bytes) return `<td class="text-secondary fst-italic">empty blob</td>`;
+      // The server only serves a download for columns it counts as binary. Any
+      // other type that happens to arrive as bytes must not be offered one, or
+      // the eye and download controls lead straight to a refusal — which is
+      // how bit(1) flags came to render as 0.0 KB download links.
+      const blobCols = (ctx && ctx.blobColumns) || null;
+      if (blobCols && !blobCols.includes(c))
+        return `<td class="text-secondary" title="Binary value on a `
+             + `non-binary column — not downloadable">binary · ${size}</td>`;
       // Downloadable only when the row can actually be named.
       if (!pk.length || !ctx)
         return `<td class="text-secondary" title="No primary key, so this row `
@@ -7079,17 +7447,166 @@ function _mariaTable(columns, rows, truncated, ctx) {
     }
 
     const s = String(v);
-    return `<td class="text-nowrap" title="${esc(s)}">${esc(s.length > 80 ? s.slice(0, 80) + '…' : s)}</td>`;
+    const shown = esc(s.length > 80 ? s.slice(0, 80) + '…' : s);
+    if (!canEdit || !_mariaColEditable(c)) {
+      return `<td class="text-nowrap" title="${esc(s)}">${shown}</td>`;
+    }
+    const key = {}; for (const k of pk) key[k] = r[k];
+    return `<td class="text-nowrap maria-cell-editable" title="${esc(s)}&#10;`
+         + `Double-click to edit" data-editcol="${esc(c)}"`
+         + ` data-rk="${esc(JSON.stringify(key))}"`
+         + ` data-val="${esc(s)}">${shown}</td>`;
   }).join('') + '</tr>').join('');
   return `
-    <div style="overflow:auto;">
-      <table class="table table-sm table-hover mb-0 font-monospace" style="font-size:.72rem;">
-        <thead class="table-light"><tr>${head}</tr></thead>
+    <div class="${ctx && ctx.editable ? '' : 'maria-grid-scroll-inline'}"
+         style="${ctx && ctx.editable ? '' : 'overflow:auto;max-height:60vh;'}">
+      <table class="table table-sm table-hover mb-0 font-monospace maria-grid" style="font-size:.72rem;">
+        <thead><tr>${head}</tr></thead>
         <tbody>${body}</tbody>
       </table>
     </div>
     ${truncated ? '<div class="small text-warning-emphasis px-2 py-1">'
       + 'More rows exist — this result was capped.</div>' : ''}`;
+}
+
+/* ── Editing one cell ─────────────────────────────────────────────────────
+   Mirrors the server's rules in modules/maria/writes.py so a cell that cannot
+   be written is never offered as editable. The server re-checks every one of
+   them — this decides what to OFFER, not what is PERMITTED, and the two must
+   not be confused: a client-side rule is a courtesy, never a control. */
+function _mariaColEditable(name) {
+  const c = mariaColumns.find(x => x.name === name);
+  if (!c) return false;
+  if (c.key_type === 'PRI') return false;
+  const extra = (c.extra || '').toLowerCase();
+  if (extra.includes('auto_increment') || extra.includes('generated')) return false;
+  const t = (c.data_type || '').toLowerCase();
+  return !['blob', 'tinyblob', 'mediumblob', 'longblob', 'binary', 'varbinary'].includes(t);
+}
+
+/** Swap a cell for an input. Enter commits, Escape and blur abandon. */
+function beginMariaCellEdit(td) {
+  if (td.querySelector('input')) return;
+  const original = td.dataset.val ?? '';
+  const wasNull  = td.dataset.null === '1';
+  const width = Math.max(td.getBoundingClientRect().width, 90);
+  td.innerHTML = `<input class="maria-cell-input" style="width:${Math.round(width)}px"`
+               + `${wasNull ? ' placeholder="NULL"' : ''}>`;
+  const input = td.querySelector('input');
+  input.value = original;
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const revert = () => {
+    if (settled) return;
+    settled = true;
+    td.innerHTML = _mariaCellHtml(original, wasNull);
+  };
+  input.addEventListener('keydown', ev => {
+    if (ev.key === 'Escape') { ev.preventDefault(); revert(); }
+    else if (ev.key === 'Enter') {
+      ev.preventDefault();
+      if (settled) return;
+      settled = true;
+      commitMariaCellEdit(td, original, input.value, wasNull);
+    }
+  });
+  // Clicking away abandons rather than saves: a write to a live CC should
+  // never happen because someone's focus moved.
+  input.addEventListener('blur', revert);
+}
+
+/** How a cell reads when it is not being edited. */
+function _mariaCellHtml(value, isNull) {
+  if (isNull) return '<em>null</em>';
+  return esc(value.length > 80 ? value.slice(0, 80) + '…' : value);
+}
+
+async function commitMariaCellEdit(td, before, after, wasNull) {
+  const col = td.dataset.editcol;
+  const key = JSON.parse(td.dataset.rk);
+  td.innerHTML = _mariaCellHtml(before, wasNull);
+
+  // A NULL cell left empty is unchanged; typing '' into a non-null one is a
+  // real change (to the empty string), which is NOT the same as NULL.
+  if (after === before && !(wasNull && after !== '')) return;
+
+  const keyText = Object.entries(key).map(([k, v]) => `${k} = ${v}`).join(' AND ');
+  const ok = await _mariaConfirmEdit({
+    target: `${mariaSchema}.${mariaTable}.${col}`,
+    where: keyText, before: wasNull ? 'NULL' : before, after,
+  });
+  if (!ok) return;
+
+  const d = await api('/api/maria/cell', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      schema: mariaSchema, table: mariaTable, column: col, key,
+      value: after, expected: wasNull ? null : before, expected_null: !!wasNull,
+    }),
+  });
+
+  if (!d || d.error) {
+    _mariaError('mariaError', (d && d.error) || 'the edit did not go through');
+    return;
+  }
+  _mariaError('mariaError', '');
+  // Update the row we hold rather than refetching the table: a re-read would
+  // reorder rows under the user and lose their place in a 117-row grid.
+  const row = (mariaSample?.rows || []).find(
+    r => Object.entries(key).every(([k, v]) => String(r[k]) === String(v)));
+  if (row) row[col] = after;
+  renderMariaDetail();
+  document.querySelectorAll(`td[data-editcol="${CSS.escape(col)}"]`).forEach(cell => {
+    if (cell.dataset.rk === td.dataset.rk) cell.classList.add('maria-cell-edited');
+  });
+}
+
+/** The confirmation. Shows the row, the old and new value, and the statement —
+ *  an engineer should be able to see exactly what is about to run before it
+ *  runs against an appliance someone else depends on. */
+function _mariaConfirmEdit(o) {
+  return new Promise(resolve => {
+    const wrap = document.createElement('div');
+    wrap.className = 'rt-modal-overlay';
+    const stmt = `UPDATE ${mariaSchema}.${mariaTable}\n   SET ${o.target.split('.').pop()} = `
+      + `'${o.after}'\n WHERE ${o.where}\n LIMIT 1;`;
+    wrap.innerHTML = `<div class="rt-modal" style="max-width:560px;">
+        <div class="rt-modal-title">⚠ Edit a row on this CC</div>
+        <div class="rt-modal-body">
+          <div class="small mb-2">
+            This changes live data in the CC's configuration database. It is
+            not reversible from here.
+          </div>
+          <table class="table table-sm mb-2" style="font-size:.76rem;">
+            <tr><td class="text-secondary">Cell</td>
+                <td class="font-monospace">${esc(o.target)}</td></tr>
+            <tr><td class="text-secondary">Row</td>
+                <td class="font-monospace">${esc(o.where)}</td></tr>
+            <tr><td class="text-secondary">From</td>
+                <td class="font-monospace">${esc(o.before) || '<em>empty</em>'}</td></tr>
+            <tr><td class="text-secondary">To</td>
+                <td class="font-monospace fw-semibold">${esc(o.after) || '<em>empty</em>'}</td></tr>
+          </table>
+          <pre class="bg-body-tertiary p-2 rounded mb-0" style="font-size:.72rem;
+               white-space:pre-wrap;">${esc(stmt)}</pre>
+        </div>
+        <div class="rt-modal-actions">
+          <button class="btn btn-sm btn-warning" data-ok="1">Apply the change</button>
+          <button class="btn btn-sm btn-outline-secondary" data-ok="0">Cancel</button>
+        </div></div>`;
+    document.body.appendChild(wrap);
+    const done = v => { wrap.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey = e => { if (e.key === 'Escape') done(false); };
+    document.addEventListener('keydown', onKey);
+    wrap.addEventListener('click', e => {
+      const b = e.target.closest('button');
+      if (b) { done(b.getAttribute('data-ok') === '1'); return; }
+      if (e.target === wrap) done(false);
+    });
+  });
 }
 
 function _fillMariaQuerySchemas() {
