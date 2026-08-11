@@ -1085,32 +1085,57 @@
         </span>
       </div>
 
-      <div class="card mb-2">
-        <div class="card-body p-2">
-          <div class="d-flex align-items-center gap-2 mb-2">
+      <div class="card mq-editor">
+        <div class="card-body p-2 d-flex flex-column" style="min-height:0;">
+          <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
             <label class="small text-secondary mb-0">Schema</label>
-            <select id="mariaQuerySchema" class="form-select form-select-sm" style="width:220px;font-size:.78rem;"></select>
+            <select id="mariaQuerySchema" class="form-select form-select-sm" style="width:200px;font-size:.78rem;"></select>
             <label class="small text-secondary mb-0 ms-2">Max rows</label>
             <input id="mariaQueryLimit" type="number" min="1" max="10000" value="200"
                    class="form-control form-control-sm" style="width:90px;font-size:.78rem;">
-            <button class="btn btn-sm btn-primary ms-auto py-0 px-3" onclick="runMariaQuery()"
+            <!-- For engineers who know the CC but not SQL: pick a table and
+                 some conditions, get a statement. -->
+            <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2"
+                    onclick="openMariaQueryWizard()" style="font-size:.78rem;">
+              <i class="bi bi-magic me-1"></i>Build query
+            </button>
+            <button class="btn btn-sm btn-primary py-0 px-3" onclick="runMariaQuery()"
                     style="font-size:.78rem;">
               <i class="bi bi-play-fill me-1"></i>Run
             </button>
           </div>
-          <textarea id="mariaQuerySql" class="form-control font-monospace" rows="5"
-                    style="font-size:.8rem;"
+          <textarea id="mariaQuerySql" class="form-control font-monospace" wrap="off"
+                    spellcheck="false" style="font-size:.8rem;flex:1 1 auto;min-height:70px;
+                    white-space:pre;overflow:auto;"
                     placeholder="SELECT * FROM devicestatus LIMIT 20"></textarea>
-          <div class="form-text" style="font-size:.7rem;">
+          <div class="form-text mb-0" style="font-size:.7rem;">
             SELECT, SHOW, DESCRIBE, EXPLAIN and WITH only. One statement at a time.
           </div>
         </div>
       </div>
 
+      <!-- Resizes the editor against the results below it. -->
+      <div class="maria-hsplit" data-mqsplit="1" role="separator"
+           tabindex="0" aria-orientation="horizontal"
+           title="Drag to resize · double-click to reset"></div>
+
+      <!-- The WHERE clause of whatever is in the editor, as removable rows.
+           Populated by syncMariaQueryConditions() after every edit. -->
+      <div id="mariaQueryConds" class="mq-conds d-none"></div>
+
       <div id="mariaQueryError" class="alert alert-warning py-2 px-3 small d-none"></div>
-      <div id="mariaQueryMeta" class="small text-secondary mb-1"></div>
-      <div class="card">
-        <div class="card-body p-0" id="mariaQueryResults" style="max-height:60vh;overflow:auto;">
+
+      <div class="card mq-results">
+        <div class="card-header py-1 px-2 d-flex align-items-center gap-2">
+          <span id="mariaQueryMeta" class="small text-secondary"></span>
+          <button id="mariaQueryColsBtn"
+                  class="btn btn-sm btn-outline-secondary ms-auto py-0 px-2 d-none"
+                  onclick="openMariaQueryColumnPicker()" style="font-size:.7rem;"
+                  title="Choose which columns to show">
+            <i class="bi bi-eye me-1"></i>Columns
+          </button>
+        </div>
+        <div class="card-body p-0" id="mariaQueryResults">
           <div class="text-secondary small p-3">Run a query to see results here…</div>
         </div>
       </div>

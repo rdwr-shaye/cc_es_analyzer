@@ -1032,7 +1032,41 @@ button.maria-detail-head:hover { background: rgba(0, 82, 204, .07); }
   overflow: auto;
   max-height: 34vh;
 }
+/* Once the user has dragged a section, their height wins: the default cap is
+   lifted and flex-shrink goes to 0. Both are needed — left shrinkable, the
+   rows grid (flex 1 1 auto) simply reclaims the space and the drag appears to
+   do nothing. Safe only because the drag is clamped to leave the grid its
+   floor, so the section can never grow enough to push it out of the pane. */
+.maria-detail-body-section[style*="height"] {
+  max-height: none;
+  flex: 0 0 auto;
+}
 .maria-detail-body-section.d-none { display: none !important; }
+
+/* Horizontal splitter: resizes the section ABOVE it. Same 7px hit area and
+   1px line as the vertical ones, rotated. */
+.maria-hsplit {
+  flex: 0 0 7px;
+  cursor: row-resize;
+  position: relative;
+  background: transparent;
+}
+.maria-hsplit::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; top: 3px;
+  height: 1px;
+  background: var(--bs-border-color, rgba(0,0,0,.12));
+  transition: background .12s ease, box-shadow .12s ease;
+}
+.maria-hsplit:hover::after,
+.maria-hsplit:focus-visible::after,
+.maria-hsplit.dragging::after {
+  background: var(--ops-blue, #0052CC);
+  box-shadow: 0 0 0 1px rgba(0, 82, 204, .25);
+}
+.maria-hsplit:focus-visible { outline: none; }
+body.maria-resizing-y { cursor: row-resize; user-select: none; }
 
 /* The rows grid is the one part that grows, so the pane always ends at the
    bottom of the screen regardless of how much is collapsed above it. The
@@ -1098,6 +1132,105 @@ button.maria-detail-head:hover { background: rgba(0, 82, 204, .07); }
   cursor: pointer;
 }
 .maria-chip-link:hover { background: rgba(0, 82, 204, .2); }
+
+/* Join builder: the bar sits above the relation list and stays put while it
+   scrolls, so the action is reachable without scrolling back up on a table
+   with a dozen relations. */
+.maria-join-bar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  color: var(--bs-secondary-color, #6c757d);
+  background: var(--bs-tertiary-bg, #f6f8fa);
+  border-bottom: 1px solid var(--bs-border-color, rgba(0,0,0,.08));
+}
+.maria-rel-tick { margin-right: 4px; vertical-align: middle; cursor: pointer; }
+
+/* Join builder — the filter panel. Given a border and a title so the WHERE
+   clause reads as a first-class part of the query rather than an optional
+   extra hidden behind a toolbar button. */
+.mj-filters {
+  border: 1px solid var(--bs-border-color, rgba(0,0,0,.12));
+  border-radius: 6px;
+  overflow: hidden;
+}
+.mj-filters-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+  background: var(--bs-tertiary-bg, #f6f8fa);
+  border-bottom: 1px solid var(--bs-border-color, rgba(0,0,0,.08));
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  color: var(--bs-secondary-color, #6c757d);
+}
+.mj-where { padding: 8px 8px 4px; }
+.mj-where:empty { display: none; }
+
+/* ── SQL Query screen: editor over results, both filling the viewport ──── */
+#view-mariaquery {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.mq-editor {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 130px;
+}
+.mq-editor > .card-body { min-height: 0; }
+/* An explicitly sized editor stops flexing, same contract as the detail
+   sections — otherwise the results card reclaims the height immediately. */
+.mq-editor[style*="height"] { flex: 0 0 auto; }
+.mq-results {
+  flex: 1 1 auto;
+  min-height: 140px;
+  display: flex;
+  flex-direction: column;
+}
+.mq-results > .card-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* Conditions parsed out of the query in the editor. */
+.mq-conds {
+  flex: 0 0 auto;
+  border: 1px solid var(--bs-border-color, rgba(0,0,0,.12));
+  border-radius: 6px;
+  margin-bottom: 6px;
+  max-height: 28vh;
+  overflow: auto;
+}
+.mq-cond-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--bs-border-color, rgba(0,0,0,.06));
+  font-size: 11.5px;
+}
+.mq-cond-row:last-child { border-bottom: 0; }
+.mq-cond-text {
+  font-family: var(--bs-font-monospace, monospace);
+  font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mq-cond-join {
+  font-size: 10px; font-weight: 700; letter-spacing: .04em;
+  color: var(--bs-secondary-color, #6c757d);
+  min-width: 30px;
+}
 .ops-caret { font-size: 9px; transition: transform .15s ease; opacity: .75; }
 .ops-db-toggle.collapsed .ops-caret { transform: rotate(-90deg); }
 .ops-db-dot { width: 7px; height: 7px; }

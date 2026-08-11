@@ -6799,6 +6799,15 @@ let mariaHiddenCols = _mariaLoad('ccadmin.maria.hiddenCols', {});
    because both are a working preference, not a per-visit choice. */
 let mariaCollapsed  = _mariaLoad('ccadmin.maria.collapsed', {});
 let mariaPaneWidths = _mariaLoad('ccadmin.maria.paneWidths', null);
+/* Heights the user has dragged the detail sections to, in px, by section id.
+   Relations in particular can run to dozens of rows on a well-connected table
+   and the default cap only ever shows the first few. */
+let mariaSectionH   = _mariaLoad('ccadmin.maria.sectionH', {});
+/* Relations ticked for the join builder, as "out:<i>" / "in:<i>" into the
+   current table's relations payload. Deliberately NOT persisted: it belongs to
+   one table and one question, and a stale selection restored under a different
+   table would build a join nobody asked for. */
+let mariaJoinSel = new Set();
 
 function _mariaLoad(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
@@ -6839,15 +6848,174 @@ function initMariaPanes() {
     // Jump to a related table from the relations block.
     const jump = ev.target.closest('[data-goto-table]');
     if (jump) { selectMariaTable(jump.dataset.gotoTable); return; }
-    if (ev.target.closest('[data-maria-cols]')) openMariaColumnPicker();
+    if (ev.target.closest('[data-maria-cols]')) { openMariaColumnPicker(); return; }
+    if (ev.target.closest('[data-join-build]')) { openMariaJoinBuilder(); return; }
+    if (ev.target.closest('[data-join-clear]')) {
+      mariaJoinSel.clear(); renderMariaDetail(); return;
+    }
+  });
+  detail?.addEventListener('change', ev => {
+    const tick = ev.target.closest('[data-joinsel]');
+    if (!tick) return;
+    if (tick.checked) mariaJoinSel.add(tick.dataset.joinsel);
+    else mariaJoinSel.delete(tick.dataset.joinsel);
+    renderMariaDetail();
   });
   // Double-click to edit, so a single click can still select text in a cell.
   detail?.addEventListener('dblclick', ev => {
     const td = ev.target.closest('td[data-editcol]');
     if (td) beginMariaCellEdit(td);
+    const hs = ev.target.closest('.maria-hsplit');
+    if (hs) resetMariaSectionHeight(hs.dataset.hsplit);
+  });
+
+  // Delegated, because the detail pane is rebuilt on every table change and
+  // per-render binding would leak a listener each time.
+  detail?.addEventListener('pointerdown', ev => {
+    const hs = ev.target.closest('.maria-hsplit');
+    if (hs) startMariaSectionDrag(hs, ev);
+  });
+  detail?.addEventListener('keydown', ev => {
+    const hs = ev.target.closest('.maria-hsplit');
+    if (!hs || (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown')) return;
+    ev.preventDefault();
+    const body = document.querySelector(`[data-sect-body="${hs.dataset.hsplit}"]`);
+    const step = (ev.shiftKey ? 40 : 12) * (ev.key === 'ArrowDown' ? 1 : -1);
+    _setMariaSectionHeight(hs.dataset.hsplit, body,
+                           body.getBoundingClientRect().height + step);
   });
 
   initMariaSplitters();
+  initMariaQueryScreen();
+}
+
+/* ── SQL Query screen ─────────────────────────────────────────────────────
+   The conditions panel mirrors whatever is in the editor, so it stays correct
+   whether the SQL arrived from the join builder, the wizard, or typing. */
+function initMariaQueryScreen() {
+  const box = document.getElementById('mariaQuerySql');
+  // debounced: re-parsing on every keystroke of a 15-line join is wasted work
+  // and makes the panel flicker mid-word.
+  let t = null;
+  box?.addEventListener('input', () => {
+    clearTimeout(t);
+    t = setTimeout(syncMariaQueryConditions, 250);
+  });
+
+  const conds = document.getElementById('mariaQueryConds');
+  conds?.addEventListener('click', ev => {
+    const del = ev.target.closest('[data-cond-del]');
+    if (del) { removeMariaCondition(Number(del.dataset.condDel)); return; }
+    if (ev.target.closest('[data-cond-add]')) addMariaCondition(conds);
+  });
+  conds?.addEventListener('keydown', ev => {
+    // Enter anywhere in the add-row commits it, rather than requiring the mouse.
+    if (ev.key === 'Enter' && ev.target.closest('.mq-cond-row')) {
+      ev.preventDefault();
+      addMariaCondition(conds);
+    }
+  });
+  conds?.addEventListener('change', ev => {
+    const op = ev.target.closest('.mq-newop');
+    if (!op) return;
+    const none = op.value === 'IS NULL' || op.value === 'IS NOT NULL';
+    conds.querySelector('.mq-newval')?.classList.toggle('d-none', none);
+  });
+
+  // The editor / results splitter, same contract as the detail sections.
+  const sp = document.querySelector('[data-mqsplit]');
+  const editor = document.querySelector('.mq-editor');
+  if (!sp || !editor) return;
+
+  const saved = _mariaLoad('ccadmin.maria.editorH', null);
+  if (saved) editor.style.height = saved + 'px';
+
+  const clamp = (wanted) => {
+    const res = document.querySelector('.mq-results');
+    const slack = res ? Math.max(0, res.getBoundingClientRect().height - 140) : 0;
+    const max = editor.getBoundingClientRect().height + slack;
+    const h = Math.round(Math.min(max, Math.max(130, wanted)));
+    editor.style.height = h + 'px';
+    _mariaSave('ccadmin.maria.editorH', h);
+  };
+
+  sp.addEventListener('dblclick', () => {
+    editor.style.height = '';
+    _mariaSave('ccadmin.maria.editorH', null);
+  });
+  sp.addEventListener('keydown', ev => {
+    if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
+    ev.preventDefault();
+    clamp(editor.getBoundingClientRect().height
+          + (ev.shiftKey ? 40 : 12) * (ev.key === 'ArrowDown' ? 1 : -1));
+  });
+  sp.addEventListener('pointerdown', ev => {
+    ev.preventDefault();
+    const startY = ev.clientY, startH = editor.getBoundingClientRect().height;
+    sp.setPointerCapture?.(ev.pointerId);
+    sp.classList.add('dragging');
+    document.body.classList.add('maria-resizing-y');
+    const onMove = e => clamp(startH + e.clientY - startY);
+    const onUp = () => {
+      sp.removeEventListener('pointermove', onMove);
+      sp.removeEventListener('pointerup', onUp);
+      sp.removeEventListener('pointercancel', onUp);
+      sp.classList.remove('dragging');
+      document.body.classList.remove('maria-resizing-y');
+    };
+    sp.addEventListener('pointermove', onMove);
+    sp.addEventListener('pointerup', onUp);
+    sp.addEventListener('pointercancel', onUp);
+  });
+}
+
+/* ── Vertical resizing of the detail sections ─────────────────────────────
+   The relations block can run to dozens of rows on a well-connected table,
+   and a fixed cap means scrolling a small box inside a large empty pane. */
+function startMariaSectionDrag(hs, ev) {
+  ev.preventDefault();
+  const id   = hs.dataset.hsplit;
+  const body = document.querySelector(`[data-sect-body="${id}"]`);
+  if (!body) return;
+  const startY = ev.clientY;
+  const startH = body.getBoundingClientRect().height;
+
+  hs.setPointerCapture?.(ev.pointerId);
+  hs.classList.add('dragging');
+  document.body.classList.add('maria-resizing-y');
+
+  const onMove = e => _setMariaSectionHeight(id, body, startH + e.clientY - startY);
+  const onUp = () => {
+    hs.removeEventListener('pointermove', onMove);
+    hs.removeEventListener('pointerup', onUp);
+    hs.removeEventListener('pointercancel', onUp);
+    hs.classList.remove('dragging');
+    document.body.classList.remove('maria-resizing-y');
+    _mariaSave('ccadmin.maria.sectionH', mariaSectionH);
+  };
+  hs.addEventListener('pointermove', onMove);
+  hs.addEventListener('pointerup', onUp);
+  hs.addEventListener('pointercancel', onUp);
+}
+
+/** Apply a height, clamped so the rows grid keeps a usable floor. Growing a
+ *  section without that ceiling squeezes the grid to nothing — the same
+ *  failure the flex chain was fixed for, just reached by dragging. */
+function _setMariaSectionHeight(id, body, wanted) {
+  const rows = document.querySelector('.maria-rows-section');
+  const slack = rows ? Math.max(0, rows.getBoundingClientRect().height - 132) : 0;
+  const max = body.getBoundingClientRect().height + slack;
+  const h = Math.round(Math.min(max, Math.max(48, wanted)));
+  body.style.height = h + 'px';
+  mariaSectionH[id] = h;
+  _mariaSave('ccadmin.maria.sectionH', mariaSectionH);
+}
+
+function resetMariaSectionHeight(id) {
+  delete mariaSectionH[id];
+  _mariaSave('ccadmin.maria.sectionH', mariaSectionH);
+  const body = document.querySelector(`[data-sect-body="${id}"]`);
+  if (body) body.style.height = '';
 }
 
 /* ── Resizable panes ──────────────────────────────────────────────────────
@@ -6926,6 +7094,10 @@ function toggleMariaSection(name) {
   const body = document.querySelector(`[data-sect-body="${name}"]`);
   head?.classList.toggle('collapsed', !!mariaCollapsed[name]);
   body?.classList.toggle('d-none', !!mariaCollapsed[name]);
+  // The resize handle belongs to the section, so it goes away with it —
+  // otherwise a collapsed section leaves a grab handle that resizes nothing.
+  document.querySelector(`.maria-hsplit[data-hsplit="${name}"]`)
+    ?.classList.toggle('d-none', !!mariaCollapsed[name]);
 }
 
 /** Decoded view of one binary column value. */
@@ -7109,6 +7281,9 @@ function renderMariaTables() {
 
 async function selectMariaTable(name) {
   mariaTable = name;
+  // The ticked relations belong to the table being left, and their indices
+  // mean something different in the next table's payload.
+  mariaJoinSel.clear();
   renderMariaTables();
   document.getElementById('mariaDetailTitle').textContent = `${mariaSchema}.${name}`;
   const pane = document.getElementById('mariaDetail');
@@ -7157,14 +7332,16 @@ function renderMariaDetail(sampleError) {
     <div class="maria-detail-section">
       ${_mariaHead('columns', `Columns (${mariaColumns.length})`)}
       <div class="maria-detail-body-section ${mariaCollapsed.columns ? 'd-none' : ''}"
-           data-sect-body="columns">${_mariaColumnsTable()}</div>
+           data-sect-body="columns"${_mariaSectionStyle('columns')}>${_mariaColumnsTable()}</div>
     </div>
+    ${_mariaHSplit('columns')}
 
     <div class="maria-detail-section">
       ${_mariaHead('relations', _mariaRelationsLabel())}
       <div class="maria-detail-body-section ${mariaCollapsed.relations ? 'd-none' : ''}"
-           data-sect-body="relations">${_mariaRelations()}</div>
+           data-sect-body="relations"${_mariaSectionStyle('relations')}>${_mariaRelations()}</div>
     </div>
+    ${_mariaHSplit('relations')}
 
     <div class="maria-rows-section">
       <div class="maria-detail-head">
@@ -7180,6 +7357,21 @@ function renderMariaDetail(sampleError) {
       </div>
       <div class="maria-grid-scroll">${rowsHtml}</div>
     </div>`;
+}
+
+/** A dragged height for a section, if it has one. */
+function _mariaSectionStyle(id) {
+  const h = mariaSectionH[id];
+  return (h && !mariaCollapsed[id]) ? ` style="height:${h}px;"` : '';
+}
+
+/** The grab handle under a section. Pointless on a collapsed one — there is
+ *  nothing to resize — so it is simply not rendered. */
+function _mariaHSplit(id) {
+  if (mariaCollapsed[id]) return '';
+  return `<div class="maria-hsplit" data-hsplit="${id}" role="separator"
+               tabindex="0" aria-orientation="horizontal"
+               title="Drag to resize · double-click to reset"></div>`;
 }
 
 function _mariaHead(id, label) {
@@ -7247,8 +7439,15 @@ function _mariaRelations() {
                  title="Open ${esc(table)}">${esc(label)}</button>`
       : `<span class="maria-chip">${esc(schema)}.${esc(label)}</span>`;
 
-  const out = (r.outbound || []).map(f => `
+  // A tick box per declared relation: these ARE join conditions, so selecting
+  // them is the whole of composing the join.
+  const tick = (id) => `<input type="checkbox" class="maria-rel-tick"
+      data-joinsel="${id}" ${mariaJoinSel.has(id) ? 'checked' : ''}
+      title="Include this relation in a join query">`;
+
+  const out = (r.outbound || []).map((f, i) => `
     <div class="maria-rel-row">
+      ${tick('out:' + i)}
       <i class="bi bi-arrow-right-short text-primary"></i>
       ${f.columns.map(c => `<span class="maria-chip">${esc(c)}</span>`).join(' + ')}
       <span class="text-secondary mx-1">references</span>
@@ -7257,8 +7456,9 @@ function _mariaRelations() {
       ${f.ref_columns.map(c => `<span class="maria-chip">${esc(c)}</span>`).join(' + ')}
     </div>`).join('');
 
-  const inb = (r.inbound || []).map(f => `
+  const inb = (r.inbound || []).map((f, i) => `
     <div class="maria-rel-row">
+      ${tick('in:' + i)}
       <i class="bi bi-arrow-left-short text-success"></i>
       ${link(f.from_schema, f.from_table, f.from_table)}
       <span class="text-secondary">.</span>
@@ -7292,12 +7492,365 @@ function _mariaRelations() {
 
   if (!body) return '<div class="text-secondary small p-2">No keys on this table.</div>';
 
+  const n = mariaJoinSel.size;
+  const bar = (out.length || inb.length)
+    ? `<div class="maria-join-bar">
+         <i class="bi bi-diagram-2 me-1"></i>
+         <span>${n ? `${n} relation${n === 1 ? '' : 's'} selected` : 'Tick relations to build a join'}</span>
+         <button class="btn btn-sm btn-primary py-0 px-2 ms-auto" data-join-build="1"
+                 ${n ? '' : 'disabled'} style="font-size:.7rem;">
+           <i class="bi bi-hammer me-1"></i>Build join query
+         </button>
+         ${n ? `<button class="btn btn-sm btn-link py-0 px-1 text-secondary"
+                  data-join-clear="1" style="font-size:.7rem;">Clear</button>` : ''}
+       </div>` : '';
+
   const none = (!out.length && !inb.length)
     ? `<div class="px-2 py-1 text-secondary" style="font-size:10.5px;">
          This schema declares no FOREIGN KEY constraints on this table, so the
          relationships below are inferred rather than read from the catalog.
        </div>` : '';
-  return none + body;
+  return bar + none + body;
+}
+
+/* ── Join builder ─────────────────────────────────────────────────────────
+   The relations panel already holds the join conditions; ticking them is the
+   whole of composing the query. The output goes to the SQL screen as text the
+   engineer can read and edit, rather than running something they never saw —
+   this is a debugging tool, and a query you cannot inspect is not a finding
+   you can defend. */
+
+/** Backtick-quote one identifier. Names come from the database, so a stray
+ *  backtick in one must not be able to end the quote. */
+function _q(name) { return '`' + String(name).replace(/`/g, '') + '`'; }
+
+/** A readable, unique alias per joined table. The table's own name where it
+ *  can be, because `password.row_id` reads and a bare `t3.row_id` does not. */
+function _mariaAlias(name, taken) {
+  let base = String(name).replace(/[^A-Za-z0-9_]/g, '_') || 't';
+  let alias = base, n = 2;
+  while (taken.has(alias)) alias = `${base}_${n++}`;
+  taken.add(alias);
+  return alias;
+}
+
+/** The relations currently ticked, resolved against the payload. */
+function _mariaSelectedJoins() {
+  const r = mariaRelations || {};
+  const picked = [];
+  for (const id of mariaJoinSel) {
+    const [side, idx] = id.split(':');
+    const f = (side === 'out' ? r.outbound : r.inbound)?.[Number(idx)];
+    if (f) picked.push({ side, f });
+  }
+  return picked;
+}
+
+/** Build the SELECT. `opts` = {joinType, where[], limit}. */
+function _buildMariaJoinSql(opts) {
+  const taken = new Set();
+  const baseAlias = _mariaAlias(mariaTable, taken);
+  const jt = opts.joinType === 'INNER' ? 'INNER JOIN' : 'LEFT JOIN';
+
+  const selects = [`${_q(baseAlias)}.*`];
+  const joins = [];
+
+  for (const { side, f } of _mariaSelectedJoins()) {
+    // Outbound: we hold the foreign key and point at their key.
+    // Inbound:  they hold the foreign key and point back at ours.
+    const otherSchema = side === 'out' ? f.ref_schema : f.from_schema;
+    const otherTable  = side === 'out' ? f.ref_table  : f.from_table;
+    const alias = _mariaAlias(otherTable, taken);
+
+    const on = f.columns.map((c, i) => {
+      const mine  = side === 'out' ? c : f.ref_columns[i];
+      const their = side === 'out' ? f.ref_columns[i] : c;
+      return `${_q(baseAlias)}.${_q(mine)} = ${_q(alias)}.${_q(their)}`;
+    }).join(' AND ');
+
+    joins.push(`  ${jt} ${_q(otherSchema)}.${_q(otherTable)} AS ${_q(alias)}\n`
+             + `    ON ${on}`);
+
+    // Only the join columns from the other side, each explicitly aliased.
+    // `SELECT a.*, b.*` is not wrong — the driver disambiguates a repeated
+    // name to `user_settings.row_id` rather than dropping it — but it is worse
+    // in two ways: it drags in every column of every joined table (26 + 10 for
+    // this one pair alone), and the disambiguated names depend on the driver's
+    // behaviour rather than on the query. An explicit alias is what the query
+    // itself says the column is called.
+    for (const c of (side === 'out' ? f.ref_columns : f.columns)) {
+      selects.push(`${_q(alias)}.${_q(c)} AS ${_q(alias + '__' + c)}`);
+    }
+  }
+
+  const where = (opts.where || []).filter(w => w.sql).map(w => w.sql);
+  const lines = [
+    'SELECT ' + selects.join(',\n       '),
+    `  FROM ${_q(mariaSchema)}.${_q(mariaTable)} AS ${_q(baseAlias)}`,
+    ...joins,
+  ];
+  if (where.length) lines.push(' WHERE ' + where.join('\n   AND '));
+  lines.push(` LIMIT ${Math.max(1, parseInt(opts.limit, 10) || 200)}`);
+  return lines.join('\n');
+}
+
+/** Quote a literal for the generated SQL. The endpoint is read-only and
+ *  rejects anything that is not a SELECT, so this is about the query being
+ *  CORRECT — an unescaped apostrophe in a name is a syntax error, not a
+ *  vulnerability — but doubling quotes is the right habit either way. */
+function _sqlLit(v) { return `'${String(v).replace(/'/g, "''")}'`; }
+
+function _mariaWhereSql(col, op, val) {
+  if (!col) return '';
+  if (op === 'IS NULL' || op === 'IS NOT NULL') return `${col} ${op}`;
+  if (op === 'IN') {
+    const parts = String(val).split(',').map(s => s.trim()).filter(Boolean);
+    return parts.length ? `${col} IN (${parts.map(_sqlLit).join(', ')})` : '';
+  }
+  if (val === '') return '';
+  return `${col} ${op} ${_sqlLit(val)}`;
+}
+
+/* Column lists for tables we have joined to, kept for the session. The join
+   builder needs every column of each joined table, not just the join keys —
+   filtering on `user_settings.name` is a far more likely question than
+   filtering on the foreign key you just joined through. */
+const _mariaColCache = {};
+
+async function _mariaJoinColumnCatalog() {
+  const taken = new Set();
+  const baseAlias = _mariaAlias(mariaTable, taken);
+  const groups = [{ alias: baseAlias, table: mariaTable,
+                    columns: mariaColumns.map(c => c.name) }];
+
+  for (const { side, f } of _mariaSelectedJoins()) {
+    const schema = side === 'out' ? f.ref_schema : f.from_schema;
+    const table  = side === 'out' ? f.ref_table  : f.from_table;
+    const alias  = _mariaAlias(table, taken);
+    const key = `${schema}.${table}`;
+
+    if (!_mariaColCache[key]) {
+      const d = await api(`/api/maria/columns?schema=${encodeURIComponent(schema)}`
+                        + `&table=${encodeURIComponent(table)}`);
+      // A failed lookup falls back to the join columns rather than dropping
+      // the table from the picker entirely — some filter beats none.
+      _mariaColCache[key] = (d && !d.error && d.columns)
+        ? d.columns.map(c => c.name)
+        : (side === 'out' ? f.ref_columns : f.columns);
+    }
+    groups.push({ alias, table, columns: _mariaColCache[key] });
+  }
+  return groups;
+}
+
+/** <optgroup>s so a 26-column base table and a 10-column joined one stay
+ *  distinguishable in one dropdown. */
+function _mariaColumnOptions(groups) {
+  return groups.map(g => `<optgroup label="${esc(g.alias)}">`
+    + g.columns.map(c => {
+        const v = `${_q(g.alias)}.${_q(c)}`;
+        return `<option value="${esc(v)}">${esc(g.alias)}.${esc(c)}</option>`;
+      }).join('')
+    + '</optgroup>').join('');
+}
+
+/** Distinct values for a qualified column, taken from the rows already loaded
+ *  in the sample pane. Only the base table has rows here, so a joined table's
+ *  column simply gets no suggestions rather than a wrong set. */
+function _mariaSampleValues(qualified, baseAlias) {
+  const prefix = `${_q(baseAlias)}.`;
+  if (!qualified.startsWith(prefix)) return [];
+  const col = qualified.slice(prefix.length).replace(/^`|`$/g, '');
+  const seen = new Set();
+  for (const r of (mariaSample?.rows || [])) {
+    const v = r[col];
+    if (v === null || v === undefined) continue;
+    if (typeof v === 'object') continue;      // a blob marker is not a value
+    seen.add(String(v));
+    if (seen.size >= 40) break;
+  }
+  return [...seen].sort();
+}
+
+async function openMariaJoinBuilder() {
+  if (!mariaJoinSel.size) return;
+  document.querySelector('.rt-modal-overlay.rt-mariajoin')?.remove();
+
+  // Fetched before the dialog is drawn so the filter dropdown is complete the
+  // moment it appears — a picker that fills in a moment later is one people
+  // open, see the wrong list in, and close.
+  const colGroups = await _mariaJoinColumnCatalog();
+
+  const wrap = document.createElement('div');
+  wrap.className = 'rt-modal-overlay rt-mariajoin';
+  const picked = _mariaSelectedJoins();
+  const fanOut = picked.some(p => p.side === 'in');
+
+  // `width`, not max-width: .rt-modal sets width:min(440px,92vw), which a
+  // max-width can never widen. And white-space:normal because .rt-modal-body
+  // is pre-line for plain-text messages, which mangles real markup.
+  wrap.innerHTML = `<div class="rt-modal" style="width:min(900px,94vw);">
+      <div class="rt-modal-title"><i class="bi bi-diagram-2 me-1"></i>Join from
+        <span class="font-monospace">${esc(mariaSchema)}.${esc(mariaTable)}</span></div>
+      <div class="rt-modal-body" style="white-space:normal;">
+        <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+          <span class="small text-secondary">${picked.length} relation${picked.length === 1 ? '' : 's'}</span>
+          <select class="form-select form-select-sm mj-jointype" style="width:120px;font-size:.75rem;">
+            <option value="LEFT">LEFT JOIN</option>
+            <option value="INNER">INNER JOIN</option>
+          </select>
+          <label class="small text-secondary mb-0 ms-2">Limit</label>
+          <input type="number" min="1" max="10000" value="200"
+                 class="form-control form-control-sm mj-limit" style="width:90px;font-size:.75rem;">
+        </div>
+
+        ${fanOut ? `<div class="alert alert-warning py-1 px-2 small mb-2">
+            A <b>Referenced by</b> relation is one-to-many: each
+            <span class="font-monospace">${esc(mariaTable)}</span> row repeats once per
+            matching child row, so counts over the base table will be inflated.
+          </div>` : ''}
+
+        <!-- The filter block is a titled panel with a row already in it, not a
+             button someone has to find first: adding a WHERE is the common
+             case, so it should cost nothing to discover. -->
+        <div class="mj-filters mb-2">
+          <div class="mj-filters-head">
+            <i class="bi bi-funnel me-1"></i>
+            <span>Filters</span>
+            <span class="text-secondary fw-normal ms-1" style="text-transform:none;">
+              — combined with AND; leave the value empty to ignore a row</span>
+            <button class="btn btn-sm btn-outline-primary py-0 px-2 ms-auto mj-addwhere"
+                    style="font-size:.72rem;"><i class="bi bi-plus-lg me-1"></i>Add condition</button>
+          </div>
+          <div class="mj-where"></div>
+        </div>
+
+        <div class="small fw-semibold text-secondary mb-1">Generated SQL — edit freely</div>
+        <!-- wrap=off: soft-wrapping breaks the indentation that makes a join
+             readable, which is the whole point of showing it. -->
+        <textarea class="form-control font-monospace mj-sql" rows="12" wrap="off"
+                  spellcheck="false" style="font-size:.74rem;white-space:pre;
+                  overflow-x:auto;"></textarea>
+        <div class="form-text" style="font-size:.7rem;">
+          Read-only: it runs through the same SELECT-only guard as the SQL screen.
+        </div>
+      </div>
+      <div class="rt-modal-actions">
+        <button class="btn btn-sm btn-primary" data-act="run">
+          <i class="bi bi-play-fill me-1"></i>Run in SQL Query</button>
+        <button class="btn btn-sm btn-outline-secondary" data-act="copy">Copy</button>
+        <button class="btn btn-sm btn-outline-secondary" data-act="close">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+
+  const sqlBox = wrap.querySelector('.mj-sql');
+  let touched = false;                 // stop regenerating over a hand-edit
+  sqlBox.addEventListener('input', () => { touched = true; });
+
+  const regen = () => {
+    if (touched) return;
+    sqlBox.value = _buildMariaJoinSql({
+      joinType: wrap.querySelector('.mj-jointype').value,
+      limit: wrap.querySelector('.mj-limit').value,
+      where: [...wrap.querySelectorAll('.mj-wrow')].map(row => ({
+        sql: _mariaWhereSql(row.querySelector('.mj-col').value,
+                            row.querySelector('.mj-op').value,
+                            row.querySelector('.mj-val')?.value ?? ''),
+      })),
+    });
+  };
+
+  let listSeq = 0;
+  const addWhere = () => {
+    const listId = `mj-vals-${Date.now()}-${listSeq++}`;
+    const row = document.createElement('div');
+    row.className = 'mj-wrow d-flex align-items-center gap-1 mb-1';
+    row.innerHTML = `
+      <select class="form-select form-select-sm mj-col font-monospace"
+              style="font-size:.72rem;flex:1 1 auto;min-width:0;">
+        ${_mariaColumnOptions(colGroups)}
+      </select>
+      <select class="form-select form-select-sm mj-op" style="width:120px;font-size:.72rem;">
+        ${['=', '!=', 'LIKE', 'IN', '>', '<', '>=', '<=', 'IS NULL', 'IS NOT NULL']
+          .map(o => `<option>${o}</option>`).join('')}
+      </select>
+      <input type="text" class="form-control form-control-sm mj-val" placeholder="value"
+             list="${listId}" style="font-size:.72rem;">
+      <datalist id="${listId}"></datalist>
+      <button class="btn btn-sm btn-link text-secondary py-0 px-1 mj-del"
+              title="Remove"><i class="bi bi-x-lg"></i></button>`;
+    wrap.querySelector('.mj-where').appendChild(row);
+
+    // Suggest the values actually present in the rows on screen. Saves both
+    // the typing and the guess about spelling — `MsspUser` is not something
+    // anyone gets right from memory — while staying a suggestion, so a value
+    // that is not in the sample can still be typed.
+    const colSel = row.querySelector('.mj-col');
+    const syncList = () => {
+      const dl = row.querySelector('datalist');
+      dl.innerHTML = _mariaSampleValues(colSel.value, colGroups[0].alias)
+        .map(v => `<option value="${esc(v)}"></option>`).join('');
+    };
+    colSel.addEventListener('change', syncList);
+    syncList();
+    // IS NULL takes no value — hiding the box stops it looking like the value
+    // was ignored.
+    const op = row.querySelector('.mj-op');
+    const syncVal = () => {
+      const none = op.value === 'IS NULL' || op.value === 'IS NOT NULL';
+      row.querySelector('.mj-val').classList.toggle('d-none', none);
+      row.querySelector('.mj-val').placeholder = op.value === 'IN' ? 'a, b, c' : 'value';
+    };
+    op.addEventListener('change', syncVal);
+    syncVal();
+  };
+
+  wrap.addEventListener('input', regen);
+  wrap.addEventListener('change', regen);
+  wrap.addEventListener('click', async ev => {
+    if (ev.target.closest('.mj-addwhere')) { addWhere(); regen(); return; }
+    if (ev.target.closest('.mj-del')) {
+      ev.target.closest('.mj-wrow').remove(); regen(); return;
+    }
+    const act = ev.target.closest('[data-act]')?.dataset.act;
+    if (act === 'close' || ev.target === wrap) { close(); return; }
+    if (act === 'copy') {
+      try { await navigator.clipboard.writeText(sqlBox.value); } catch { sqlBox.select(); }
+      return;
+    }
+    if (act === 'run') {
+      const sql = sqlBox.value.trim();
+      close();
+      showView('mariaquery');
+      const sel = document.getElementById('mariaQuerySchema');
+      if (sel) {
+        // Every table in the generated SQL is schema-qualified, so this only
+        // has to TELL THE TRUTH about where the query is aimed. Setting a
+        // value with no matching option silently leaves it on "(none)", so
+        // add it rather than let the screen misreport the target.
+        if (![...sel.options].some(o => o.value === mariaSchema)) {
+          sel.add(new Option(mariaSchema, mariaSchema));
+        }
+        sel.value = mariaSchema;
+      }
+      document.getElementById('mariaQuerySql').value = sql;
+      document.getElementById('mariaQueryLimit').value =
+        wrap.querySelector('.mj-limit')?.value || 200;
+      runMariaQuery();
+    }
+  });
+
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  function close() { wrap.remove(); document.removeEventListener('keydown', onKey); }
+  document.addEventListener('keydown', onKey);
+
+  // One empty condition to start with. It contributes nothing to the SQL until
+  // a value is typed, so it costs an empty row and saves a click plus the
+  // question of whether filtering is possible at all.
+  addWhere();
+  regen();
+  wrap.querySelector('.mj-val')?.focus();
 }
 
 /* ── Column visibility ────────────────────────────────────────────────────
@@ -7305,17 +7858,54 @@ function _mariaRelations() {
    so the two screens behave identically — this is the same job, and learning
    it twice would be the wrong kind of variety. */
 function openMariaColumnPicker() {
+  const pk = mariaSample?.primary_key || [];
+  const cols = (mariaSample?.columns || []).length
+    ? mariaSample.columns : mariaColumns.map(c => c.name);
+  _openColumnPicker({
+    title: `Columns — ${mariaTable}`,
+    columns: cols,
+    locked: pk,
+    hidden: _mariaHiddenSet(),
+    onChange: (hidden) => {
+      mariaHiddenCols[_mariaTableKey()] = [...hidden];
+      _mariaSave('ccadmin.maria.hiddenCols', mariaHiddenCols);
+      renderMariaDetail();
+    },
+  });
+}
+
+/**
+ * One column picker for both MariaDB screens.
+ *
+ * `locked` columns are always shown and their checkbox is disabled — the
+ * browser's primary key is how a row is addressed, so hiding it would break
+ * blob download and cell editing.
+ *
+ * Bulk actions matter more than they look: on a 30-column join, picking the
+ * three columns you care about means unticking twenty-seven. "Unselect all"
+ * turns that into three clicks, and the search box narrows the list first so
+ * "select all" can act on just the matches.
+ */
+function _openColumnPicker(opts) {
   document.querySelector('.rt-modal-overlay.rt-mariacols')?.remove();
+  const locked = new Set(opts.locked || []);
+  let hidden = new Set(opts.hidden || []);
+
   const wrap = document.createElement('div');
   wrap.className = 'rt-modal-overlay rt-mariacols';
   wrap.innerHTML = `<div class="rt-modal rt-modal-fields">
-      <div class="rt-modal-title"><i class="bi bi-eye me-1"></i>Columns —
-        <span class="font-monospace">${esc(mariaTable)}</span></div>
+      <div class="rt-modal-title"><i class="bi bi-eye me-1"></i>${esc(opts.title)}</div>
       <input class="form-control form-control-sm rt-mariacols-search mb-2"
              placeholder="search columns…"/>
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <button class="btn btn-sm btn-outline-secondary py-0 px-2" data-act="all"
+                style="font-size:.72rem;">Select all</button>
+        <button class="btn btn-sm btn-outline-secondary py-0 px-2" data-act="none"
+                style="font-size:.72rem;">Unselect all</button>
+        <span class="text-secondary rt-mariacols-count" style="font-size:.7rem;"></span>
+      </div>
       <div class="rt-fieldvis-body rt-mariacols-body"></div>
       <div class="rt-modal-actions">
-        <button class="btn btn-sm btn-outline-secondary" data-act="all">Show all</button>
         <button class="btn btn-sm btn-secondary" data-act="close">Close</button>
       </div>
     </div>`;
@@ -7325,49 +7915,50 @@ function openMariaColumnPicker() {
   const onKey = e => { if (e.key === 'Escape') done(); };
   document.addEventListener('keydown', onKey);
 
-  wrap.querySelector('.rt-mariacols-search').addEventListener('input', () => _drawMariaCols(wrap));
+  // What the search box is currently narrowing to. The bulk buttons act on
+  // THESE, so "search 'date' then Unselect all" hides only the date columns —
+  // a bulk action that ignored the filter in front of it would be a trap.
+  const visible = () => {
+    const q = (wrap.querySelector('.rt-mariacols-search').value || '').toLowerCase();
+    return (opts.columns || []).filter(c => !q || c.toLowerCase().includes(q));
+  };
+
+  const draw = () => {
+    const host = wrap.querySelector('.rt-mariacols-body');
+    const list = visible();
+    host.innerHTML = list.map(c => {
+      const isLocked = locked.has(c);
+      return `<label class="rt-field-row"${isLocked
+          ? ' title="Part of the primary key — always shown, because it is how a row is identified"' : ''}>
+        <input type="checkbox" data-col="${esc(c)}"
+               ${isLocked ? 'checked disabled' : (hidden.has(c) ? '' : 'checked')}/>
+        <span class="rt-field-name">${esc(c)}</span>
+        ${isLocked ? '<span class="rt-field-badge">key</span>' : ''}
+      </label>`;
+    }).join('') || '<div class="text-secondary small p-2">No matching columns.</div>';
+
+    const total = (opts.columns || []).length;
+    wrap.querySelector('.rt-mariacols-count').textContent =
+      `${total - hidden.size} of ${total} shown`
+      + (list.length !== total ? ` · ${list.length} matching` : '');
+  };
+
+  const apply = () => { opts.onChange(new Set(hidden)); draw(); };
+
+  wrap.querySelector('.rt-mariacols-search').addEventListener('input', draw);
   wrap.addEventListener('change', ev => {
     const cb = ev.target.closest('input[data-col]');
     if (!cb) return;
-    const key = _mariaTableKey();
-    const set = _mariaHiddenSet();
-    if (cb.checked) set.delete(cb.dataset.col); else set.add(cb.dataset.col);
-    mariaHiddenCols[key] = [...set];
-    _mariaSave('ccadmin.maria.hiddenCols', mariaHiddenCols);
-    renderMariaDetail();
+    if (cb.checked) hidden.delete(cb.dataset.col); else hidden.add(cb.dataset.col);
+    apply();
   });
   wrap.addEventListener('click', ev => {
-    const act = ev.target.dataset.act;
+    const act = ev.target.closest('[data-act]')?.dataset.act;
     if (act === 'close' || ev.target === wrap) { done(); return; }
-    if (act === 'all') {
-      delete mariaHiddenCols[_mariaTableKey()];
-      _mariaSave('ccadmin.maria.hiddenCols', mariaHiddenCols);
-      renderMariaDetail();
-      _drawMariaCols(wrap);
-    }
+    if (act === 'all')  { visible().forEach(c => hidden.delete(c)); apply(); }
+    if (act === 'none') { visible().forEach(c => { if (!locked.has(c)) hidden.add(c); }); apply(); }
   });
-  _drawMariaCols(wrap);
-}
-
-function _drawMariaCols(wrap) {
-  const host = wrap.querySelector('.rt-mariacols-body');
-  const q = (wrap.querySelector('.rt-mariacols-search')?.value || '').toLowerCase();
-  const hidden = _mariaHiddenSet();
-  const pk = mariaSample?.primary_key || [];
-  const cols = (mariaSample?.columns || []).length
-    ? mariaSample.columns : mariaColumns.map(c => c.name);
-  host.innerHTML = cols.filter(c => !q || c.toLowerCase().includes(q)).map(c => {
-    // Key columns stay visible whatever the box says, so the box must not
-    // pretend otherwise — an unchecked control that changes nothing reads as
-    // a bug. Disabled and labelled instead.
-    const locked = pk.includes(c);
-    return `<label class="rt-field-row" ${locked
-        ? 'title="Part of the primary key — always shown, because it is how a row is identified"' : ''}>
-      <input type="checkbox" data-col="${esc(c)}" ${locked ? 'checked disabled' : (hidden.has(c) ? '' : 'checked')}/>
-      <span class="rt-field-name">${esc(c)}</span>
-      ${locked ? '<span class="rt-field-badge">key</span>' : ''}
-    </label>`;
-  }).join('') || '<div class="text-secondary small p-2">No matching columns.</div>';
+  draw();
 }
 
 /* Byte sizes are formatted by _fmtBytes, already defined for the archive
@@ -7457,9 +8048,11 @@ function _mariaTable(columns, rows, truncated, ctx) {
          + ` data-rk="${esc(JSON.stringify(key))}"`
          + ` data-val="${esc(s)}">${shown}</td>`;
   }).join('') + '</tr>').join('');
+  // The caller either owns the scroller (the browser's rows pane, the query
+  // results card) or it does not, in which case one is supplied here.
+  const ownScroller = !!(ctx && (ctx.editable || ctx.scroll));
   return `
-    <div class="${ctx && ctx.editable ? '' : 'maria-grid-scroll-inline'}"
-         style="${ctx && ctx.editable ? '' : 'overflow:auto;max-height:60vh;'}">
+    <div style="${ownScroller ? '' : 'overflow:auto;max-height:60vh;'}">
       <table class="table table-sm table-hover mb-0 font-monospace maria-grid" style="font-size:.72rem;">
         <thead><tr>${head}</tr></thead>
         <tbody>${body}</tbody>
@@ -7609,6 +8202,442 @@ function _mariaConfirmEdit(o) {
   });
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   Query wizard — for engineers who know the CC but not SQL
+   ══════════════════════════════════════════════════════════════════════════
+   Pick a table, pick columns, add conditions, get a statement. The statement
+   is always shown before it runs: the point is to remove the need to REMEMBER
+   syntax, not to hide what is being executed.
+
+   Only SELECT is offered, and the other two are shown greyed with the reason
+   rather than omitted — someone who came looking for UPDATE should find out
+   why it is not there instead of concluding the tool is unfinished. */
+
+async function openMariaQueryWizard() {
+  document.querySelector('.rt-modal-overlay.rt-mariawiz')?.remove();
+  if (!mariaSchemas.length) await loadMariaSchemas();
+
+  const wrap = document.createElement('div');
+  wrap.className = 'rt-modal-overlay rt-mariawiz';
+  wrap.innerHTML = `<div class="rt-modal" style="width:min(900px,94vw);">
+      <div class="rt-modal-title"><i class="bi bi-magic me-1"></i>Build a query</div>
+      <div class="rt-modal-body" style="white-space:normal;">
+
+        <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+          <div class="btn-group btn-group-sm" role="group">
+            <input type="radio" class="btn-check" name="wizVerb" id="wizSelect" checked>
+            <label class="btn btn-outline-primary py-0 px-3" for="wizSelect"
+                   style="font-size:.75rem;">SELECT</label>
+            <input type="radio" class="btn-check" name="wizVerb" id="wizUpdate" disabled>
+            <label class="btn btn-outline-secondary py-0 px-3 disabled" for="wizUpdate"
+                   style="font-size:.75rem;"
+                   title="Not available — see the note below">UPDATE</label>
+            <input type="radio" class="btn-check" name="wizVerb" id="wizDelete" disabled>
+            <label class="btn btn-outline-secondary py-0 px-3 disabled" for="wizDelete"
+                   style="font-size:.75rem;"
+                   title="Not available — see the note below">DELETE</label>
+          </div>
+          <label class="small text-secondary mb-0 ms-2">Schema</label>
+          <select class="form-select form-select-sm wiz-schema" style="width:170px;font-size:.75rem;">
+            ${mariaSchemas.map(s => `<option value="${esc(s.name)}"
+              ${s.name === mariaSchema ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
+          </select>
+          <label class="small text-secondary mb-0 ms-1">Table</label>
+          <select class="form-select form-select-sm wiz-table"
+                  style="width:220px;font-size:.75rem;"><option>loading…</option></select>
+        </div>
+
+        <div class="alert alert-secondary py-1 px-2 small mb-2" style="font-size:.72rem;">
+          <b>UPDATE and DELETE are not offered.</b> This screen runs through a
+          read-only connection, so the server would refuse them. Changing data
+          needs the per-row edit in the table browser, which is separately
+          gated and audited.
+        </div>
+
+        <div class="mj-filters mb-2">
+          <div class="mj-filters-head">
+            <i class="bi bi-list-columns me-1"></i><span>Columns</span>
+            <span class="text-secondary fw-normal ms-1" style="text-transform:none;">
+              — none ticked means all</span>
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2 ms-auto wiz-cols-none"
+                    style="font-size:.7rem;">Unselect all</button>
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2 wiz-cols-all"
+                    style="font-size:.7rem;">Select all</button>
+          </div>
+          <div class="wiz-cols" style="max-height:120px;overflow:auto;padding:6px 8px;
+               display:flex;flex-wrap:wrap;gap:4px 12px;"></div>
+        </div>
+
+        <div class="mj-filters mb-2">
+          <div class="mj-filters-head">
+            <i class="bi bi-funnel me-1"></i><span>Conditions</span>
+            <span class="text-secondary fw-normal ms-1" style="text-transform:none;">
+              — combined with AND</span>
+            <button class="btn btn-sm btn-outline-primary py-0 px-2 ms-auto wiz-addwhere"
+                    style="font-size:.7rem;"><i class="bi bi-plus-lg me-1"></i>Add condition</button>
+          </div>
+          <div class="wiz-where"></div>
+        </div>
+
+        <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+          <label class="small text-secondary mb-0">Order by</label>
+          <select class="form-select form-select-sm wiz-order" style="width:200px;font-size:.75rem;">
+            <option value="">(none)</option>
+          </select>
+          <select class="form-select form-select-sm wiz-dir" style="width:90px;font-size:.75rem;">
+            <option value="ASC">ASC</option><option value="DESC">DESC</option>
+          </select>
+          <label class="small text-secondary mb-0 ms-2">Limit</label>
+          <input type="number" min="1" max="10000" value="200"
+                 class="form-control form-control-sm wiz-limit" style="width:90px;font-size:.75rem;">
+        </div>
+
+        <div class="small fw-semibold text-secondary mb-1">Generated SQL</div>
+        <textarea class="form-control font-monospace wiz-sql" rows="7" wrap="off"
+                  spellcheck="false" readonly
+                  style="font-size:.74rem;white-space:pre;overflow-x:auto;"></textarea>
+      </div>
+      <div class="rt-modal-actions">
+        <button class="btn btn-sm btn-primary" data-act="run">
+          <i class="bi bi-play-fill me-1"></i>Run</button>
+        <button class="btn btn-sm btn-outline-primary" data-act="use">Put in editor</button>
+        <button class="btn btn-sm btn-outline-secondary" data-act="close">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+
+  const done = () => { wrap.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') done(); };
+  document.addEventListener('keydown', onKey);
+
+  let columns = [];
+
+  const regen = () => {
+    const schema = wrap.querySelector('.wiz-schema').value;
+    const table  = wrap.querySelector('.wiz-table').value;
+    if (!table) { wrap.querySelector('.wiz-sql').value = ''; return; }
+    const picked = [...wrap.querySelectorAll('.wiz-cols input:checked')]
+      .map(cb => cb.dataset.col);
+    const cols = picked.length && picked.length !== columns.length
+      ? picked.map(c => _q(c)).join(',\n       ') : '*';
+
+    const where = [...wrap.querySelectorAll('.wiz-wrow')].map(r =>
+      _mariaWhereSql(_q(r.querySelector('.wiz-col').value),
+                     r.querySelector('.wiz-op').value,
+                     r.querySelector('.wiz-val')?.value ?? '')).filter(Boolean);
+
+    const order = wrap.querySelector('.wiz-order').value;
+    const lines = [`SELECT ${cols}`, `  FROM ${_q(schema)}.${_q(table)}`];
+    if (where.length) lines.push(' WHERE ' + where.join('\n   AND '));
+    if (order) lines.push(` ORDER BY ${_q(order)} ${wrap.querySelector('.wiz-dir').value}`);
+    lines.push(` LIMIT ${Math.max(1, parseInt(wrap.querySelector('.wiz-limit').value, 10) || 200)}`);
+    wrap.querySelector('.wiz-sql').value = lines.join('\n');
+  };
+
+  const addWhere = () => {
+    const row = document.createElement('div');
+    row.className = 'wiz-wrow d-flex align-items-center gap-1 mb-1';
+    row.innerHTML = `
+      <select class="form-select form-select-sm wiz-col font-monospace"
+              style="font-size:.72rem;flex:1 1 auto;min-width:0;">
+        ${columns.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}
+      </select>
+      <select class="form-select form-select-sm wiz-op" style="width:120px;font-size:.72rem;">
+        ${['=', '!=', 'LIKE', 'IN', '>', '<', '>=', '<=', 'IS NULL', 'IS NOT NULL']
+          .map(o => `<option>${o}</option>`).join('')}
+      </select>
+      <input type="text" class="form-control form-control-sm wiz-val" placeholder="value"
+             style="font-size:.72rem;width:180px;">
+      <button class="btn btn-sm btn-link text-secondary py-0 px-1 wiz-del"
+              title="Remove"><i class="bi bi-x-lg"></i></button>`;
+    wrap.querySelector('.wiz-where').appendChild(row);
+    const op = row.querySelector('.wiz-op');
+    op.addEventListener('change', () => {
+      const none = op.value === 'IS NULL' || op.value === 'IS NOT NULL';
+      row.querySelector('.wiz-val').classList.toggle('d-none', none);
+    });
+  };
+
+  const loadColumns = async () => {
+    const schema = wrap.querySelector('.wiz-schema').value;
+    const table  = wrap.querySelector('.wiz-table').value;
+    const host = wrap.querySelector('.wiz-cols');
+    if (!table) { host.innerHTML = ''; columns = []; return; }
+    host.innerHTML = '<span class="text-secondary small">loading…</span>';
+    const d = await api(`/api/maria/columns?schema=${encodeURIComponent(schema)}`
+                      + `&table=${encodeURIComponent(table)}`);
+    columns = (d && !d.error && d.columns) ? d.columns.map(c => c.name) : [];
+    host.innerHTML = columns.map(c => `
+      <label class="d-flex align-items-center gap-1" style="font-size:.72rem;">
+        <input type="checkbox" data-col="${esc(c)}">
+        <span class="font-monospace">${esc(c)}</span>
+      </label>`).join('') || '<span class="text-secondary small">no columns</span>';
+    wrap.querySelector('.wiz-order').innerHTML = '<option value="">(none)</option>'
+      + columns.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+    wrap.querySelector('.wiz-where').innerHTML = '';   // stale columns
+    regen();
+  };
+
+  const loadTables = async () => {
+    const schema = wrap.querySelector('.wiz-schema').value;
+    const sel = wrap.querySelector('.wiz-table');
+    sel.innerHTML = '<option>loading…</option>';
+    const d = await api(`/api/maria/tables?schema=${encodeURIComponent(schema)}`);
+    const tables = (d && !d.error && d.tables) ? d.tables : [];
+    sel.innerHTML = tables.map(t => `<option value="${esc(t.name)}"
+      ${t.name === mariaTable ? 'selected' : ''}>${esc(t.name)}</option>`).join('')
+      || '<option value="">(no tables)</option>';
+    await loadColumns();
+  };
+
+  wrap.addEventListener('change', async ev => {
+    if (ev.target.closest('.wiz-schema')) { await loadTables(); return; }
+    if (ev.target.closest('.wiz-table'))  { await loadColumns(); return; }
+    regen();
+  });
+  wrap.addEventListener('input', regen);
+  wrap.addEventListener('click', ev => {
+    if (ev.target.closest('.wiz-addwhere')) { addWhere(); regen(); return; }
+    if (ev.target.closest('.wiz-del')) { ev.target.closest('.wiz-wrow').remove(); regen(); return; }
+    if (ev.target.closest('.wiz-cols-all')) {
+      wrap.querySelectorAll('.wiz-cols input').forEach(cb => cb.checked = true); regen(); return;
+    }
+    if (ev.target.closest('.wiz-cols-none')) {
+      wrap.querySelectorAll('.wiz-cols input').forEach(cb => cb.checked = false); regen(); return;
+    }
+    const act = ev.target.closest('[data-act]')?.dataset.act;
+    if (act === 'close' || ev.target === wrap) { done(); return; }
+    if (act === 'use' || act === 'run') {
+      const sql = wrap.querySelector('.wiz-sql').value;
+      const schema = wrap.querySelector('.wiz-schema').value;
+      done();
+      const sel = document.getElementById('mariaQuerySchema');
+      if (sel) {
+        if (![...sel.options].some(o => o.value === schema)) sel.add(new Option(schema, schema));
+        sel.value = schema;
+      }
+      document.getElementById('mariaQueryLimit').value =
+        wrap.querySelector('.wiz-limit').value || 200;
+      _mariaQuerySetSql(sql);
+      if (act === 'run') runMariaQuery();
+    }
+  });
+
+  await loadTables();
+  addWhere();
+  regen();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Editing a query's WHERE clause from the UI
+   ══════════════════════════════════════════════════════════════════════════
+   Rewriting SQL text is where a helpful feature turns destructive, so the
+   rule here is: understand the statement or refuse to touch it. Everything
+   below works on a character map that knows which positions are inside a
+   string, a backtick-quoted identifier or a comment, and how deep in
+   parentheses they are — a plain `split(' AND ')` would happily cut a query
+   in half at an AND inside a quoted value or a subquery. */
+
+function _sqlMap(sql) {
+  const depth = new Array(sql.length).fill(0);
+  const code  = new Array(sql.length).fill(true);
+  let d = 0, i = 0;
+  while (i < sql.length) {
+    const c = sql[i], n = sql[i + 1];
+    if (c === '-' && n === '-') {
+      while (i < sql.length && sql[i] !== '\n') { code[i] = false; depth[i] = d; i++; }
+      continue;
+    }
+    if (c === '#') {
+      while (i < sql.length && sql[i] !== '\n') { code[i] = false; depth[i] = d; i++; }
+      continue;
+    }
+    if (c === '/' && n === '*') {
+      const end = sql.indexOf('*/', i + 2);
+      const stop = end === -1 ? sql.length : end + 2;
+      while (i < stop) { code[i] = false; depth[i] = d; i++; }
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      const quote = c;
+      code[i] = false; depth[i] = d; i++;
+      while (i < sql.length) {
+        if (sql[i] === '\\' && quote !== '`') { code[i] = false; depth[i] = d; i++; }
+        else if (sql[i] === quote) {
+          // A doubled quote is an escaped one, not the end.
+          if (sql[i + 1] === quote) { code[i] = false; depth[i] = d; i++; }
+          else { code[i] = false; depth[i] = d; i++; break; }
+        }
+        code[i] = false; depth[i] = d; i++;
+      }
+      continue;
+    }
+    if (c === '(') { depth[i] = d; d++; i++; continue; }
+    if (c === ')') { d = Math.max(0, d - 1); depth[i] = d; i++; continue; }
+    depth[i] = d; i++;
+  }
+  return { depth, code };
+}
+
+/** First match of `pattern` that is real code at paren depth 0. */
+function _sqlFindTop(sql, map, pattern, from = 0) {
+  const re = new RegExp('\\b(?:' + pattern + ')\\b', 'gi');
+  re.lastIndex = from;
+  let m;
+  while ((m = re.exec(sql)) !== null) {
+    if (map.code[m.index] && map.depth[m.index] === 0) {
+      return { start: m.index, end: m.index + m[0].length };
+    }
+  }
+  return null;
+}
+
+// Clauses that can follow a WHERE. The WHERE body ends at the first of these.
+const _SQL_TAIL = 'GROUP\\s+BY|HAVING|ORDER\\s+BY|LIMIT|PROCEDURE|INTO|UNION|WINDOW';
+
+/**
+ * Split a statement into { head, conditions[], tail } so the UI can edit the
+ * conditions and put it back together.
+ *
+ * `editable` is false — with a reason shown to the user — whenever the WHERE
+ * is something this cannot safely round-trip. Refusing is the feature: a
+ * mangled query against a customer's CC is worse than no button.
+ */
+function parseMariaWhere(sql) {
+  const map = _sqlMap(sql);
+  const tail = _sqlFindTop(sql, map, _SQL_TAIL);
+  const where = _sqlFindTop(sql, map, 'WHERE');
+
+  if (!where) {
+    // No WHERE yet: conditions can still be ADDED, spliced in before the
+    // first trailing clause.
+    return { editable: true, hasWhere: false, conditions: [],
+             head: sql.slice(0, tail ? tail.start : sql.length).replace(/\s+$/, ''),
+             tail: tail ? sql.slice(tail.start) : '' };
+  }
+
+  const bodyEnd = (tail && tail.start > where.end) ? tail.start : sql.length;
+  const body = sql.slice(where.end, bodyEnd);
+  const bmap = _sqlMap(body);
+
+  if (_sqlFindTop(body, bmap, 'OR')) {
+    return { editable: false,
+             reason: 'This WHERE mixes OR with AND. Removing one part could '
+                   + 'change what the rest means, so the conditions are shown '
+                   + 'read-only — edit the SQL directly.' };
+  }
+
+  // Split on top-level AND — except the one belonging to a BETWEEN, which is
+  // part of that condition, not a separator. Splitting there would let someone
+  // delete half of `a BETWEEN 1 AND 2` and be handed `a BETWEEN 1`.
+  const parts = [];
+  const re = /\b(AND|BETWEEN)\b/gi;
+  let m, last = 0, pendingBetween = false;
+  while ((m = re.exec(body)) !== null) {
+    if (!bmap.code[m.index] || bmap.depth[m.index] !== 0) continue;
+    if (m[0].toUpperCase() === 'BETWEEN') { pendingBetween = true; continue; }
+    if (pendingBetween) { pendingBetween = false; continue; }   // the BETWEEN's own AND
+    parts.push(body.slice(last, m.index));
+    last = m.index + m[0].length;
+  }
+  parts.push(body.slice(last));
+
+  const conditions = parts.map(p => p.trim()).filter(Boolean);
+  if (!conditions.length) {
+    return { editable: false, reason: 'The WHERE clause is empty.' };
+  }
+  return { editable: true, hasWhere: true, conditions,
+           head: sql.slice(0, where.start).replace(/\s+$/, ''),
+           tail: sql.slice(bodyEnd) };
+}
+
+/** Put a statement back together from edited conditions. */
+function buildMariaWhere(parsed, conditions) {
+  const body = conditions.filter(c => c && c.trim());
+  const tail = parsed.tail ? '\n ' + parsed.tail.trim() : '';
+  if (!body.length) return parsed.head + tail;
+  return parsed.head + '\n WHERE ' + body.join('\n   AND ') + tail;
+}
+
+/** Redraw the conditions panel from whatever is currently in the editor. */
+function syncMariaQueryConditions() {
+  const host = document.getElementById('mariaQueryConds');
+  const sql = document.getElementById('mariaQuerySql')?.value || '';
+  if (!host) return;
+
+  if (!sql.trim()) { host.classList.add('d-none'); host.innerHTML = ''; return; }
+
+  let p;
+  try { p = parseMariaWhere(sql); }
+  catch { host.classList.add('d-none'); return; }
+
+  host.classList.remove('d-none');
+
+  if (!p.editable) {
+    host.innerHTML = `<div class="mq-cond-row text-secondary">
+        <i class="bi bi-info-circle"></i><span>${esc(p.reason)}</span></div>`;
+    return;
+  }
+
+  const rows = p.conditions.map((c, i) => `
+    <div class="mq-cond-row">
+      <span class="mq-cond-join">${i === 0 ? 'WHERE' : 'AND'}</span>
+      <span class="mq-cond-text flex-grow-1" title="${esc(c)}">${esc(c)}</span>
+      <button class="btn btn-sm btn-link text-secondary py-0 px-1"
+              data-cond-del="${i}" title="Remove this condition">
+        <i class="bi bi-x-lg"></i></button>
+    </div>`).join('');
+
+  host.innerHTML = rows + `
+    <div class="mq-cond-row">
+      <span class="mq-cond-join">${p.conditions.length ? 'AND' : 'WHERE'}</span>
+      <input class="form-control form-control-sm mq-newcol font-monospace"
+             list="mqColList" placeholder="column"
+             style="font-size:.72rem;flex:1 1 auto;min-width:0;">
+      <datalist id="mqColList">${
+        (_mariaQueryCols || []).map(c => `<option value="${esc(c)}"></option>`).join('')}</datalist>
+      <select class="form-select form-select-sm mq-newop" style="width:120px;font-size:.72rem;">
+        ${['=', '!=', 'LIKE', 'IN', '>', '<', '>=', '<=', 'IS NULL', 'IS NOT NULL']
+          .map(o => `<option>${o}</option>`).join('')}
+      </select>
+      <input class="form-control form-control-sm mq-newval" placeholder="value"
+             style="font-size:.72rem;width:160px;">
+      <button class="btn btn-sm btn-outline-primary py-0 px-2" data-cond-add="1"
+              style="font-size:.72rem;">Add</button>
+    </div>`;
+}
+
+function _mariaQuerySetSql(sql) {
+  const box = document.getElementById('mariaQuerySql');
+  box.value = sql;
+  syncMariaQueryConditions();
+}
+
+function removeMariaCondition(idx) {
+  const sql = document.getElementById('mariaQuerySql').value;
+  const p = parseMariaWhere(sql);
+  if (!p.editable) return;
+  const next = p.conditions.slice();
+  next.splice(idx, 1);
+  _mariaQuerySetSql(buildMariaWhere(p, next));
+}
+
+function addMariaCondition(host) {
+  const col = host.querySelector('.mq-newcol')?.value.trim();
+  const op  = host.querySelector('.mq-newop')?.value;
+  const val = host.querySelector('.mq-newval')?.value ?? '';
+  if (!col) return;
+  // Bare names get quoted; anything already qualified or quoted is left alone,
+  // so `t`.`c` and expressions both survive.
+  const colSql = /[`.(\s]/.test(col) ? col : _q(col);
+  const cond = _mariaWhereSql(colSql, op, val);
+  if (!cond) return;
+  const sql = document.getElementById('mariaQuerySql').value;
+  const p = parseMariaWhere(sql);
+  if (!p.editable) return;
+  _mariaQuerySetSql(buildMariaWhere(p, [...p.conditions, cond]));
+}
+
 function _fillMariaQuerySchemas() {
   const sel = document.getElementById('mariaQuerySchema');
   if (!sel) return;
@@ -7619,6 +8648,14 @@ function _fillMariaQuerySchemas() {
   // starting there saves the first click of nearly every session.
   sel.value = keep || (mariaSchemas.find(s => !s.system)?.name || '');
 }
+
+/* Last result set, kept so the column picker and re-renders do not need to
+   re-run the query — running a join twice to hide a column is both slow and,
+   on a live CC, a second real load. */
+let _mariaQueryCols = [];
+let _mariaQueryRows = [];
+let _mariaQueryMeta = null;
+let _mariaQueryHidden = new Set();
 
 async function runMariaQuery() {
   const sql = (document.getElementById('mariaQuerySql')?.value || '').trim();
@@ -7641,11 +8678,51 @@ async function runMariaQuery() {
   if (!d || d.error) {
     _mariaError('mariaQueryError', (d && d.error) || 'query failed');
     out.innerHTML = '<div class="text-secondary small p-3">—</div>';
+    document.getElementById('mariaQueryColsBtn')?.classList.add('d-none');
     return;
   }
+
+  _mariaQueryCols = d.columns || [];
+  _mariaQueryRows = d.rows || [];
+  _mariaQueryMeta = d;
+  // A hidden column from the previous query means nothing for this one unless
+  // the name is still there; keeping only the survivors avoids a column
+  // vanishing for a reason nobody can see.
+  _mariaQueryHidden = new Set([..._mariaQueryHidden].filter(c => _mariaQueryCols.includes(c)));
+
+  document.getElementById('mariaQueryColsBtn')
+    ?.classList.toggle('d-none', !_mariaQueryCols.length);
+  // The datalist behind the "add condition" row comes from the result columns.
+  syncMariaQueryConditions();
+  renderMariaQueryResults();
+}
+
+function renderMariaQueryResults() {
+  const out  = document.getElementById('mariaQueryResults');
+  const meta = document.getElementById('mariaQueryMeta');
+  const d = _mariaQueryMeta;
+  if (!out || !d) return;
+
+  const shown = _mariaQueryCols.length - _mariaQueryHidden.size;
   meta.textContent = `${d.count} row(s) · ${d.took_ms} ms`
-    + (d.truncated ? ` · capped at ${d.row_cap}` : '');
-  out.innerHTML = _mariaTable(d.columns || [], d.rows || [], d.truncated);
+    + (d.truncated ? ` · capped at ${d.row_cap}` : '')
+    + (_mariaQueryHidden.size ? ` · ${shown} of ${_mariaQueryCols.length} columns` : '');
+
+  out.innerHTML = _mariaTable(_mariaQueryCols, _mariaQueryRows, d.truncated,
+                              { hidden: _mariaQueryHidden, scroll: true });
+}
+
+/** Column picker for the query results. Same furniture as the browser's, plus
+ *  the two bulk actions — starting from nothing and ticking three columns is
+ *  the common case on a 30-column join, and unticking 27 is not a workflow. */
+function openMariaQueryColumnPicker() {
+  _openColumnPicker({
+    title: 'Columns — query results',
+    columns: _mariaQueryCols,
+    locked: [],
+    hidden: _mariaQueryHidden,
+    onChange: (hidden) => { _mariaQueryHidden = hidden; renderMariaQueryResults(); },
+  });
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
