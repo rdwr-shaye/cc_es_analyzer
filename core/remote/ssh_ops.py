@@ -23,19 +23,42 @@ class SSHError(Exception):
 class SSHSession:
     """One authenticated SSH+SFTP session to an ES machine."""
 
-    def __init__(self, host: str, user: str, password: str, port: int = 22):
+    def __init__(self, host: str, user: str, password: str, port: int = 22,
+                 key_filename: str = "", use_local_keys: bool = False):
+        """Connect. Password auth by default, which is what the snapshot flows
+        have always used and what the UI prompts for.
+
+        `key_filename` / `use_local_keys` opt in to KEY-BASED auth. The defaults
+        keep the original behaviour deliberately: an unattended password login
+        that silently falls back to whatever key happens to be in the calling
+        user's agent is a surprising thing for a support tool to do, and it made
+        "wrong password" present as "connected as someone else". Engineers whose
+        lab CCs are key-only need it though, so it is a decision the caller
+        makes rather than a default.
+        """
         self.host = host
         self.client = paramiko.SSHClient()
         # CC appliances are reached by IP and re-imaged freely — pinning host
         # keys would break every re-install, so accept them automatically.
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self.client.connect(host, port=port, username=user, password=password,
-                            timeout=_CONNECT_TIMEOUT, allow_agent=False,
-                            look_for_keys=False)
+        self.client.connect(host, port=port, username=user,
+                            # None, not "": paramiko treats an empty string as
+                            # "try this password", which fails the auth outright
+                            # on a key-only server instead of trying the key.
+                            password=password or None,
+                            key_filename=key_filename or None,
+                            timeout=_CONNECT_TIMEOUT,
+                            allow_agent=use_local_keys,
+                            look_for_keys=use_local_keys)
         self._sftp = None
 
-    def run(self, cmd: str, timeout: int = 600) -> str:
-        """Run a command; return stdout. Raises SSHError on non-zero exit."""
+    def run_full(self, cmd: str, timeout: int = 600) -> tuple[str, str, int]:
+        """Run a command; return (stdout, stderr, rc) WITHOUT raising.
+
+        For callers that treat a non-zero exit as data rather than failure —
+        `docker logs` on a container with none, `find` on a directory it cannot
+        enter. run() is the raising wrapper over this.
+        """
         logger.info("[ssh %s] $ %s", self.host, cmd)
         _, stdout, stderr = self.client.exec_command(cmd, timeout=timeout)
         rc = stdout.channel.recv_exit_status()
@@ -44,6 +67,11 @@ class SSHSession:
         logger.info("[ssh %s] rc=%s%s%s", self.host, rc,
                     f" stdout: {out.strip()[:800]}" if out.strip() else "",
                     f" stderr: {err[:400]}" if err else "")
+        return out, err, rc
+
+    def run(self, cmd: str, timeout: int = 600) -> str:
+        """Run a command; return stdout. Raises SSHError on non-zero exit."""
+        out, err, rc = self.run_full(cmd, timeout=timeout)
         if rc != 0:
             raise SSHError(f"`{cmd}` failed (rc={rc}): {err or out.strip()}")
         return out

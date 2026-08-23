@@ -47,3 +47,9 @@ data/
 
 # Update agent scratch (host<->container handoff: state, job, request files)
 .update/
+# Shared with deploy/host_agent.py — request/result files, never source.
+.hostexec/
+
+# Generated from Radware's internal support knowledge base — internal-only
+# content, and the GitHub remote for this repo is PUBLIC. Never commit.
+.github/system_operations.md

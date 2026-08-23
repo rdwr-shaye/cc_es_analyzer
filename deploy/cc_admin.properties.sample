@@ -29,6 +29,26 @@ capability.es.artificial=true
 # Copy an index to a new name, optionally shifting every date field.
 capability.es.index.duplicate=true
 
+# Delete a log, heap dump or zip from the System Health screen to reclaim disk.
+#
+# TWO KEYS, and this file is only the first. The host agent must ALSO be
+# running with --allow-delete:
+#
+#   /opt/radware/cc_admin/host_agent.py --install --allow-delete
+#
+# Setting the line below without that changes nothing — the agent refuses, and
+# says so. That is deliberate: the agent's rules live on the host, outside the
+# container, so nothing shipped in an image can make an appliance delete files
+# on its own.
+#
+# What can be removed is decided by modules/system/safety.py and again by the
+# agent's own copy: logs, heap dumps and zips only, and never inside
+# /opt/radware/storage/backup (the nightly MariaDB dumps repair_mysql_db.sh
+# restores from), dc_config, or a datastore volume. On a real CC the eight
+# largest files are typically Lucene segments, MariaDB's Aria log and an
+# application jar — every one of them refused by name.
+capability.system.storage.delete=true
+
 # Not unlockable by design — an appliance follows the CC release train and
 # cannot reach git from a customer network. Listed here only so nobody spends
 # an afternoon wondering why it has no effect; it is ignored with a warning.

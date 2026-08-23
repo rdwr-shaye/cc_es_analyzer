@@ -93,6 +93,19 @@
 
     <!-- Nav buttons -->
     <div class="p-2 pt-1">
+
+      <!-- System. Above Databases and outside the tree on purpose: "is this CC
+           healthy" is the question asked before any datastore is opened, and
+           the answer is not about a datastore. The dot mirrors the global
+           state so the sidebar carries the verdict even from other screens. -->
+      <div class="sidebar-section mb-2" id="systemSection">
+        <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-system"
+                onclick="showView('system')">
+          <i class="bi bi-heart-pulse me-2"></i>System Health
+          <span class="sys-dot sys-unknown ms-1" id="sysNavDot" title="Not checked yet"></span>
+        </button>
+      </div>
+
       <!-- Datastores. The tool is growing from "the ES analyzer" into one
            console over every CC datastore, so the screens live UNDER the store
            they belong to rather than at the top level: adding PostgreSQL and
@@ -367,6 +380,100 @@
           </div><!-- /card -->
 
         </div>
+      </div>
+    </div>
+
+    <!-- ── SYSTEM HEALTH VIEW ──
+         The landing page. Three tiles, one verdict each, and a banner that is
+         the most severe of them. Clicking a tile opens its drilldown below —
+         a panel rather than a modal, because a container log needs the height
+         and an engineer wants to keep the verdict on screen while reading it. -->
+    <div id="view-system" class="view-panel p-3 d-none">
+      <div class="d-flex justify-content-between align-items-center mb-3 gap-2 flex-wrap">
+        <h5 class="fw-bold mb-0"><i class="bi bi-heart-pulse me-2 text-danger"></i>System Health</h5>
+        <div class="d-flex align-items-center gap-2 flex-wrap ms-auto">
+          <span class="text-secondary" style="font-size:0.72rem;" id="sysCheckedAt"></span>
+          <!-- Shown only while a check is in flight. The page does NOT blank
+               itself to refresh — the last reading stays on screen and is
+               replaced when the answer arrives — so this is the only hint that
+               anything is happening, and it must not move the layout. -->
+          <span class="spinner-border spinner-border-sm text-secondary d-none" id="sysBusy"
+                role="status" title="Re-checking this CC…"></span>
+          <button class="btn btn-sm btn-outline-primary py-0 px-2" onclick="loadSystemHealth(true)"
+                  title="Re-run every check now">
+            <i class="bi bi-arrow-clockwise me-1"></i>Re-check
+          </button>
+          <select id="autoRefresh-system" class="form-select form-select-sm auto-refresh-select"
+                  style="width:96px;" onchange="onAutoRefreshChanged('system', this)"
+                  title="Re-run the checks on a timer">
+            <option value="0" selected>Auto: off</option>
+            <option value="10">10s</option>
+            <option value="30">30s</option>
+            <option value="60">60s</option>
+          </select>
+          <button class="btn btn-sm btn-outline-info help-btn" onclick="showHelp('system')"
+                  title="Help for this screen"><i class="bi bi-question-circle me-1"></i>Help</button>
+        </div>
+      </div>
+
+      <!-- Global state. Deliberately the largest thing on the page: it is the
+           one answer a support engineer opens this tool for. -->
+      <div class="sys-banner sys-unknown" id="sysBanner">
+        <i class="bi bi-hourglass-split sys-banner-icon" id="sysBannerIcon"></i>
+        <div>
+          <div class="sys-banner-title" id="sysBannerTitle">Checking this CC…</div>
+          <div class="sys-banner-sub" id="sysBannerSub">Running the container, storage and database checks.</div>
+        </div>
+      </div>
+
+      <!-- Shown only when the host cannot be reached: without it, three
+           "unknown" tiles look like a bug rather than a missing agent. -->
+      <div class="alert alert-warning py-2 px-3 d-none" id="sysHostexecWarn" style="font-size:0.8rem;">
+        <i class="bi bi-exclamation-triangle me-2"></i><span id="sysHostexecMsg"></span>
+      </div>
+
+      <div class="row g-3 sys-tiles" id="sysTiles">
+        <div class="col-12 col-lg-4">
+          <div class="sys-tile sys-unknown" id="sysTile-containers" onclick="openSystemDetail('containers')">
+            <div class="sys-tile-head">
+              <i class="bi bi-boxes"></i><span>Containers</span>
+              <span class="sys-dot sys-unknown ms-auto" id="sysDot-containers"></span>
+            </div>
+            <div class="sys-tile-headline" id="sysHead-containers">—</div>
+            <div class="sys-tile-foot">Every service this CC's COMPOSE_PROFILES require</div>
+          </div>
+        </div>
+        <div class="col-12 col-lg-4">
+          <div class="sys-tile sys-unknown" id="sysTile-storage" onclick="openSystemDetail('storage')">
+            <div class="sys-tile-head">
+              <i class="bi bi-hdd"></i><span>Storage</span>
+              <span class="sys-dot sys-unknown ms-auto" id="sysDot-storage"></span>
+            </div>
+            <div class="sys-tile-headline" id="sysHead-storage">—</div>
+            <div class="sys-tile-foot">Host filesystems — amber at 80%, red at 90%</div>
+          </div>
+        </div>
+        <div class="col-12 col-lg-4">
+          <div class="sys-tile sys-unknown" id="sysTile-databases" onclick="openSystemDetail('databases')">
+            <div class="sys-tile-head">
+              <i class="bi bi-database-check"></i><span>Databases</span>
+              <span class="sys-dot sys-unknown ms-auto" id="sysDot-databases"></span>
+            </div>
+            <div class="sys-tile-headline" id="sysHead-databases">—</div>
+            <div class="sys-tile-foot">Elasticsearch index health · MariaDB table integrity</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Drilldown. One container, filled per tile by openSystemDetail(). -->
+      <div class="card shadow-sm mt-3 d-none" id="sysDetailCard">
+        <div class="card-header d-flex justify-content-between align-items-center gap-2 flex-wrap">
+          <span class="fw-semibold" id="sysDetailTitle"></span>
+          <div class="d-flex align-items-center gap-2 ms-auto flex-wrap" id="sysDetailTools"></div>
+          <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="closeSystemDetail()"
+                  title="Close this panel"><i class="bi bi-x-lg"></i></button>
+        </div>
+        <div class="card-body p-0" id="sysDetailBody"></div>
       </div>
     </div>
 

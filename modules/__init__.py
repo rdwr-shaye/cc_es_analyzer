@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 # Order matters only for route registration; keep it readable.
 ENABLED: tuple[str, ...] = (
+    # First, because it owns the landing page: "is this CC healthy" is the
+    # question asked before any datastore is opened.
+    "modules.system",
     "modules.es",
     "modules.maria",
     # Phase 2: "modules.pg"

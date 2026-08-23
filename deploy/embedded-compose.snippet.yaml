@@ -44,6 +44,25 @@
       # (modules/maria/credentials.py). One file, not the directory: nothing
       # else in /usr/local/bin is ours to see.
       - "/usr/local/bin/mysql:/usr/local/bin/mysql:ro"
+      # The System dashboard's window onto the host. This container has no
+      # docker socket and no view of the host filesystem — deliberately — so the
+      # container-health, disk-usage and table-integrity checks are asked for
+      # through this directory and answered by deploy/host_agent.py, running as
+      # root on the CC. Read-write because the request files are written from
+      # this side.
+      #
+      # Worth being precise about what the mount grants, since it is the one
+      # new privilege this feature asks for: the ability to place a JSON file
+      # naming ONE OF FIVE read-only operations. The agent validates the name
+      # and every argument against its own allowlist, which lives on the host
+      # and is not in this image. It is not a command channel, and mounting the
+      # docker socket instead — the obvious alternative — would have handed the
+      # container root on the appliance.
+      #
+      # Without the agent installed, the app reports those three checks as
+      # "unknown" and says so on screen. It does not fail, and it does not
+      # report health it could not verify.
+      - "/opt/radware/storage/data/cc-admin/hostexec:/app/.hostexec"
     # Bound to loopback like every other service here — reached through nginx,
     # never exposed on the appliance's external interface directly.
     ports:

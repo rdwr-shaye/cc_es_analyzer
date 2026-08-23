@@ -498,6 +498,78 @@ def _snap_cleanup(name: str, es=None, ssh=None) -> bool:
     return es_ok
 
 
+def _probe_ssh(host: str, port: int = 22, timeout: float = 4.0) -> bool:
+    """True when a TCP connection to host:port succeeds — a cheap 'is there an
+    sshd there' test used to pick the CC host address embedded."""
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def _default_gateway() -> str:
+    """The container's default-route gateway, which in a bridge network IS the
+    Docker host — i.e. the CC itself. Read from /proc so it needs no `ip`
+    binary (the slim image has none). Empty string when it can't be read."""
+    try:
+        with open("/proc/net/route") as fh:
+            for line in fh.readlines()[1:]:
+                f = line.strip().split()
+                # Destination 00000000 = default route; gateway is little-endian hex.
+                if len(f) > 2 and f[1] == "00000000":
+                    g = int(f[2], 16)
+                    return f"{g & 0xff}.{(g >> 8) & 0xff}.{(g >> 16) & 0xff}.{(g >> 24) & 0xff}"
+    except Exception:
+        pass
+    return ""
+
+
+def _snapshot_ssh_host(es) -> str:
+    """The host to SSH into for the snapshot zip/pull — which is NOT always the
+    host the ES *client* talks to.
+
+    Standalone, they are the same box: the engineer connected the app to a CC
+    over the network, ES answers on that CC's address, and that address is an
+    SSH target we hold (or can prompt for) credentials on. So use it.
+
+    Embedded, they diverge. The ES client reaches Elasticsearch across the CC's
+    internal compose network at a SERVICE NAME (e.g. ``kvision-infra-efk``) —
+    which has no sshd and is not a box anyone logs into. But the snapshot files
+    ES writes live on the CC HOST (``snap_host_dir`` is a bind mount from the
+    host into the ES container), and that host — the CC itself — does run sshd.
+    The credentials the user gives are for the SYSTEM, not for the ES
+    container, exactly as they'd expect. So resolve to the CC host:
+
+      1. an explicit SNAP_SSH_HOST if the deployment set one (most reliable);
+      2. else the container's default-route gateway, which in a bridge network
+         is the Docker host = the CC, when its sshd answers;
+      3. else the conventional docker0 host alias 172.17.0.1 when THAT answers.
+
+    Returns "" only when no CC host with an open sshd can be found, so the
+    caller can give a precise error instead of dialling a container name.
+    """
+    from core import policy
+    if policy.profile() != policy.EMBEDDED:
+        # Standalone: the connected CC. Prefer the appliance address the client
+        # recorded (survives an SSH tunnel, where base_url is 127.0.0.1).
+        try:
+            return getattr(es, "cc_host", "") or _source_host(es)
+        except Exception:
+            return _source_host(es)
+
+    # Embedded: the CC host, never the ES service name.
+    configured = (settings.snap_ssh_host or "").strip()
+    if configured:
+        return configured
+    for cand in (_default_gateway(), "172.17.0.1"):
+        if cand and _probe_ssh(cand):
+            logger.info("[exports] embedded snapshot SSH host resolved to %s", cand)
+            return cand
+    return ""
+
+
 @router.post("/snapshot")
 def start_snapshot(req: SnapshotRequest):
     """Archive indices via a native snapshot: repo+snapshot named after the
@@ -525,9 +597,11 @@ def start_snapshot(req: SnapshotRequest):
         es = get_client()                     # captured once — see export note
     except Exception as exc:
         return {"error": str(exc)}
-    host = _source_host(es)
+    host = _snapshot_ssh_host(es)
     if not host:
-        return {"error": "cannot determine the ES machine's host"}
+        return {"error": "cannot determine the CC host to snapshot on. Set "
+                         "SNAP_SSH_HOST to the CC's address, or ensure its SSH "
+                         "port is reachable from this container."}
 
     creds = _resolve_creds(host, req.ssh)
     if creds is None:
@@ -670,9 +744,11 @@ def start_snapshot_restore(req: SnapshotRestoreRequest):
         es = get_client()
     except Exception as exc:
         return {"error": str(exc)}
-    host = _source_host(es)
+    host = _snapshot_ssh_host(es)
     if not host:
-        return {"error": "cannot determine the ES machine's host"}
+        return {"error": "cannot determine the CC host to restore on. Set "
+                         "SNAP_SSH_HOST to the CC's address, or ensure its SSH "
+                         "port is reachable from this container."}
 
     creds = _resolve_creds(host, req.ssh)
     if creds is None:

@@ -41,6 +41,25 @@ class Settings(BaseSettings):
     maria_timeout_s: int = Field(default=15, alias="MARIA_TIMEOUT_S")
     maria_max_rows: int = Field(default=1000, alias="MARIA_MAX_ROWS")
 
+    # ── Host access (core/hostexec.py, modules/system) ───────────────────
+    # Directory shared with deploy/host_agent.py, the root process that runs
+    # the System dashboard's checks on the CC host. Bind-mounted into the
+    # container; the same request/result file exchange update_dir already uses
+    # for updates, and for the same reason — the container has no docker
+    # socket and no view of the host filesystem.
+    hostexec_dir: str = Field(
+        default=os.path.join(os.path.dirname(__file__), ".hostexec"),
+        alias="HOSTEXEC_DIR")
+    # The compose file whose services the dashboard reports on. This is the
+    # CC's SYSTEM compose, not the monitoring one that carries this app: the
+    # question a support engineer is asking is whether the product is running.
+    compose_file: str = Field(default="/deploy/config/docker-compose.yaml",
+                              alias="COMPOSE_FILE")
+    # Percent-used thresholds for the storage check. Data, not constants, so a
+    # CC with an unusual partition layout can be tuned without a rebuild.
+    disk_warn_pct: int = Field(default=80, alias="DISK_WARN_PCT")
+    disk_crit_pct: int = Field(default=90, alias="DISK_CRIT_PCT")
+
     service_host: str = Field(default="0.0.0.0", alias="SERVICE_HOST")
     service_port: int = Field(default=8000, alias="SERVICE_PORT")
 
@@ -67,8 +86,13 @@ class Settings(BaseSettings):
     # files live there (root:root 0644), so operators already know it and the
     # format is the one they read everywhere else in the product. The file
     # name tracks the service name, so it changes when the app is renamed.
+    # cc_admin, not cc_analyzer: the comment above promised the file name
+    # tracks the service name, and it did not follow the rename. The mismatch
+    # is invisible until someone creates the file deploy/cc_admin.properties.sample
+    # tells them to and nothing unlocks — a silent no-op is the worst possible
+    # failure for a security control, since it reads as "the gate held".
     policy_file: str = Field(
-        default="/opt/radware/mgt-server/properties/cc_analyzer.properties",
+        default="/opt/radware/mgt-server/properties/cc_admin.properties",
         alias="POLICY_FILE")
 
     # Where server-side index archives (<index>.csv.gz) are stored. In Docker
@@ -83,6 +107,16 @@ class Settings(BaseSettings):
     # is what goes into the repository "location" setting. CC defaults below.
     snap_host_dir: str = Field(default="/opt/radware/tmp/es", alias="SNAP_HOST_DIR")
     snap_es_dir: str = Field(default="/usr/share/opensearch/backup", alias="SNAP_ES_DIR")
+
+    # The host to SSH into to zip and pull a snapshot. Standalone this is the CC
+    # the app is connected to and is resolved from the ES connection, so this is
+    # left empty. Embedded, the ES client talks to a container SERVICE NAME with
+    # no sshd, while the snapshot files live on the CC HOST — so the snapshot
+    # flow must SSH into the CC itself (its sshd, with system credentials). When
+    # set, this pins that host address; when empty, embedded falls back to the
+    # container's default-route gateway (the Docker host = the CC). Set it in
+    # the embedded compose when the gateway is not the reachable CC address.
+    snap_ssh_host: str = Field(default="", alias="SNAP_SSH_HOST")
 
     # ── Update checks (core/updater.py) ──────────────────────────────────
     # Directory shared with the host updater agent (deploy/update_agent.sh):

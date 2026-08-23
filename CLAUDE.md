@@ -1,63 +1,84 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) working in this repository.
+
+**[`AGENTS.md`](AGENTS.md) at the repo root is the authoritative description of this
+project** — architecture, the capability/policy system, host access, the System Health
+module, the frontend contract, deployment, and the roadmap. Read it first. This file is
+the short version and the rules; it deliberately does not duplicate the detail.
+
+## What this is
+
+CC Admin (the repository is still named `cc_es_analyzer` — the rename is pending) is a
+debugging and administration platform for Radware **CyberController** appliances:
+a System Health dashboard, an Elasticsearch workbench, and a MariaDB browser.
+
+Single-process **FastAPI** app serving both the REST API and a **no-build vanilla-JS SPA**.
+There is no build step — edit `frontend/static/js/app.js` directly.
+
+It ships in **two modes from one image**, selected by `ANALYZER_PROFILE`:
+
+- `standalone` — an engineer runs it on their own machine and connects to a CC over the
+  network. This is the only way to reach the CCs already in the field, so it is a shipping
+  product, not a dev mode. **A regression here is a regression for every CC in the field.**
+- `embedded` — rides the CC's *monitoring* docker-compose (deliberately not the system one).
 
 ## Commands
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
-
-# Run the service (with hot reload)
-python main.py
-
-# Run with a specific ES host
-ES_HOST=192.168.1.100 python main.py
 ```
 
-The app runs on `http://localhost:8000` by default. Interactive API docs at `http://localhost:8000/docs`.
+```bash
+python main.py
+```
+
+```bash
+python tests/test_system_checks.py && python tests/test_system_safety.py && python deploy/host_agent.py --self-test
+```
+
+The app runs on `http://localhost:8000`; interactive API docs at `/docs`.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and set:
-- `ES_HOST`, `ES_PORT`, `ES_SCHEME` — Elasticsearch connection
-- `ES_USER`, `ES_PASSWORD` — optional basic auth
-- `ES_VERIFY_CERTS` — TLS cert verification (default false)
-- `SERVICE_HOST`, `SERVICE_PORT` — binding for the FastAPI server
+Copy `.env.example` to `.env`. See `config.py` — every setting is a `Field` with an alias
+and a comment explaining why it exists. The ES connection can also be changed at runtime
+via `POST /api/connect` (the UI's "Connect" button).
 
-The ES connection can also be updated at runtime via `POST /api/connect` (the "Connect" button in the UI does this).
-
-## Architecture
-
-**Single-process FastAPI app** serving both the REST API and the SPA frontend.
+## Layout
 
 ```
-main.py              — FastAPI app, logging setup, SPA catch-all route
-config.py            — Pydantic Settings (reads .env)
-routers/
-  health.py          — /api/health, /api/nodes, /api/connect
-  indices.py         — /api/indices, /api/indices/catalog, /api/indices/{name}/stats|sample
-  query.py           — /api/query, /api/cc/attacks, /api/cc/attacks/summary, /api/cc/traffic
-  update.py          — /api/update/status|check|apply|job
-services/
-  es_client.py       — ESHttpClient singleton; plain HTTP to ES (no elasticsearch-py)
-  cc_indices.py      — CC_INDEX_CATALOG dict mapping known index prefixes → metadata
-  updater.py         — version check + one-click update (agent | git | api modes)
-deploy/
-  nginx_detect.py    — find the host's nginx (any container name, or a host service)
-  setup_nginx_path.py— publish the app at /cc_es_analyzer/ on that nginx
-  update_agent.sh    — host-side agent: git fetch, fast-forward, compose rebuild
-VERSION              — single source of truth for the app version
-frontend/
-  index.html         — Single HTML file loading the JS app
-  static/js/app.js   — Vanilla JS frontend (no build step)
-  static/css/style.css
+main.py            FastAPI app, _MANIPULATIONS table, session middleware, SPA catch-all
+config.py          Pydantic Settings
+core/              policy, hostexec, sessions, updater, tls, remote/ (SSH), routers/
+modules/           one package per capability area: system, es, maria
+deploy/            host_agent.py, update_agent.sh, nginx detection, compose snippets
+frontend/          index.html + static/js/app.js + static/css/style.css
+tests/             offline unit tests for the health parsers and the delete safety gates
+VERSION            single source of truth for the app version
 ```
 
-**Key design decisions:**
-- `es_client.py` uses raw `requests` instead of `elasticsearch-py` to bypass the product-check that rejects older/proxied ES servers common in CyberController deployments.
-- The ES client is a module-level singleton (`_client`). `update_client()` replaces it when the user changes connection settings in the UI.
-- `cc_indices.py` contains `CC_INDEX_CATALOG` (prefix → description/category) and `resolve_prefix()` which matches an index name against known CC prefixes. This drives the CC-aware annotations throughout the UI.
-- The frontend is a vanilla JS SPA with no build step — edit `app.js` directly.
-- `deploy/nginx_detect.py` never matches on container/service names (they differ per host): it resolves whoever owns :443/:80 back to a container, a systemd unit or a host process, and reads config from `nginx -T` rather than guessing paths under `/etc/nginx`.
-- Updates: the container can't reach git or rebuild itself, so `deploy/update_agent.sh` runs on the host and the two exchange JSON files through the bind-mounted `.update/` directory. The agent only ever fast-forwards the tracked branch — it never executes anything the app sends it.
+## Rules
+
+1. **Never commit `scripts/attack_id_report - Copy.py`.** Stage by explicit name;
+   never `git add -A` in this repo.
+2. **Never commit or push without an explicit go-ahead in that turn.**
+3. **The GitHub remote is PUBLIC.** Nothing derived from Radware's internal knowledge
+   base, no customer data, and no credentials may be committed. `.github/system_operations.md`
+   is gitignored for exactly this reason.
+4. **Capabilities are gated by ROUTE REGISTRATION, not a runtime check** (`core/policy.py`,
+   the loop in `main.py`). A disabled capability's routes are absent from `/openapi.json`
+   and 404 on a direct call. Do not replace this with an `if policy.enabled()` in a handler.
+5. **Host access is an operation allowlist, never a command channel** (`core/hostexec.py`).
+   Adding an op there does nothing until the matching op is added to `deploy/host_agent.py`
+   on the host. That asymmetry is the security feature — the host consents last.
+6. **Do not relax `modules/system/safety.py`** (which files may be downloaded or deleted)
+   without stating which gate moved and why. Backups are protected absolutely.
+7. **Do not switch ES away from raw `requests`** — `elasticsearch-py`'s product-check
+   rejects the proxied/older ES servers common in CC deployments.
+8. **Any new endpoint that changes CC data must be added to `_MANIPULATIONS` in `main.py`** —
+   that table is the security boundary and the hook for the coming audit trail.
+9. A health check that cannot run reports `unknown`, never `ok`.
+   Severity order: `ok < unknown < warn < crit`.
+10. Comments here explain **why**, at length, especially around security decisions.
+    Match that density.

@@ -171,6 +171,10 @@ function showView(name) {
   }
 
   // Lazy-load per view
+  // System health is NOT gated on isConnected: three of its four checks reach
+  // the host, not Elasticsearch, and "the CC is up but ES is down" is precisely
+  // the situation this screen exists to show.
+  if (name === 'system') loadSystemHealth();
   if (name === 'attacks'  && isConnected) loadAttacks();
   if (name === 'dashboard'&& isConnected) loadClusterHealth();
   if (name === 'summary'  && isConnected) loadSummary();
@@ -192,6 +196,7 @@ const LS_AUTOREFRESH = 'cc_es_autorefresh_';
 const _autoTimers = {};   // view name -> setInterval handle
 
 const REFRESHERS = {
+  system:    (manual) => loadSystemHealth(!!manual),
   dashboard: () => { loadClusterHealth(); loadIndices(); },
   summary:   () => loadSummary(),
   attacks:   () => loadAttacks(),
@@ -204,7 +209,10 @@ function refreshView(view, manual = true) {
     if (manual) showToast('Run a query first — nothing to refresh', 'bg-warning');
     return;
   }
-  REFRESHERS[view]?.();
+  // `manual` is passed through so a refresher can tell a button press from a
+  // timer tick. Only System Health cares: a manual press should say so on
+  // screen, a tick must leave the last good reading alone if it fails.
+  REFRESHERS[view]?.(manual);
 }
 
 /** Refresh whichever results viewer is active (used by the pop-out window). */
@@ -229,7 +237,12 @@ function startAutoRefresh(view, secs) {
   if (_autoTimers[view]) { clearInterval(_autoTimers[view]); delete _autoTimers[view]; }
   if (!secs) return;
   _autoTimers[view] = setInterval(() => {
-    if (currentView === view && isConnected) refreshView(view, false);
+    if (currentView !== view) return;
+    // System Health does NOT require an Elasticsearch connection: three of its
+    // four checks reach the CC's host, and "ES is the thing that is down" is
+    // exactly when an engineer leaves this screen refreshing.
+    if (view !== 'system' && !isConnected) return;
+    refreshView(view, false);
   }, secs * 1000);
 }
 
@@ -1217,8 +1230,12 @@ function uiChoice(doc, opts) {
     const btnHtml = buttons.map((b, i) =>
       `<button class="btn btn-sm ${b.cls || 'btn-outline-secondary'}" data-idx="${i}">${esc(b.text)}</button>`
     ).join('');
+    // The icon is an option because this modal is no longer only used for
+    // downloads: a three-way "download and delete / delete / cancel" led with
+    // a download arrow over a destructive question, which is the wrong signal
+    // on the one dialog that most needs the right one.
     wrap.innerHTML = `<div class="rt-modal">
-        <div class="rt-modal-title">⬇ ${esc(opts.title || 'Choose')}</div>
+        <div class="rt-modal-title">${opts.icon || '⬇'} ${esc(opts.title || 'Choose')}</div>
         ${opts.message ? `<div class="rt-modal-body">${esc(opts.message)}</div>` : ''}
         <div class="rt-modal-actions">${btnHtml}</div></div>`;
     doc.body.appendChild(wrap);
@@ -2869,9 +2886,9 @@ async function exportSelectedIndices() {
     title: `Export ${names.length} ${names.length > 1 ? 'indices' : 'index'} `
          + `— ${totalDocs.toLocaleString()} docs`,
     message: 'Snapshot archive: native ES snapshot on the ES machine, zipped and pulled to '
-           + 'this server — fastest for large data; needs root SSH to the ES machine. '
+           + 'this server — fastest for large data (millions of docs); the recommended method. '
            + 'CSV archive: the backend scrolls every document into <index>.csv.gz — '
-           + 'universal, no SSH, but slow for millions of docs. '
+           + 'universal but far slower at scale. '
            + 'Direct download streams through this browser tab — small indices only.',
     buttons: [
       { value: 'snapshot', text: 'Snapshot archive' + (snapRec ? ' (recommended for this size)' : ''),
@@ -8921,6 +8938,845 @@ async function runUpdate(wrap) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   SYSTEM HEALTH — the landing page
+   ══════════════════════════════════════════════════════════════════════════
+   Three tiles, one verdict each, and a banner that is the most severe of them.
+   The whole screen exists to answer the first question a support engineer has
+   on a CyberController — "is this box actually working" — before they open a
+   datastore.
+
+   The rule the server follows and this screen must not undo: a check that
+   COULD NOT RUN is `unknown`, not `ok`. Grey, never green. A dashboard that
+   reports health because it failed to look is worse than no dashboard, because
+   somebody acts on it.
+
+   Four of the controls here are deliberately dead — delete a file, delete a RED
+   index, repair a table, recreate the database. They are drawn rather than
+   hidden so the shape of the tool is honest about where it is going, and each
+   one says WHY it is off when clicked. Their routes do not exist on the server
+   and the host agent has no operation that would carry them out, so there is
+   nothing behind them to reach. */
+
+let _sysSummary = null;      // last /api/system/summary payload — the ONE source
+let _sysDetail  = '';        // which drilldown is open: containers|storage|databases
+let _sysLargestPoll = null;  // interval handle for the largest-files scan
+let _sysInFlight = false;    // a check is running; do not start a second
+
+/* Work the user did INSIDE a drilldown, kept across re-renders.
+ *
+ * The tiles refresh from the server every tick, but a filesystem scan and a
+ * container log are not part of that payload — they were asked for separately,
+ * they are expensive (a scan of a full disk is minutes), and re-running them on
+ * a timer would be absurd. Without somewhere to put them they were simply lost:
+ * every auto-refresh redrew the drilldown and the results the engineer was
+ * reading vanished, so the screen actively punished you for leaving it on.
+ *
+ * Held with the time they were taken, and re-rendered with that time shown, so
+ * a panel that is deliberately NOT live never pretends otherwise. */
+let _sysScan = null;         // {mount, files, at} — last largest-files scan
+let _sysOpenLog = null;      // {name, log, lines, at} — last container log read
+
+/* The capability behind each dead control, and the sentence shown when someone
+   clicks it. Kept here rather than fetched because /api/policy carries only
+   on/off — and a user who clicks a grey button deserves a reason, not a
+   shrug. Mirrors the notes in modules/system/__init__.py. */
+const SYS_LOCKED = {
+  'system.storage.delete': 'Deleting files is switched off on this instance. '
+    + 'It needs TWO keys, both set on the CC itself: '
+    + 'capability.system.storage.delete=true in '
+    + '/opt/radware/mgt-server/properties/cc_admin.properties (then recreate '
+    + 'the container), and the host agent started with --allow-delete. '
+    + 'Only logs, heap dumps and zips can ever be removed this way.',
+  'system.es.delete_index': 'Deleting an index is not built yet. It is usually '
+    + 'the fastest way back to a green cluster, and always a data loss.',
+  'system.maria.repair': 'Repairing a table is not built yet. It runs '
+    + 'mariadb-check --repair in place — non-disruptive, but it writes to a '
+    + 'production database.',
+  'system.maria.recreate': 'Recreating the schemas is not built yet. It wraps '
+    + "the CC's own repair_mysql_db.sh: it stops vision and loses everything "
+    + 'written since the last nightly dump.',
+};
+
+const SYS_ICON = { ok: 'bi-check-circle-fill', warn: 'bi-exclamation-triangle-fill',
+                   crit: 'bi-x-octagon-fill', unknown: 'bi-question-circle-fill' };
+const SYS_WORD = { ok: 'This CC is healthy', warn: 'This CC needs attention',
+                   crit: 'This CC has a problem', unknown: 'Cannot tell yet' };
+
+function _sysClass(sev) { return 'sys-' + (SYS_ICON[sev] ? sev : 'unknown'); }
+
+/** A control that is switched off, drawn as a real button so the workflow is
+ *  visible, with its reason one click away. */
+function sysLocked(capId, label, icon) {
+  return `<button class="btn btn-sm btn-outline-secondary py-0 px-2 sys-locked"
+            onclick="event.stopPropagation();sysLockedNote('${capId}')"
+            title="Not available — click to see why">
+            <i class="bi ${icon} me-1"></i>${esc(label)}</button>`;
+}
+
+function sysLockedNote(capId) {
+  showToast(SYS_LOCKED[capId] || 'This action is not available on this instance.',
+            'bg-secondary');
+}
+
+function fmtBytes(n) {
+  const bytes = Number(n) || 0;
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  let i = 0, v = bytes;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+/* ── Loading and the tiles ─────────────────────────────────────────────── */
+
+async function loadSystemHealth(manual = false) {
+  const banner = document.getElementById('sysBanner');
+  if (!banner) return;
+
+  // One request at a time. An auto-refresh tick that fires while the previous
+  // check is still walking the host would queue a second one behind it and the
+  // screen would start showing answers out of order.
+  if (_sysInFlight) return;
+  _sysInFlight = true;
+  document.getElementById('sysBusy')?.classList.remove('d-none');
+
+  let data;
+  try {
+    // NOTHING on screen changes until the response arrives. The old readings
+    // stay put, correct as of their timestamp, and are replaced in one step —
+    // no blanking, no spinner over the content, no scroll jump. A dashboard
+    // that empties itself every 10 seconds is a dashboard nobody leaves open.
+    data = await api('/api/system/summary');
+  } finally {
+    _sysInFlight = false;
+    document.getElementById('sysBusy')?.classList.add('d-none');
+  }
+
+  if (!data || data.error) {
+    // Only a MANUAL re-check repaints on failure. An auto tick that cannot
+    // reach the server leaves the last good reading alone — a transient blip
+    // should not wipe the screen an engineer is reading.
+    if (manual || !_sysSummary) {
+      _sysPaint('unknown', 'Cannot tell yet',
+                (data && data.error) || 'the health check did not answer');
+    }
+    return;
+  }
+  _sysSummary = data;
+
+  const panes = data.panes || {};
+  for (const key of ['containers', 'storage', 'databases']) {
+    const pane = panes[key] || { severity: 'unknown', headline: '—' };
+    const tile = document.getElementById('sysTile-' + key);
+    const dot  = document.getElementById('sysDot-' + key);
+    if (tile) tile.className = 'sys-tile ' + _sysClass(pane.severity)
+                             + (_sysDetail === key ? ' active' : '');
+    if (dot) dot.className = 'sys-dot ' + _sysClass(pane.severity);
+    setText('sysHead-' + key, pane.headline || '—');
+  }
+
+  const worst = data.state || 'unknown';
+  _sysPaint(worst, SYS_WORD[worst] || SYS_WORD.unknown, _sysSubtitle(data));
+
+  // The host-access warning. Three grey tiles with no explanation read as a
+  // broken screen; naming the missing agent turns it into a task.
+  const host = data.hostexec || {};
+  const warn = document.getElementById('sysHostexecWarn');
+  if (warn) {
+    const missing = !host.ok;
+    warn.classList.toggle('d-none', !missing);
+    if (missing) {
+      setText('sysHostexecMsg',
+        `The container checks, the disk check and the MariaDB check all need `
+        + `access to the CC's host, and this instance has none — ${host.detail || 'no backend'}. `
+        + (host.hint || ''));
+    }
+  }
+
+  // The server's own clock for the measurement, not the browser's for the
+  // render — they differ by the round trip, and on a slow host that is seconds.
+  const at = data.checked_at ? new Date(data.checked_at * 1000) : new Date();
+  setText('sysCheckedAt', `checked ${at.toLocaleTimeString()} · ${data.took_ms || 0} ms`);
+
+  // The open drilldown is re-rendered from THIS payload, so the table and the
+  // tile above it always describe the same instant.
+  if (_sysDetail) openSystemDetail(_sysDetail, true);
+}
+
+function _sysSubtitle(data) {
+  const panes = data.panes || {};
+  const bad = ['containers', 'storage', 'databases']
+    .filter(k => (panes[k] || {}).severity !== 'ok')
+    .map(k => (panes[k] || {}).headline)
+    .filter(Boolean);
+  if (!bad.length) return 'Containers, storage and both databases all check out.';
+  // Deduplicated: when the host is unreachable all three panes carry the same
+  // sentence, and a banner that says it three times reads as three problems.
+  return [...new Set(bad)].join(' · ');
+}
+
+function _sysPaint(sev, title, sub) {
+  const cls = _sysClass(sev);
+  const banner = document.getElementById('sysBanner');
+  if (banner) banner.className = 'sys-banner ' + cls;
+  const icon = document.getElementById('sysBannerIcon');
+  if (icon) icon.className = 'bi ' + (SYS_ICON[sev] || SYS_ICON.unknown) + ' sys-banner-icon';
+  setText('sysBannerTitle', title);
+  setText('sysBannerSub', sub);
+  const navDot = document.getElementById('sysNavDot');
+  if (navDot) {
+    // ms-1 is markup, not state — reassigning className wholesale dropped it
+    // and the dot sat flush against the label.
+    navDot.className = 'sys-dot ms-1 ' + cls;
+    navDot.title = title;
+  }
+}
+
+/* ── Drilldowns ────────────────────────────────────────────────────────── */
+
+function closeSystemDetail() {
+  _sysDetail = '';
+  if (_sysLargestPoll) { clearInterval(_sysLargestPoll); _sysLargestPoll = null; }
+  document.getElementById('sysDetailCard')?.classList.add('d-none');
+  document.querySelectorAll('.sys-tile').forEach(t => t.classList.remove('active'));
+}
+
+/** Open (or re-render) a drilldown.
+ *
+ *  Renders from the summary payload the tiles were drawn from — it carries the
+ *  full rows, not just headlines. Deliberately NOT a second fetch: the tile and
+ *  the table underneath it must describe the same instant, and asking the host
+ *  twice is what let them disagree. */
+async function openSystemDetail(which, silent = false) {
+  const card = document.getElementById('sysDetailCard');
+  if (!card) return;
+  _sysDetail = which;
+  card.classList.remove('d-none');
+  document.querySelectorAll('.sys-tile').forEach(t => t.classList.remove('active'));
+  document.getElementById('sysTile-' + which)?.classList.add('active');
+  document.getElementById('sysDetailTools').innerHTML = '';
+
+  const titles = {
+    containers: '<i class="bi bi-boxes me-2 text-info"></i>Containers',
+    storage:    '<i class="bi bi-hdd me-2 text-info"></i>Storage',
+    databases:  '<i class="bi bi-database-check me-2 text-info"></i>Databases',
+  };
+  document.getElementById('sysDetailTitle').innerHTML = titles[which] || which;
+
+  if (!_sysSummary) {
+    if (!silent) {
+      document.getElementById('sysDetailBody').innerHTML =
+        '<div class="p-4 text-center text-secondary small">Loading…</div>';
+    }
+    await loadSystemHealth();
+    if (_sysDetail !== which || !_sysSummary) return;
+  }
+
+  const data = (_sysSummary.panes || {})[which] || {};
+  // A re-render under the user's hands must not throw away where they were —
+  // an auto-refresh that scrolls a 36-row table back to the top every 10
+  // seconds is worse than no auto-refresh.
+  const scroller = document.querySelector('#sysDetailBody .sys-detail-scroll');
+  const scrollTop = scroller ? scroller.scrollTop : 0;
+
+  if (which === 'containers') renderSysContainers(data);
+  else if (which === 'storage') renderSysStorage(data);
+  else renderSysDatabases(data);
+
+  if (scrollTop) {
+    const again = document.querySelector('#sysDetailBody .sys-detail-scroll');
+    if (again) again.scrollTop = scrollTop;
+  }
+}
+
+function _sysError(message) {
+  return `<div class="p-4 text-center text-secondary small">
+            <i class="bi bi-exclamation-triangle me-2"></i>${esc(message)}</div>`;
+}
+
+function _sysBadge(sev, label) {
+  return `<span class="sys-badge ${_sysClass(sev)}">${esc(label || sev)}</span>`;
+}
+
+/* ── Containers ────────────────────────────────────────────────────────── */
+
+let _sysShowAllContainers = false;
+
+/** The badge word. Taken from the STATUS, not the severity: "unhealthy" and
+ *  "exited" are both red, and calling a running-but-failing service "down"
+ *  sends an engineer looking for a container that is right there. */
+function _sysStateWord(row) {
+  const s = (row.status || '').toLowerCase();
+  if (row.missing) return 'missing';
+  if (/\(unhealthy\)/.test(s)) return 'unhealthy';
+  if (s.startsWith('exited') || s.startsWith('dead')) return 'down';
+  if (s.startsWith('restarting')) return 'restarting';
+  if (/health:\s*starting/.test(s)) return 'starting';
+  if (s.startsWith('created')) return 'created';
+  if (s.startsWith('paused')) return 'paused';
+  return row.severity === 'ok' ? 'running' : '?';
+}
+
+function renderSysContainers(data) {
+  const body = document.getElementById('sysDetailBody');
+  if (data.error) { body.innerHTML = _sysError(data.error); return; }
+
+  const rows = data.rows || [];
+  const bad = rows.filter(r => r.severity !== 'ok');
+  // Default to the ones that need attention: on a CC that is 36 rows of "Up 8
+  // days" and one that matters, and scrolling for it is the whole problem.
+  const shown = (_sysShowAllContainers || !bad.length) ? rows : bad;
+
+  document.getElementById('sysDetailTools').innerHTML = `
+    <div class="form-check form-switch m-0">
+      <input class="form-check-input" type="checkbox" id="sysAllContainers"
+             ${_sysShowAllContainers || !bad.length ? 'checked' : ''}
+             ${bad.length ? '' : 'disabled'}
+             onchange="_sysShowAllContainers=this.checked;renderSysContainers((_sysSummary.panes||{}).containers||{})">
+      <label class="form-check-label small text-secondary" for="sysAllContainers">
+        Show all ${rows.length}</label>
+    </div>`;
+
+  body.innerHTML = `
+    ${_sysExpectedNote(data)}
+    <div class="sys-detail-scroll">
+      <table class="table table-sm table-hover sys-detail-table mb-0">
+        <thead class="table-light" style="position:sticky;top:0;z-index:2;">
+          <tr><th style="width:110px;">State</th><th>Service</th><th>Container</th>
+              <th>Status</th><th style="width:190px;" class="text-end">Log</th></tr>
+        </thead>
+        <tbody>
+          ${shown.map(r => `
+            <tr>
+              <td>${_sysBadge(r.severity, _sysStateWord(r))}</td>
+              <td class="fw-semibold">${esc(r.service || r.name)}</td>
+              <td class="text-secondary sys-path">${esc(r.name || '—')}</td>
+              <td class="text-secondary">${esc(r.status)}</td>
+              <td class="text-end text-nowrap">
+                ${r.name ? `
+                <button class="btn btn-sm btn-outline-primary py-0 px-2"
+                        onclick="openContainerLog('${esc(r.name)}')">
+                  <i class="bi bi-journal-text me-1"></i>View</button>
+                <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+                        onclick="downloadContainerLog('${esc(r.name)}')"
+                        title="Download the last 5000 lines — attach it to a ticket">
+                  <i class="bi bi-download"></i></button>`
+                : `<span class="text-secondary" style="font-size:0.72rem;">no container to read</span>`}
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    ${_sysMariaRecreateNote(rows)}
+    <div id="sysLogPane"></div>`;
+
+  // The log the engineer was reading is not part of the health payload, so a
+  // re-render would otherwise close it under their hands every 10 seconds.
+  _paintContainerLog();
+}
+
+/** The count line, and the honest caveat when we could not learn what SHOULD
+ *  be running. "34 running" means nothing without "of 36". */
+function _sysExpectedNote(data) {
+  const expected = (data.expected || []).length;
+  const rows = (data.rows || []).length;
+  if (data.expected_error) {
+    return `<div class="px-3 py-2 border-bottom text-secondary" style="font-size:0.74rem;">
+        <i class="bi bi-info-circle me-2"></i>Showing the ${rows} containers that
+        exist. This CC could not be asked which services its COMPOSE_PROFILES
+        require — ${esc(data.expected_error)} — so a service with no container
+        at all would not be listed here.</div>`;
+  }
+  if (!expected) return '';
+  const running = (data.rows || []).filter(r => r.severity === 'ok').length;
+  return `<div class="px-3 py-2 border-bottom text-secondary" style="font-size:0.74rem;">
+      <i class="bi bi-list-check me-2"></i>${running} of ${expected} services
+      running${running < expected ? `, ${expected - running} not` : ''}. The expected list comes from COMPOSE_PROFILES in the CC's
+      <code>.env</code>, so services belonging to profiles this appliance does
+      not run are not counted.</div>`;
+}
+
+/** The one place the heaviest action belongs: a MariaDB container that will not
+ *  start is exactly the case repair_mysql_db.sh exists for. Offered here, and
+ *  only when it applies, rather than as a permanent button nobody should press. */
+function _sysMariaRecreateNote(rows) {
+  const maria = rows.find(r => /mariadb/i.test(r.service || r.name)
+                            && r.severity === 'crit');
+  if (!maria) return '';
+  return `<div class="alert alert-danger m-3 py-2 px-3" style="font-size:0.8rem;">
+      <div class="fw-semibold mb-1"><i class="bi bi-database-exclamation me-2"></i>
+        ${esc(maria.name || maria.service)} is not running</div>
+      <div class="mb-2">When the MariaDB container will not start, the CC's own
+        procedure recreates the schemas and restores the last nightly dump.</div>
+      ${sysLocked('system.maria.recreate', 'Recreate DB & restore last backup', 'bi-arrow-counterclockwise')}
+    </div>`;
+}
+
+async function openContainerLog(name) {
+  const pane = document.getElementById('sysLogPane');
+  if (!pane) return;
+  pane.innerHTML = `<div class="p-3 text-secondary small">Reading ${esc(name)}…</div>`;
+  const data = await api(`/api/system/containers/${encodeURIComponent(name)}/logs?lines=500`);
+  if (data.error) { pane.innerHTML = `<div class="p-3">${_sysError(data.error)}</div>`; return; }
+  _sysOpenLog = { name, log: data.log || '', lines: data.lines, at: Date.now() };
+  _paintContainerLog();
+  pane.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+/** Draw whatever log is currently open. Called both when it is first read and
+ *  after every re-render, so an auto-refresh no longer closes it. */
+function _paintContainerLog() {
+  const pane = document.getElementById('sysLogPane');
+  if (!pane) return;
+  if (!_sysOpenLog) { pane.innerHTML = ''; return; }
+  const { name, log, lines, at } = _sysOpenLog;
+  pane.innerHTML = `
+    <div class="d-flex align-items-center gap-2 px-3 py-2 border-top border-bottom bg-light">
+      <span class="fw-semibold small"><i class="bi bi-journal-text me-2"></i>${esc(name)}</span>
+      <span class="text-secondary" style="font-size:0.72rem;">last ${lines} lines,
+        read ${new Date(at).toLocaleTimeString()}</span>
+      <button class="btn btn-sm btn-outline-primary py-0 px-2 ms-auto"
+              onclick="openContainerLog('${esc(name)}')" title="Read it again">
+        <i class="bi bi-arrow-clockwise"></i></button>
+      <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+              onclick="downloadContainerLog('${esc(name)}')">
+        <i class="bi bi-download me-1"></i>Download 5000 lines</button>
+      <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+              onclick="closeContainerLog()">
+        <i class="bi bi-x-lg"></i></button>
+    </div>
+    <pre class="sys-log">${esc(log || '(the container has logged nothing)')}</pre>`;
+}
+
+function closeContainerLog() {
+  _sysOpenLog = null;
+  _paintContainerLog();
+}
+
+function downloadContainerLog(name) {
+  // A plain navigation, not fetch+blob: the server sets Content-Disposition and
+  // the browser handles a multi-megabyte log better than we would.
+  window.location = appUrl(
+    `/api/system/containers/${encodeURIComponent(name)}/logs/download?lines=5000`);
+}
+
+/* ── Storage ───────────────────────────────────────────────────────────── */
+
+function renderSysStorage(data) {
+  const body = document.getElementById('sysDetailBody');
+  if (data.error) { body.innerHTML = _sysError(data.error); return; }
+
+  const rows = data.rows || [];
+  body.innerHTML = `
+    <div class="sys-detail-scroll">
+      <table class="table table-sm table-hover sys-detail-table mb-0">
+        <thead class="table-light" style="position:sticky;top:0;z-index:2;">
+          <tr><th style="width:96px;">State</th><th>Mounted on</th><th>Device</th>
+              <th style="width:150px;">Used</th><th style="width:110px;" class="text-end">Free</th>
+              <th style="width:180px;" class="text-end">Biggest files</th></tr>
+        </thead>
+        <tbody>
+          ${rows.map(r => `
+            <tr>
+              <td>${_sysBadge(r.severity, r.pct + '%')}</td>
+              <td class="fw-semibold">${esc(r.mount)}</td>
+              <td class="text-secondary sys-path">${esc(r.device)}</td>
+              <td>
+                <div class="sys-bar ${_sysClass(r.severity)}"><span style="width:${r.pct}%"></span></div>
+                <span class="text-secondary" style="font-size:0.7rem;">
+                  ${fmtBytes(r.used_kb * 1024)} of ${fmtBytes(r.size_kb * 1024)}</span>
+              </td>
+              <td class="text-end text-secondary">${fmtBytes(r.avail_kb * 1024)}</td>
+              <td class="text-end">
+                <button class="btn btn-sm btn-outline-primary py-0 px-2"
+                        onclick="scanLargestFiles('${esc(r.mount)}')"
+                        title="Walk this filesystem and list its 20 largest files">
+                  <i class="bi bi-search me-1"></i>Scan</button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div class="px-3 py-2 border-top text-secondary" style="font-size:0.72rem;">
+      Amber at ${data.warn_pct}%, red at ${data.crit_pct}%. Container overlay
+      filesystems are hidden — a CC reports about fifty of them, all describing
+      the same disk.
+    </div>
+    <div id="sysLargestPane"></div>`;
+
+  // A filesystem scan takes minutes and is not part of the health payload, so
+  // without this every auto-refresh threw away the result the engineer asked
+  // for — the screen punished you for leaving it on. A scan still RUNNING gets
+  // its spinner back for the same reason.
+  if (_sysScanning) _paintScanning(_sysScanning);
+  else if (_sysScan) renderLargestFiles(_largestPane(), _sysScan.mount, _sysScan.files);
+}
+
+let _sysScanning = '';       // the mount a scan is currently walking, if any
+
+/** Where the scan panel's contents go. Looked up by id EVERY time rather than
+ *  captured once: an auto-refresh re-renders the storage drilldown, which
+ *  replaces this element, and a captured reference would keep writing into a
+ *  detached node — the results would land nowhere and the scan would look like
+ *  it hung. */
+function _largestPane() {
+  return document.getElementById('sysLargestPane');
+}
+
+function _paintScanning(mount) {
+  const pane = _largestPane();
+  if (pane) pane.innerHTML = `<div class="p-3 small text-secondary">
+      <span class="spinner-border spinner-border-sm me-2"></span>
+      Walking ${esc(mount)} — this reads every inode on the filesystem and can
+      take a few minutes on a full one.</div>`;
+}
+
+async function scanLargestFiles(mount) {
+  if (!_largestPane()) return;
+  if (_sysLargestPoll) { clearInterval(_sysLargestPoll); _sysLargestPoll = null; }
+  _sysScan = null;
+  _sysScanning = mount;
+  _paintScanning(mount);
+  _largestPane().scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+  const start = await api(`/api/system/storage/largest?mount=${encodeURIComponent(mount)}&n=20`);
+  if (start.error) {
+    _sysScanning = '';
+    const pane = _largestPane();
+    if (pane) pane.innerHTML = `<div class="p-3">${_sysError(start.error)}</div>`;
+    return;
+  }
+
+  // Polled rather than held open: the walk is 11 seconds on an idle lab CC and
+  // minutes on the full one somebody is actually asking about, which is longer
+  // than a browser will hold a fetch without looking hung.
+  _sysLargestPoll = setInterval(async () => {
+    const job = await api(`/api/system/storage/largest/${start.job}`);
+    if (!job || job.status === 'running') return;
+    clearInterval(_sysLargestPoll); _sysLargestPoll = null;
+    _sysScanning = '';
+    const pane = _largestPane();
+    if (!pane) return;                  // the user navigated away mid-scan
+    if (job.error || job.status === 'error') {
+      pane.innerHTML = `<div class="p-3">${_sysError(job.error || 'the scan failed')}</div>`;
+      return;
+    }
+    _sysScan = { mount, files: job.files || [], at: Date.now() };
+    renderLargestFiles(pane, mount, _sysScan.files);
+  }, 1500);
+}
+
+/** The largest-files table.
+ *
+ *  Every row carries a verdict from the server (modules/system/safety.py): a
+ *  log, heap dump or zip is deletable, and everything else says why not. That
+ *  matters more than it sounds, because the list is sorted by SIZE and the
+ *  biggest files on a CC are usually a Lucene segment or MariaDB's Aria log —
+ *  the two things that must never be removed sit right at the top, next to the
+ *  2 GB stale log that genuinely should be. */
+function renderLargestFiles(pane, mount, files) {
+  if (!files.length) {
+    pane.innerHTML = `<div class="p-3 text-secondary small">No files found on ${esc(mount)}.</div>`;
+    return;
+  }
+  _sysLargestFiles = files;
+  const armed = can('system.storage.delete');
+  const live = files.filter(f => !f.deleted);
+  const deletable = live.filter(f => f.deletable).length;
+  // The scan's own timestamp, not the page's. This panel is a snapshot of a
+  // walk that took minutes; showing it under a header that says "checked 3
+  // seconds ago" would be a lie of composition.
+  const at = _sysScan && _sysScan.mount === mount ? _sysScan.at : Date.now();
+
+  pane.innerHTML = `
+    <div class="d-flex align-items-center gap-2 px-3 py-2 border-top border-bottom bg-light">
+      <span class="fw-semibold small"><i class="bi bi-sort-down me-2"></i>
+        ${files.length} largest files on ${esc(mount)}</span>
+      <span class="text-secondary" style="font-size:0.72rem;">
+        scanned ${new Date(at).toLocaleTimeString()}</span>
+      <button class="btn btn-sm btn-outline-primary py-0 px-2"
+              onclick="scanLargestFiles('${esc(mount)}')" title="Walk it again">
+        <i class="bi bi-arrow-clockwise"></i></button>
+      <span class="text-secondary ms-auto" style="font-size:0.72rem;">
+        ${armed
+          ? `${deletable} of ${live.length} can be removed from here — logs, heap dumps and zips only`
+          : 'Deleting is not enabled on this instance — see why on any row'}</span>
+      <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+              onclick="_sysScan=null;document.getElementById('sysLargestPane').innerHTML='';">
+        <i class="bi bi-x-lg"></i></button>
+    </div>
+    <div class="sys-detail-scroll">
+      <table class="table table-sm table-hover sys-detail-table mb-0">
+        <tbody>
+          ${files.map((f, i) => `
+            <tr id="sysFileRow-${i}"${f.deleted ? ' style="opacity:.45;"' : ''}>
+              <td style="width:90px;" class="text-end fw-semibold">${fmtBytes(f.bytes)}</td>
+              <td class="sys-path"${f.deleted ? ' style="text-decoration:line-through;"' : ''}>${esc(f.path)}
+                ${(f.deletable || f.deleted) ? '' : `<div class="text-secondary" style="font-size:0.7rem;">
+                    <i class="bi bi-shield-lock me-1"></i>${esc(f.reason)}</div>`}
+              </td>
+              <td style="width:120px;" class="text-end">
+                ${_sysDeleteButton(f, i, armed)}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+let _sysLargestFiles = [];
+
+function _sysDeleteButton(file, index, armed) {
+  // Already gone. The row is kept, struck through, rather than removed: the
+  // scan is a snapshot, and silently dropping rows out of it would make the
+  // list disagree with the count beside it and with what the engineer
+  // remembers doing.
+  if (file.deleted) {
+    return `<span class="text-success" style="font-size:0.72rem;">
+              <i class="bi bi-check-lg me-1"></i>deleted</span>`;
+  }
+  // Refused by the rules — the reason is already on the row, so the control
+  // is simply absent rather than a dead button that invites a click.
+  if (!file.deletable) {
+    return `<span class="text-secondary" style="font-size:0.72rem;">
+              <i class="bi bi-dash-circle"></i></span>`;
+  }
+  // Downloading is its own capability and does not depend on deletion: taking
+  // a copy of a log is useful whether or not this instance may remove it.
+  const download = can('system.storage.download')
+    ? `<button class="btn btn-sm btn-outline-secondary py-0 px-2"
+         onclick="downloadHostFile(${index})" title="Download this file">
+         <i class="bi bi-download"></i></button>` : '';
+
+  // Deletable in principle, but this instance is not allowed to. Locked, with
+  // the reason a click away — the same treatment every other gated action gets.
+  if (!armed) {
+    return `${download} ${sysLocked('system.storage.delete', 'Delete', 'bi-trash')}`;
+  }
+  return `${download}
+    <button class="btn btn-sm btn-outline-danger py-0 px-2"
+            onclick="confirmDeleteFile(${index})">
+      <i class="bi bi-trash me-1"></i>Delete</button>`;
+}
+
+/** Download a file from the CC, streamed straight to disk.
+ *
+ *  A plain navigation rather than fetch+blob: the server sets
+ *  Content-Disposition and the browser writes to disk as bytes arrive, which
+ *  matters when the file is a 300 MB log. The blob route would hold the whole
+ *  thing in memory first. */
+function downloadHostFile(index) {
+  const file = _sysLargestFiles[index];
+  if (!file) return;
+  window.location = appUrl(
+    `/api/system/storage/download?path=${encodeURIComponent(file.path)}`);
+}
+
+/** Confirm, naming the file and its size in full.
+ *
+ *  The path is spelled out rather than summarised as "this file": these are
+ *  long, similar-looking paths deep inside overlay directories, and the whole
+ *  risk of this feature is deleting the row next to the one you meant. */
+async function confirmDeleteFile(index) {
+  const file = _sysLargestFiles[index];
+  if (!file) return;
+  const canGrab = can('system.storage.download');
+
+  // "Download and delete" first, and it is the primary button. Deleting a log
+  // you have not kept is a one-way door, and the moment somebody notices they
+  // needed it is always after it is gone — so the safe path is the default one
+  // and the bare Delete sits beside it for when the file is genuinely junk.
+  const choice = await uiChoice(document, {
+    title: 'Delete this file?',
+    icon: '🗑',
+    message: `${file.path}\n\n${fmtBytes(file.bytes)}\n\n`
+           + `This removes it from the CC immediately and cannot be undone.`
+           + (canGrab
+              ? `\n\n"Download and delete" saves a copy to this computer first `
+                + `and only deletes once the whole file has arrived.`
+              : ''),
+    buttons: [
+      ...(canGrab ? [{ value: 'both', text: 'Download and delete', cls: 'btn-primary' }] : []),
+      { value: 'delete', text: 'Delete', cls: 'btn-danger' },
+      { value: null, text: 'Cancel', cls: 'btn-outline-secondary' },
+    ],
+  });
+
+  if (choice === 'delete') deleteFile(index);
+  else if (choice === 'both') downloadThenDelete(index);
+}
+
+/** Save the file to this computer, and delete it ONLY once every byte has
+ *  arrived.
+ *
+ *  fetch-into-a-blob rather than a plain navigation, which is the opposite of
+ *  the standalone Download button and deliberately so: a navigation gives the
+ *  page no completion signal, so the delete would fire while the transfer was
+ *  still in flight — and if it then failed, the file would be gone and the copy
+ *  incomplete. That is the one outcome this button exists to prevent. The cost
+ *  is that the file passes through memory, so the size is stated up front. */
+async function downloadThenDelete(index) {
+  const file = _sysLargestFiles[index];
+  if (!file) return;
+  const row = document.getElementById(`sysFileRow-${index}`);
+  const btn = row?.querySelector('.btn-outline-danger');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>'; }
+  showToast(`Downloading ${fmtBytes(file.bytes)} — the file is deleted only `
+            + `once it has all arrived.`, 'bg-info');
+
+  try {
+    const res = await fetch(appUrl(
+      `/api/system/storage/download?path=${encodeURIComponent(file.path)}`));
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${await res.text()}`);
+    const blob = await res.blob();
+
+    // The stream can carry its own failure in-band: mid-transfer there is no
+    // status code left to change, so the server appends a marker instead. A
+    // truncated copy must not authorise a delete.
+    if (blob.size < file.bytes) {
+      throw new Error(`only ${fmtBytes(blob.size)} of ${fmtBytes(file.bytes)} `
+                    + `arrived — the file has NOT been deleted`);
+    }
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = file.path.split('/').pop();
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (err) {
+    showToast(`Download failed: ${err.message}`, 'bg-danger');
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-trash me-1"></i>Delete'; }
+    return;
+  }
+
+  await deleteFile(index);
+}
+
+async function deleteFile(index) {
+  const file = _sysLargestFiles[index];
+  if (!file) return;
+  const row = document.getElementById(`sysFileRow-${index}`);
+  const btn = row?.querySelector('button');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>'; }
+
+  const res = await api('/api/system/storage/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: file.path }),
+  });
+
+  if (res.error) {
+    showToast(res.error, 'bg-danger');
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-trash me-1"></i>Delete'; }
+    return;
+  }
+
+  // Marked on the CACHED row, not just in the DOM. The next auto-refresh
+  // re-renders this table from _sysScan, and a purely visual strike-through
+  // would have been undone — the file would reappear with a live Delete button
+  // beside it, which is how someone ends up deleting the row below it.
+  file.deleted = true;
+  if (_sysScan) {
+    const cached = _sysScan.files.find(f => f.path === file.path);
+    if (cached) cached.deleted = true;
+  }
+  if (row) {
+    row.style.opacity = '0.45';
+    row.querySelector('.sys-path').style.textDecoration = 'line-through';
+    row.querySelector('td:last-child').innerHTML =
+      '<span class="text-success" style="font-size:0.72rem;"><i class="bi bi-check-lg me-1"></i>deleted</span>';
+  }
+  // The open-file case, stated plainly. Deleting a log a process still holds
+  // frees nothing until that process restarts, and an engineer who then looks
+  // at `df`, sees no change and concludes the tool lied has been failed by us.
+  showToast(res.was_open
+    ? `Deleted ${fmtBytes(res.bytes)} — but a running process still has this `
+      + `file open, so the space will not appear in df until it restarts.`
+    : `Deleted ${fmtBytes(res.bytes)}.`,
+    res.was_open ? 'bg-warning' : 'bg-success');
+
+  // Re-read the filesystem figures; the tile above should move.
+  loadSystemHealth(true);
+}
+
+/* ── Databases ─────────────────────────────────────────────────────────── */
+
+function renderSysDatabases(data) {
+  const body = document.getElementById('sysDetailBody');
+  const es = data.elasticsearch || {};
+  const maria = data.mariadb || {};
+
+  const esRows = [...(es.red || []).map(r => ({ ...r, sev: 'crit' })),
+                  ...(es.yellow || []).map(r => ({ ...r, sev: 'warn' }))];
+
+  const esSection = es.error
+    ? _sysError(es.error)
+    : (!esRows.length
+        ? `<div class="p-3 text-secondary small"><i class="bi bi-check-circle me-2 text-success"></i>
+             ${esc(es.headline || 'every index is green')}.
+             ${(es.expected_yellow || []).length
+               ? `<span class="ms-1">Yellow on
+                  ${(es.expected_yellow || []).map(r => `<code>${esc(r.index)}</code>`).join(', ')}
+                  is expected on a single-node CC and is not counted.</span>` : ''}
+           </div>`
+        : `<table class="table table-sm table-hover sys-detail-table mb-0">
+             <thead class="table-light"><tr>
+               <th style="width:96px;">Health</th><th>Index</th>
+               <th style="width:100px;" class="text-end">Docs</th>
+               <th style="width:100px;" class="text-end">Size</th>
+               <th style="width:120px;" class="text-end">Action</th></tr></thead>
+             <tbody>
+               ${esRows.map(r => `
+                 <tr>
+                   <td>${_sysBadge(r.sev, r.health)}</td>
+                   <td class="fw-semibold sys-path">${esc(r.index)}</td>
+                   <td class="text-end text-secondary">${esc(r['docs.count'] ?? '—')}</td>
+                   <td class="text-end text-secondary">${esc(r['store.size'] ?? '—')}</td>
+                   <td class="text-end">
+                     ${sysLocked('system.es.delete_index', 'Delete', 'bi-trash')}</td>
+                 </tr>`).join('')}
+             </tbody></table>`);
+
+  const corrupt = maria.corrupt || [];
+  const mariaSection = maria.error
+    ? _sysError(maria.error)
+    : (!corrupt.length
+        ? `<div class="p-3 text-secondary small"><i class="bi bi-check-circle me-2 text-success"></i>
+             ${esc(maria.headline || 'all tables check out')}.</div>`
+        : `<table class="table table-sm table-hover sys-detail-table mb-0">
+             <thead class="table-light"><tr>
+               <th style="width:96px;">State</th><th>Table</th><th>What the check said</th>
+               <th style="width:120px;" class="text-end">Action</th></tr></thead>
+             <tbody>
+               ${corrupt.map(t => `
+                 <tr>
+                   <td>${_sysBadge('crit', 'corrupt')}</td>
+                   <td class="fw-semibold sys-path">${esc(t.schema)}.${esc(t.table)}</td>
+                   <td class="text-secondary" style="font-size:0.74rem;">${esc(t.status)}</td>
+                   <td class="text-end">
+                     ${sysLocked('system.maria.repair', 'Repair', 'bi-wrench')}</td>
+                 </tr>`).join('')}
+             </tbody></table>
+           <div class="px-3 py-2 border-top" style="font-size:0.74rem;">
+             If in-place repair is not enough — or the container will not start
+             at all — the CC's own procedure recreates the schemas and restores
+             the last nightly dump:
+             ${sysLocked('system.maria.recreate', 'Recreate DB & restore last backup', 'bi-arrow-counterclockwise')}
+           </div>`);
+
+  body.innerHTML = `
+    <div class="px-3 py-2 bg-light border-bottom fw-semibold small">
+      <i class="bi bi-search me-2"></i>Elasticsearch — index health</div>
+    ${esSection}
+    <div class="px-3 py-2 bg-light border-top border-bottom fw-semibold small">
+      <i class="bi bi-database me-2"></i>MariaDB — table integrity
+      ${maria.checked ? `<span class="text-secondary fw-normal ms-2"
+        style="font-size:0.72rem;">${maria.checked} tables checked</span>` : ''}</div>
+    ${mariaSection}`;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    INIT — auto-connect from localStorage on page load
    ══════════════════════════════════════════════════════════════════════════ */
 (async function init() {
@@ -8939,11 +9795,16 @@ async function runUpdate(wrap) {
   // not awaited, so a slow or dead MariaDB cannot hold up the whole app.
   loadMariaHealth();
 
+  // Wherever we land, land on System Health. It answers the question an
+  // engineer opens this tool with — "is this CC working" — and it is the one
+  // screen that still says something useful when Elasticsearch is the thing
+  // that is broken.
+  //
   // Embedded on a CC the server is already bound to the Elasticsearch running
   // beside it (ES_HOST in the compose file), so there is nothing to restore
-  // and nothing to ask: go straight to the data. Without this a fresh browser
-  // on the appliance would land on a connection form for a choice it does not
-  // have — the first thing a support engineer would have to click past.
+  // and nothing to ask. Without this a fresh browser on the appliance would
+  // land on a connection form for a choice it does not have — the first thing
+  // a support engineer would have to click past.
   if (!can('es.connect')) {
     const health = await api('/api/health');
     if (health && health.connected) {
@@ -8955,7 +9816,7 @@ async function runUpdate(wrap) {
         es_version:   health.es_version,
       });
       syncDbStatus();
-      showView('dashboard');
+      showView('system');
       refreshAll();
       return;
     }
@@ -8966,7 +9827,7 @@ async function runUpdate(wrap) {
     isConnected = false;
     onDisconnected();
     syncDbStatus();
-    showView('dashboard');
+    showView('system');
     return;
   }
 
@@ -8985,7 +9846,7 @@ async function runUpdate(wrap) {
           cluster_name: health.cluster_name,
           es_version:   health.es_version,
         });
-        showView('dashboard');
+        showView('system');
         refreshAll();
         return;
       }
@@ -9000,7 +9861,7 @@ async function runUpdate(wrap) {
       if (data.connected) {
         isConnected = true;
         onConnected(settings, data);
-        showView('dashboard');
+        showView('system');
         refreshAll();
         return;
       }
@@ -9018,6 +9879,90 @@ async function runUpdate(wrap) {
    context-specific guidance. Content is authored HTML kept in HELP_CONTENT,
    keyed by the same view names used by showView(). */
 const HELP_CONTENT = {
+  system: {
+    title: 'System Health', icon: 'bi-heart-pulse',
+    body: `
+      <p>The landing page, and the answer to the first question anyone has about a
+         CyberController: <b>is this box actually working?</b> Four checks, and one
+         overall state that is the most severe of them.</p>
+      <h6>What is checked</h6>
+      <ul>
+        <li><b>Containers</b> — every service in the CC's <code>docker-compose</code>.
+            <i>Unhealthy</i>, <i>Exited</i> and <i>Dead</i> are red; <i>Restarting</i>,
+            <i>health: starting</i>, <i>Created</i> and <i>Paused</i> are amber.
+            A service that is <i>Up</i> and declares no healthcheck counts as
+            healthy — several CC services have none.</li>
+        <li><b>Storage</b> — the host's real filesystems. Amber at 80% used, red at
+            90%. The container <code>overlay</code> mounts are hidden: a CC reports
+            about fifty of them and every one describes the same disk.</li>
+        <li><b>Databases</b> — Elasticsearch index health and MariaDB table
+            integrity, in one tile. Any RED index is red. A yellow index is amber,
+            <i>except</i> <code>appconfig2</code>, which is expected to be yellow on
+            a single-node CC. Any corrupt MariaDB table is red.</li>
+      </ul>
+      <h6>Keeping it open</h6>
+      <p><b>Auto</b> re-runs every check on a 10, 30 or 60 second timer, and the
+         setting is remembered per browser. Nothing on the page is cleared while
+         a check runs: the request goes out in the background and the readings
+         you are looking at are replaced in one step when the answer comes back
+         — no blank screen, no scroll jump, and an open drilldown keeps its
+         place. If a tick cannot reach the server the last good reading stays,
+         rather than the screen wiping itself over a blip.</p>
+      <p>The tiles and the table below them come from the <i>same</i> response,
+         so they always describe the same instant. The timestamp beside
+         <b>Re-check</b> is when the CC was actually measured.</p>
+      <h6>Grey is not green</h6>
+      <p>A tile shows grey — <i>unknown</i> — when the check could not run at all.
+         That is not a pass. Three of the four checks need access to the CC's
+         <b>host</b>, which the app cannot see from inside its own container, so
+         they go through a small root agent installed on the CC
+         (<code>deploy/host_agent.py --install</code>) or, running the tool
+         remotely, over the SSH connection you gave for Elasticsearch. When that
+         access is missing the banner says so.</p>
+      <h6>Drilling in</h6>
+      <ul>
+        <li><b>Containers</b> — shows the services needing attention first. <b>View</b>
+            reads the last 500 log lines in place; <b>Download</b> saves the last
+            5000 as a file to attach to a ticket.</li>
+        <li><b>Storage</b> — <b>Scan</b> walks one filesystem and lists its 20
+            largest files. On a full disk this takes a few minutes; it reads every
+            inode on that filesystem.</li>
+        <li><b>Databases</b> — the RED/yellow indices, and any corrupt table with
+            what the check said about it.</li>
+      </ul>
+      <h6>Downloading a file</h6>
+      <p>Every file the tool will delete, it will also hand you a copy of — the
+         two use the same allowlist on purpose. The <b>↓</b> on a row streams it
+         straight to disk. In the delete dialog, <b>Download and delete</b>
+         saves the copy first and only removes the file once every byte has
+         arrived; if the transfer is short or fails, nothing is deleted.</p>
+      <p>The file is pulled through the host agent in chunks — about 14 MB/s in
+         practice, so a 300 MB log takes around 20 seconds — with a 2 GB ceiling.
+         Anything larger has to be copied off with <code>scp</code>.</p>
+      <h6>Deleting a file</h6>
+      <p>Only <b>logs, heap dumps and zips</b> can be removed from here. Everything
+         else says why not on the row itself, and the reasons are specific:
+         <i>it is MariaDB's Aria transaction log</i>, <i>it is an OpenSearch index
+         file</i>, <i>it is a backup the DB recovery procedure restores from</i>.
+         That restriction is not politeness — the list is sorted by size, and on
+         a CC the biggest files are usually datastore internals sitting directly
+         above the stale log you actually want. Anything else has to be done on
+         the machine, deliberately.</p>
+      <p>It needs <b>two keys, both on the CC</b>:
+         <code>capability.system.storage.delete=true</code> in
+         <code>/opt/radware/mgt-server/properties/cc_admin.properties</code>
+         (then recreate the container), <i>and</i> the host agent started with
+         <code>--allow-delete</code>. Unlocking the capability alone does
+         nothing — the host still refuses, which is the point.</p>
+      <p>If the file was still open by a running process, the tool says so:
+         the space does not return to <code>df</code> until that process
+         restarts.</p>
+      <h6>Why some buttons do nothing</h6>
+      <p>Delete an index, repair a table and recreate the database are drawn but
+         not built yet. Click one and it tells you exactly that. They are shown
+         rather than hidden so the workflow is visible — and so nobody wonders
+         whether the tool quietly did one of them.</p>`,
+  },
   connection: {
     title: 'Connection', icon: 'bi-hdd-network',
     body: `
