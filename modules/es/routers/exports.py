@@ -32,6 +32,22 @@ from modules.es.client import get_client
 
 router = APIRouter(prefix="/api/exports", tags=["exports"])
 
+# Split so es.archive.export and es.archive.restore control what they name.
+#
+# ORDER MATTERS and is the reason these are three routers rather than one with
+# dependencies: FastAPI matches in registration order, and this module has both
+# `/jobs/{job_id}` and `/{name}` under DELETE. `router` below keeps every
+# specific path and is registered FIRST in modules/es/__init__.py, so a call to
+# DELETE /api/exports/jobs/<id> can never be swallowed by the archive-name
+# route. Moving a route between these routers without checking that order is
+# how you would silently break job cancellation.
+#
+# export carries the verbs that move customer data OFF the appliance — which is
+# the half that needs a data-residency answer in the embedded profile.
+export_router = APIRouter(prefix="/api/exports", tags=["exports"])
+# restore carries the two that write an archive back INTO the cluster.
+restore_router = APIRouter(prefix="/api/exports", tags=["exports"])
+
 import logging
 logger = logging.getLogger(__name__)
 
@@ -127,7 +143,7 @@ class ExportRequest(BaseModel):
     indices: list[str]
 
 
-@router.post("")
+@export_router.post("")
 def start_export(req: ExportRequest):
     """Start a background job archiving each index to `<name>.csv.gz` —
     ALL documents, scrolled server-side (never through the browser)."""
@@ -219,7 +235,7 @@ def _run_export_job(job: dict, es) -> None:
 
 # ── Restore ───────────────────────────────────────────────────────────────────
 
-@router.post("/restore")
+@restore_router.post("/restore")
 async def start_restore(file: UploadFile | None = File(default=None),
                         filename: str = Form(default=""),
                         target: str = Form(default=""),
@@ -570,7 +586,7 @@ def _snapshot_ssh_host(es) -> str:
     return ""
 
 
-@router.post("/snapshot")
+@export_router.post("/snapshot")
 def start_snapshot(req: SnapshotRequest):
     """Archive indices via a native snapshot: repo+snapshot named after the
     user's chosen name, zipped on the ES host, pulled into EXPORTS_DIR."""
@@ -724,7 +740,7 @@ def _cleanup_after_failure(name: str, es, ssh, part: str) -> None:
         pass
 
 
-@router.post("/snapshot/restore")
+@restore_router.post("/snapshot/restore")
 def start_snapshot_restore(req: SnapshotRestoreRequest):
     """Restore a snapshot archive (.zip in EXPORTS_DIR) into the machine of the
     currently-connected ES: push zip, unzip, register repo, native _restore."""
@@ -1182,7 +1198,7 @@ ls -lh "$ZIP_PATH"
 '''
 
 
-@router.post("/script")
+@export_router.post("/script")
 def generate_fetch_script(req: ScriptRequest):
     """A standalone shell script that performs the snapshot archive flow
     locally on a CC machine, producing the same <name>.zip the app makes."""
@@ -1347,7 +1363,7 @@ def job_status(job_id: str):
     return job if job else {"error": "unknown job"}
 
 
-@router.get("/download/{name}")
+@export_router.get("/download/{name}")
 def download_export(name: str):
     if not _SAFE_NAME.match(name):
         return {"error": "invalid archive name"}
@@ -1359,7 +1375,7 @@ def download_export(name: str):
     return FileResponse(path, media_type=media, filename=name)
 
 
-@router.delete("/{name}")
+@export_router.delete("/{name}")
 def delete_export(name: str):
     if not _SAFE_NAME.match(name):
         return {"error": "invalid archive name"}

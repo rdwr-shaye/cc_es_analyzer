@@ -49,10 +49,30 @@ def _module() -> Module:
                 note="Changes existing data; gated by authorisation and audit "
                      "once those land, not by profile.",
             ),
+            # Creating and deleting an index were one capability until it
+            # became clear they are not the same risk. Creating one on a
+            # customer's appliance is a reproduction activity — the CC makes
+            # its own from its index templates, and an engineer who wants a
+            # scratch index wants it on their own machine. Deleting one is
+            # something support genuinely has to do on a customer box, because
+            # a corrupted index is a real thing to meet there and dropping it
+            # is often the fastest way back to a green cluster.
             Capability(
-                id="es.index.admin",
-                title="Create and delete indices",
+                id="es.index.create",
+                title="Create an index",
+                profiles=_STANDALONE_ONLY,
+                unlockable=True,
+                note="Embedded, GET /api/indices/possible still lists every "
+                     "index family this CC's templates could produce — looking "
+                     "at the catalog is diagnosis, creating from it is not.",
+            ),
+            Capability(
+                id="es.index.delete",
+                title="Delete an index",
                 profiles=_BOTH,
+                note="Always a data loss, and deliberately available on a "
+                     "customer's CC: a corrupted index has to be removable by "
+                     "the engineer who found it.",
             ),
             Capability(
                 id="es.index.duplicate",
@@ -86,11 +106,28 @@ def _module() -> Module:
         # (router, gating capability or None). Ungated routers still sit behind
         # the module itself: if es.read is ever off, discover() drops the whole
         # module rather than registering a console for a store you cannot read.
+        #
+        # The ungated routers are registered FIRST, and that is load-bearing
+        # rather than tidy: FastAPI matches in registration order, and
+        # exports.router holds the specific paths (/jobs/{job_id},
+        # /ssh-creds/{host}) that would otherwise be captured by
+        # export_router's DELETE /{name}. See the comment in exports.py.
         routers=(
             (health.router, None),
             (indices.router, None),
             (query.router, None),
             (exports.router, None),
+
+            # Every capability below controls a router. A capability that names
+            # no router is decorative — /api/policy would report a boundary
+            # that route registration does not keep, and a reviewer reading the
+            # registry would place the boundary somewhere it is not.
+            (query.write_router, "es.doc.write"),
+            (indices.import_router, "es.doc.write"),
+            (indices.create_router, "es.index.create"),
+            (indices.delete_router, "es.index.delete"),
+            (exports.export_router, "es.archive.export"),
+            (exports.restore_router, "es.archive.restore"),
             (indices.gated_router, "es.index.duplicate"),
             (artificial.router, "es.artificial"),
         ),

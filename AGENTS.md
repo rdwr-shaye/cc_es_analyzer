@@ -86,7 +86,7 @@ ANALYZER_PROFILE=embedded python main.py
 ```
 
 ```bash
-python tests/test_system_checks.py && python tests/test_system_safety.py
+python tests/test_system_checks.py && python tests/test_system_safety.py && python tests/test_profile_surface.py
 ```
 
 Tests are plain scripts *and* pytest-compatible. There is no other test runner and no
@@ -147,7 +147,7 @@ frontend/
   static/css/style.css
 
 scripts/                     standalone utilities (see §11 — one file is never committed)
-tests/                       test_system_checks.py, test_system_safety.py
+tests/                       test_system_checks.py, test_system_safety.py, test_profile_surface.py
 docs/                        LIVE_INDEX_DISCOVERY.md, overview deck
 ```
 
@@ -233,9 +233,12 @@ deliberately **does not** leak the property file's path.
 | id | profiles | unlockable | notes |
 |---|---|---|---|
 | `app.self_update` | standalone | no | An appliance follows the CC release train; the updater cannot reach git from a customer network. |
-| `es.read`, `es.connect` | both | — | |
-| `es.doc.write`, `es.index.admin` | both | — | edits to existing data |
-| `es.archive.export`, `es.archive.restore` | both | — | |
+| `es.read` | both | — | gates the whole module: if it is off, `discover()` drops `modules.es` rather than registering a console for a store you cannot read |
+| `es.connect` | standalone | — | embedded the datastore is the one running beside the app; there is nothing to pick |
+| `es.doc.write` | both | — | edits to existing data: `/api/doc/update`, the three `/api/docs/bulk-*`, and CSV import |
+| `es.index.create` | — | **yes** | a CC builds its own indices from its templates. Embedded, `GET /api/indices/possible` still lists every family it *could* produce — reading the catalog is diagnosis, creating from it is not |
+| `es.index.delete` | both | — | deliberately available on a customer's CC: a corrupted index has to be removable by the engineer who found it |
+| `es.archive.export`, `es.archive.restore` | both | — | export also covers `/download/{name}` and `DELETE /{name}`, the verbs that move data off the box |
 | `es.index.duplicate` | — | **yes** | fabricates data |
 | `es.artificial` | — | **yes** | fabricates data |
 | `maria.read` | both | — | |

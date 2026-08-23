@@ -18,6 +18,26 @@ router = APIRouter(prefix="/api/indices", tags=["indices"])
 # schema, which is a far stronger claim than a hidden button.
 gated_router = APIRouter(prefix="/api/indices", tags=["indices"])
 
+# The same argument, applied to the verbs that are not fabrication but are
+# still not reading. Each lives on its own router so the capability that names
+# it actually CONTROLS it: a capability registered against no router is a claim
+# /api/policy makes and route registration does not keep, which is worse than
+# no capability at all — a reviewer reads the registry and concludes the
+# boundary is somewhere it is not.
+#
+# create is standalone-only. Embedded, an engineer may look at the catalog of
+# index families this CC could produce (GET /possible) but may not bring one
+# into existence on a customer's appliance; creating indices there is a
+# reproduction activity, and the appliance creates its own from its templates.
+create_router = APIRouter(prefix="/api/indices", tags=["indices"])
+# delete is BOTH. A corrupted index is a real thing to meet on a customer box
+# and removing it is often the fastest way back to a green cluster, so this is
+# not something to leave only to the standalone build.
+delete_router = APIRouter(prefix="/api/indices", tags=["indices"])
+# Importing a CSV writes documents into an existing index, which is the same
+# act as editing one — hence es.doc.write rather than an index capability.
+import_router = APIRouter(prefix="/api/indices", tags=["indices"])
+
 
 @router.get("")
 def list_indices(cc_only: bool = Query(default=False)):
@@ -323,7 +343,7 @@ class CreateIndexRequest(BaseModel):
     replicas: int = 0
 
 
-@router.post("/create")
+@create_router.post("/create")
 def create_index(req: CreateIndexRequest):
     """Create a new empty index with the given name and shard/replica counts."""
     name = (req.name or "").strip()
@@ -518,7 +538,7 @@ def _shift_one_date(value, delta_ms: int):
     return value
 
 
-@router.delete("/{index_name}")
+@delete_router.delete("/{index_name}")
 def delete_index(index_name: str):
     """Delete an index. Refuses system indices and wildcards for safety."""
     name = (index_name or "").strip()
@@ -539,7 +559,7 @@ def delete_index(index_name: str):
 
 # ── CSV import ──────────────────────────────────────────────────────────────────
 
-@router.post("/{index_name}/import")
+@import_router.post("/{index_name}/import")
 async def import_csv(index_name: str,
                      file: UploadFile = File(...),
                      id_column: str = Query(default="_id")):

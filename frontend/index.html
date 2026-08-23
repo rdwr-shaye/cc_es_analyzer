@@ -482,9 +482,19 @@
       <div class="d-flex justify-content-between align-items-center mb-3 gap-2 flex-wrap">
         <h5 class="fw-bold mb-0"><i class="bi bi-speedometer2 me-2 text-warning"></i>Cluster Dashboard</h5>
         <div class="d-flex align-items-center gap-2 flex-wrap ms-auto">
-          <button class="btn btn-sm btn-outline-success py-0 px-2" onclick="addIndexChoice()"
+          <button class="btn btn-sm btn-outline-success py-0 px-2" id="btnAddIndex" onclick="addIndexChoice()"
                   title="Add an index — empty, or a possible CC index filled with artificial data">
             <i class="bi bi-plus-lg me-1"></i>Add
+          </button>
+          <!-- Separate from Add because looking at the catalog is DIAGNOSIS and
+               creating from it is not. Embedded, es.index.create is off and the
+               Add button is removed, but this one stays: "which index families
+               can this CC produce, and which has it actually produced?" is a
+               question support asks about a customer box without wanting to
+               change anything on it. -->
+          <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="openPossibleIndexPicker()"
+                  title="Every index family this CC's templates could produce, discovered live">
+            <i class="bi bi-collection me-1"></i>Possible
           </button>
           <button class="btn btn-sm btn-outline-info py-0 px-2" onclick="openArchivesPanel()"
                   title="Server-side index archives — compressed exports, downloads, restore/upload">

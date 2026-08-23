@@ -120,6 +120,15 @@ function applyPolicyToChrome() {
   if (!can('maria.query.raw')) {
     document.getElementById('nav-mariaquery')?.classList.add('d-none');
   }
+
+  // Embedded, POST /api/indices/create is not registered: a CC builds its own
+  // indices from its templates, and an engineer wanting a scratch index wants
+  // it on their own machine, not on a customer's appliance. The "Possible"
+  // button beside this one stays — reading the catalog of families this CC
+  // could produce is diagnosis, and it is the half worth keeping here.
+  if (!can('es.index.create')) {
+    document.getElementById('btnAddIndex')?.remove();
+  }
   syncDbCount();
 }
 
@@ -3840,9 +3849,26 @@ async function createIndex() {
 /** "+Add" entry point: empty index by name, or a possible CC index from the
  *  live catalog filled with artificial data. */
 async function addIndexChoice() {
-  // Without the artificial-data capability there is only one thing this can
-  // do, so skip the menu rather than offering a choice that leads to a 404.
-  if (!can('es.artificial')) return createIndex();
+  // Each branch offers only what this deployment can actually carry out. The
+  // menu is built from capabilities rather than shown-and-disabled because a
+  // choice that leads to a 404 is worse than a choice that is absent.
+  if (!can('es.index.create')) return openPossibleIndexPicker();
+  if (!can('es.artificial')) {
+    const only = await uiChoice(document, {
+      title: 'Add index',
+      message: 'Create an empty index by name, or look at the CC index families '
+             + 'this machine could produce (discovered live from its index '
+             + 'templates).',
+      buttons: [
+        { value: 'empty',   text: 'Empty index',      cls: 'btn-primary' },
+        { value: 'catalog', text: 'Possible indices', cls: 'btn-outline-info' },
+        { value: null,      text: 'Cancel',           cls: 'btn-outline-secondary' },
+      ],
+    });
+    if (only === 'empty') return createIndex();
+    if (only === 'catalog') return openPossibleIndexPicker();
+    return;
+  }
   const choice = await uiChoice(document, {
     title: 'Add index',
     message: 'Create an empty index by name, or pick one of the CC indices this '
@@ -3975,9 +4001,22 @@ function _possibleName(f, docType) {
 }
 
 /** Modal listing every index family the connected machine can create
- *  (GET /api/indices/possible). Selecting one leads into the artificial-data
- *  dialog for a name constructed for the current time slice. */
+ *  (GET /api/indices/possible).
+ *
+ *  Two modes, decided by capability rather than by the caller, so every entry
+ *  point gets the right one:
+ *    - fill mode   — selecting a family leads into the artificial-data dialog
+ *                    for a name constructed for the current time slice.
+ *    - read-only   — the same catalog as a REFERENCE. This is the embedded
+ *                    profile's version: what families can this CC produce,
+ *                    what is each one's slice length, how many template
+ *                    fields, and has it produced one yet. Answering that
+ *                    changes nothing on the appliance, which is why it is
+ *                    available on a customer's box when creating is not. */
 async function openPossibleIndexPicker() {
+  // Not a parameter: the picker is reachable from the toolbar, from the Add
+  // menu and from the empty state, and the answer must be the same at each.
+  const canFill = can('es.artificial');
   document.querySelector('.rt-modal-overlay.rt-possible')?.remove();
   const wrap = document.createElement('div');
   wrap.className = 'rt-modal-overlay rt-possible';
@@ -3996,8 +4035,8 @@ async function openPossibleIndexPicker() {
       </div>
       <div class="rt-modal-actions" style="flex:0 0 auto;">
         <span class="pp-count small text-secondary me-auto"></span>
-        <button class="btn btn-sm btn-warning" data-act="continue" disabled>
-          <i class="bi bi-magic me-1"></i>Create artificial data</button>
+        ${canFill ? `<button class="btn btn-sm btn-warning" data-act="continue" disabled>
+          <i class="bi bi-magic me-1"></i>Create artificial data</button>` : ''}
         <button class="btn btn-sm btn-secondary" data-act="close">Close</button>
       </div></div>`;
   document.body.appendChild(wrap);
@@ -4108,6 +4147,7 @@ async function openPossibleIndexPicker() {
           Slice length is UNKNOWN on this machine (no live index, no config record) —
           the slice window will be guessed from the slice number; double-check the name below.</div>` : ''}
       ${f.doc_type_note ? `<div class="small text-warning mb-1"><i class="bi bi-exclamation-triangle me-1"></i>${esc(f.doc_type_note)}</div>` : ''}
+      ${canFill ? `
       <div class="d-flex gap-2 align-items-center mb-1 flex-wrap">
         ${types.length > 1 ? `<span class="small fw-semibold">Doc type</span>
           <select class="form-select form-select-sm pp-type" style="width:16rem;">
@@ -4119,7 +4159,16 @@ async function openPossibleIndexPicker() {
                placeholder="${esc(f.index_pattern)}">
       </div>
       <div class="small text-secondary">The name targets the CURRENT time slice; ES applies the
-        family's template (mappings) automatically when the index is first written.</div>`;
+        family's template (mappings) automatically when the index is first written.</div>`
+      : `
+      <div class="small mb-1"><span class="fw-semibold">Name pattern</span>
+        <span class="font-monospace text-secondary ms-1">${esc(f.index_pattern)}</span></div>
+      ${types.length > 1 ? `<div class="small mb-1"><span class="fw-semibold">Doc types</span>
+        <span class="font-monospace text-secondary ms-1">${types.map(esc).join(', ')}</span></div>` : ''}
+      <div class="small text-secondary">This CC writes these itself, from the family's template.
+        Listed here so you can tell an index that is missing from one that was never
+        expected on this machine.</div>`}`;
+    if (!canFill) return;
     const nameInp = det.querySelector('.pp-name');
     const typeSel = det.querySelector('.pp-type');
     if (typeSel) typeSel.onchange = () => { nameInp.value = _possibleName(f, typeSel.value); sync(); };
@@ -4129,7 +4178,10 @@ async function openPossibleIndexPicker() {
     sync();
   };
 
-  wrap.querySelector('[data-act="continue"]').onclick = () => {
+  // Optional chaining throughout: in read-only mode the continue button was
+  // never rendered, and a picker that threw here would take the catalog with it.
+  const contBtn = wrap.querySelector('[data-act="continue"]');
+  if (contBtn) contBtn.onclick = () => {
     const name = wrap.querySelector('.pp-name')?.value.trim();
     if (!name || !selected) return;
     wrap.remove();
@@ -4137,7 +4189,7 @@ async function openPossibleIndexPicker() {
   };
   wrap.querySelector('[data-act="refresh"]').onclick = () => {
     selected = null;
-    wrap.querySelector('[data-act="continue"]').disabled = true;
+    if (contBtn) contBtn.disabled = true;
     load(true);
   };
 
@@ -10014,7 +10066,8 @@ const HELP_CONTENT = {
         <li><b>Archives</b> — server-side compressed exports: create, download, and restore/upload index archives. Uploaded snapshot <code>.zip</code>s are verified before being stored, and you choose whether to keep them or restore straight away. Restoring a snapshot lists the indices inside it so you can restore <b>all or just some</b> — ones that already exist here are flagged and unchecked, since a native restore cannot overwrite them.</li>
         <li><b>Document ids on restore</b> (CSV archives only) — before a restore starts you pick where each <code>_id</code> comes from: keep the archived <code>_id</code> so a repeat restore overwrites rather than duplicates, let Elasticsearch generate fresh ids, or take the id from a field such as <code>attackIpsId</code>. Snapshot <code>.zip</code>s are unaffected — a native restore always keeps the original ids.</li>
         <li><b>Fetching data script generator</b> — for CC machines this app cannot reach (no SSH, isolated site). Paste index names, pick an archive name, and download a standalone <code>sh</code> script. Run it on that machine as root and it performs the same snapshot flow locally, leaving a <code>&lt;name&gt;.zip</code> you can upload here. It needs only <code>sh</code>, <code>curl</code> and <code>zip</code>.</li>
-        <li><b>Add</b> creates a new index — either an <i>empty</i> one by name, or a <i>possible CC index</i> picked from the live catalog (every family this machine's index templates can create, with real slice sizes and field lists) and filled via the artificial-data dialog.</li>
+        <li><b>Add</b> creates a new index — either an <i>empty</i> one by name, or a <i>possible CC index</i> picked from the live catalog and filled via the artificial-data dialog. Absent where this deployment cannot create indices.</li>
+        <li><b>Possible</b> opens that same catalog on its own: every index family this machine's templates can produce, with real slice sizes, field counts and whether a live index exists yet. Read-only, and always available — it is how you tell an index that is <i>missing</i> from one that was never expected on this machine.</li>
         <li><b>Click any row</b> to open its Index Detail screen.</li>
       </ul>
       <p class="help-tip">Auto-refresh (top-right) keeps the health and counts current without manual refreshes.</p>`,

@@ -53,7 +53,7 @@ python main.py
 ```
 
 ```bash
-python tests/test_system_checks.py && python tests/test_system_safety.py
+python tests/test_system_checks.py && python tests/test_system_safety.py && python tests/test_profile_surface.py
 ```
 
 ## System operations catalogue (automation backlog)

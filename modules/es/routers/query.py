@@ -11,6 +11,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 router = APIRouter(prefix="/api", tags=["query"])
+
+# Endpoints that CHANGE documents, kept apart from the ones that read them so
+# es.doc.write controls something real. Every one of these is also in
+# _MANIPULATIONS in main.py — that table and this router should be read
+# together: the table says a call changed the CC, this router says whether the
+# call exists at all.
+write_router = APIRouter(prefix="/api", tags=["query"])
 logger = logging.getLogger(__name__)
 
 
@@ -1649,7 +1656,7 @@ def _coerce_value(value, old):
     return value
 
 
-@router.post("/doc/update")
+@write_router.post("/doc/update")
 def doc_update(req: DocUpdateRequest):
     """
     Edit or delete a single field on one document (by _id) and re-index it.
@@ -1770,7 +1777,7 @@ def _gather_op_hits(es, req, want_source: bool):
                            (h.get("_source") or {}))
 
 
-@router.post("/docs/bulk-delete")
+@write_router.post("/docs/bulk-delete")
 def bulk_delete(req: BulkDeleteRequest):
     """Delete whole documents — either an explicit selection or every doc
     matching the current query (scope="all")."""
@@ -1790,7 +1797,7 @@ def bulk_delete(req: BulkDeleteRequest):
         return {"error": str(e)}
 
 
-@router.post("/docs/bulk-field")
+@write_router.post("/docs/bulk-field")
 def bulk_field(req: BulkFieldRequest):
     """Set or delete one field across many documents (selection or whole query)."""
     try:
@@ -1821,7 +1828,7 @@ def bulk_field(req: BulkFieldRequest):
         return {"error": str(e)}
 
 
-@router.post("/docs/bulk-update")
+@write_router.post("/docs/bulk-update")
 def bulk_update(req: BulkUpdateRequest):
     """Set several fields across many documents in ONE pass.
 

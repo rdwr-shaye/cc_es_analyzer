@@ -34,7 +34,7 @@ python main.py
 ```
 
 ```bash
-python tests/test_system_checks.py && python tests/test_system_safety.py && python deploy/host_agent.py --self-test
+python tests/test_system_checks.py && python tests/test_system_safety.py && python tests/test_profile_surface.py && python deploy/host_agent.py --self-test
 ```
 
 The app runs on `http://localhost:8000`; interactive API docs at `/docs`.
