@@ -44,7 +44,7 @@ def _module() -> Module:
             ),
             Capability(
                 id="es.doc.write",
-                title="Edit, bulk-update, bulk-delete and import documents",
+                title="Edit, bulk-update and bulk-delete documents",
                 profiles=_BOTH,
                 note="Changes existing data; gated by authorisation and audit "
                      "once those land, not by profile.",

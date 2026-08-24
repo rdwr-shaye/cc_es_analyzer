@@ -60,6 +60,33 @@ class Settings(BaseSettings):
     disk_warn_pct: int = Field(default=80, alias="DISK_WARN_PCT")
     disk_crit_pct: int = Field(default=90, alias="DISK_CRIT_PCT")
 
+    # ── Login (core/auth.py) ─────────────────────────────────────────────
+    # One shared appliance credential, the shape a network device's console
+    # password has. Enforced EMBEDDED only by default: standalone runs on the
+    # engineer's own machine against a CC they already have credentials for, so
+    # a second password there guards nothing and would only be typed past.
+    # Set AUTH_REQUIRED explicitly to override in either direction.
+    auth_required: bool | None = Field(default=None, alias="AUTH_REQUIRED")
+    auth_user: str = Field(default="admin", alias="AUTH_USER")
+    # Where the password hash lives. MUST be on a bind mount embedded, or the
+    # password reverts to the shipped default every time the container is
+    # recreated — which happens on every property-file change, so an operator
+    # would silently lose their hardening the first time they unlocked a
+    # capability. The default suits a standalone run from a checkout.
+    auth_file: str = Field(
+        default=os.path.join(os.path.dirname(__file__), "data", "auth.json"),
+        alias="AUTH_FILE")
+
+    # ── Time box (core/lifecycle.py) ─────────────────────────────────────
+    # Embedded, this container is meant to be OFF and switched on for as long
+    # as the job takes. It stops itself after this many minutes unless someone
+    # extends it, and nothing restarts it but a deliberate `docker start`.
+    # Zero disables the time box entirely.
+    session_minutes: int = Field(default=60, alias="SESSION_MINUTES")
+    session_warn_minutes: int = Field(default=5, alias="SESSION_WARN_MINUTES")
+    # None = follow the profile (embedded on, standalone off).
+    session_timebox: bool | None = Field(default=None, alias="SESSION_TIMEBOX")
+
     service_host: str = Field(default="0.0.0.0", alias="SERVICE_HOST")
     service_port: int = Field(default=8000, alias="SERVICE_PORT")
 

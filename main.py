@@ -9,7 +9,8 @@ import logging.handlers
 import os
 from config import settings
 import modules
-from core import policy, sessions, updater
+from core import auth, lifecycle, policy, sessions, updater
+from core.routers import auth as auth_router, lifecycle as lifecycle_router
 from core.routers import policy as policy_router, presence, update
 from modules.es.client import POOL_SIZE, reset_session, set_session
 
@@ -68,6 +69,15 @@ async def _widen_threadpool() -> None:
     if policy.enabled("app.self_update"):
         updater.start_background_checks()
 
+    # Begin the time box. Embedded this container is meant to be OFF between
+    # uses: nothing restarts it (restart: "no"), and it stops itself when the
+    # window closes. See core/lifecycle.py.
+    lifecycle.start()
+    if auth.required():
+        logger.info("[auth] login required (user: %s)%s", auth.username(),
+                    " — STILL ON THE SHIPPED DEFAULT PASSWORD"
+                    if auth.is_default() else "")
+
 
 # ── Session / presence middleware ─────────────────────────────────────────────
 # Requests that CHANGE data on the connected CC. Matched on method + path so a
@@ -99,6 +109,34 @@ def _manipulation(method: str, path: str):
     return None
 
 
+# Paths that answer without a login. Everything else under /api requires one
+# when auth is enforced (embedded). Kept as an explicit allowlist rather than a
+# list of protected prefixes, because the failure modes are not symmetrical:
+# forgetting to add a path here makes a feature stop working and someone
+# reports it within the hour, while forgetting to protect a path exposes a
+# customer's datastore and nobody notices at all.
+_PUBLIC_API = (
+    "/api/auth/state",
+    "/api/auth/login",
+    "/api/auth/logout",
+    # The countdown. Readable unauthenticated so the login screen can say the
+    # window is about to close, rather than accepting a password into a page
+    # that is seconds from shutting down.
+    "/api/session/lifetime",
+    # What this deployment carries. It names capabilities, never data, and the
+    # SPA needs it to decide whether to draw a login screen at all.
+    "/api/policy",
+)
+
+
+def _needs_login(method: str, path: str) -> bool:
+    if not auth.required():
+        return False
+    if not path.startswith("/api/"):
+        return False              # the SPA shell itself; it renders the login
+    return path not in _PUBLIC_API
+
+
 @app.middleware("http")
 async def session_middleware(request: Request, call_next):
     """Identify the browser, bind its own ES connection for the duration of the
@@ -107,6 +145,20 @@ async def session_middleware(request: Request, call_next):
     sid = sessions.touch(sid_in, sessions.client_ip(request),
                          request.headers.get("user-agent", ""))
     request.state.sid = sid
+
+    # Refuse BEFORE the ES session is bound and before any handler runs, so an
+    # unauthenticated request never reaches a datastore, a host operation or
+    # the manipulation table.
+    if _needs_login(request.method, request.url.path) and not sessions.is_authenticated(sid):
+        response = Response(
+            content=json.dumps({"error": "Not logged in.", "login_required": True}),
+            status_code=401, media_type="application/json")
+        if sid_in != sid:
+            response.set_cookie(sessions.COOKIE_NAME, sid, httponly=True,
+                                samesite="lax", path="/", max_age=30 * 86400,
+                                secure=request.url.scheme == "https")
+        return response
+
     token = set_session(sid)
     try:
         hit = _manipulation(request.method, request.url.path)
@@ -151,6 +203,8 @@ async def session_middleware(request: Request, call_next):
 # direct call — so there is nothing to bypass. See core/policy.py.
 app.include_router(policy_router.router)
 app.include_router(presence.router)
+app.include_router(auth_router.router)
+app.include_router(lifecycle_router.router)
 
 for module in modules.discover():
     for router, gating_capability in module.routers:

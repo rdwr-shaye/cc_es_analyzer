@@ -24,6 +24,8 @@ regression for every CC in the field.**
 ## Rules
 
 1. **Never commit `scripts/attack_id_report - Copy.py`.** Stage by explicit name; never `git add -A`.
+   The remote is **public**: no credentials, ever. The embedded login's default password
+   ships as a scrypt hash in `core/auth.py`, never as plaintext.
 2. **Never commit or push without an explicit go-ahead.**
 3. **Capabilities are gated by ROUTE REGISTRATION, not a runtime check** (`core/policy.py`,
    `main.py`). A disabled capability's routes are absent from `/openapi.json` and 404.
@@ -53,7 +55,7 @@ python main.py
 ```
 
 ```bash
-python tests/test_system_checks.py && python tests/test_system_safety.py && python tests/test_profile_surface.py
+python tests/test_system_checks.py && python tests/test_system_safety.py && python tests/test_profile_surface.py && python tests/test_discovery_live_match.py && python tests/test_auth_lifecycle.py
 ```
 
 ## System operations catalogue (automation backlog)

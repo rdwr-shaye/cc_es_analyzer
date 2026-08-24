@@ -34,7 +34,7 @@ python main.py
 ```
 
 ```bash
-python tests/test_system_checks.py && python tests/test_system_safety.py && python tests/test_profile_surface.py && python deploy/host_agent.py --self-test
+python tests/test_system_checks.py && python tests/test_system_safety.py && python tests/test_profile_surface.py && python tests/test_discovery_live_match.py && python tests/test_auth_lifecycle.py && python deploy/host_agent.py --self-test
 ```
 
 The app runs on `http://localhost:8000`; interactive API docs at `/docs`.
@@ -65,7 +65,8 @@ VERSION            single source of truth for the app version
 2. **Never commit or push without an explicit go-ahead in that turn.**
 3. **The GitHub remote is PUBLIC.** Nothing derived from Radware's internal knowledge
    base, no customer data, and no credentials may be committed. `.github/system_operations.md`
-   is gitignored for exactly this reason.
+   is gitignored for exactly this reason, and the embedded login's default password ships
+   as a **scrypt hash** (`core/auth.py`) — never add the plaintext to this repo.
 4. **Capabilities are gated by ROUTE REGISTRATION, not a runtime check** (`core/policy.py`,
    the loop in `main.py`). A disabled capability's routes are absent from `/openapi.json`
    and 404 on a direct call. Do not replace this with an `if policy.enabled()` in a handler.

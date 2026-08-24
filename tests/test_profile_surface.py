@@ -81,6 +81,17 @@ IN_BOTH = [
     "/api/exports/restore",
     "/api/system/summary",
     "/api/system/containers/{name}/logs",
+    # Registered in BOTH profiles, but only ENFORCED embedded — auth.required()
+    # and lifecycle.enabled() follow the profile, not the route table. The
+    # endpoints exist either way so that standalone can opt in with
+    # AUTH_REQUIRED, and so this pair is never accidentally profile-gated:
+    # a login endpoint that 404s is indistinguishable from a broken login.
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/state",
+    "/api/auth/password",
+    "/api/session/lifetime",
+    "/api/session/extend",
 ]
 
 # Endpoints that must exist in NEITHER until someone deliberately unlocks the

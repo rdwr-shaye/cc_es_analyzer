@@ -1408,3 +1408,97 @@ body.maria-resizing-y { cursor: row-resize; user-select: none; }
   font-size: 0.72rem;
   word-break: break-all;
 }
+
+/* ── Login / session lifetime ───────────────────────────────────────────────
+   The login and "session ended" screens sit above everything. They are a
+   cover, not a substitute for the server gate: every /api path answers 401
+   until the session is authenticated. */
+.login-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: #131a24;
+}
+.login-card {
+  width: 100%;
+  max-width: 22.5rem;
+  background: #1b232f;
+  border: 1px solid #2c3746;
+  border-radius: 8px;
+  padding: 1.75rem 1.6rem;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .45);
+}
+.login-brand { font-size: 1.3rem; font-weight: 600; color: #e9eef5; margin-bottom: .35rem; }
+.login-sub   { font-size: .82rem; color: #8b98a8; margin-bottom: 1.2rem; line-height: 1.5; }
+.login-label {
+  display: block;
+  font-size: .72rem;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: #8b98a8;
+  margin-bottom: .25rem;
+}
+.login-error {
+  margin-top: .75rem;
+  font-size: .8rem;
+  color: #f19a92;
+  background: rgba(190, 60, 45, .14);
+  border: 1px solid rgba(190, 60, 45, .4);
+  border-radius: 4px;
+  padding: .45rem .6rem;
+}
+.login-note { margin-top: .9rem; font-size: .76rem; color: #8b98a8; line-height: 1.5; }
+.login-cmd {
+  margin: .75rem 0 0;
+  padding: .55rem .7rem;
+  background: #0d131b;
+  border: 1px solid #2c3746;
+  border-radius: 4px;
+  color: #cfe3ff;
+  font-size: .82rem;
+  text-align: left;
+  overflow-x: auto;
+}
+
+/* Countdown chip. Colour is the state: quiet while there is time, amber in the
+   warning window, red once it is only waiting for work to finish. */
+.session-chip {
+  margin-left: .6rem;
+  padding: .1rem .5rem;
+  font-size: .7rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  border-radius: 10px;
+  border: 1px solid #4a5666;
+  background: transparent;
+  color: #aab6c4;
+  cursor: pointer;
+}
+.session-chip:hover { border-color: #6d7c8f; color: #e9eef5; }
+.session-chip.warn {
+  border-color: #c9962f;
+  background: rgba(201, 150, 47, .16);
+  color: #f0c469;
+}
+.session-chip.drain {
+  border-color: #c0574a;
+  background: rgba(192, 87, 74, .18);
+  color: #f0a196;
+}
+
+/* The banner shown while the box is expired and waiting for work to finish. */
+.session-drain-bar {
+  background: rgba(192, 87, 74, .16);
+  border-bottom: 1px solid #c0574a;
+  color: #f0a196;
+  font-size: .8rem;
+  padding: .45rem .9rem;
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  flex-wrap: wrap;
+}

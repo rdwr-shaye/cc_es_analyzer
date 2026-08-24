@@ -22,13 +22,35 @@
     # (prometheus, grafana, …), so ours belongs on 18441.
     image: reg.radware.com:18441/kvision/kvision_cc_analyzer/dev:1
     container_name: cc-analyzer
-    restart: always
+    # NOT `restart: always`, and this is the load-bearing half of the time box.
+    #
+    # CC Admin reads every datastore on this appliance, so the safe state is
+    # OFF: it is switched on for as long as a job takes and stops itself when
+    # the window closes (core/lifecycle.py exits the process; docker records a
+    # normal exit). With `always`, docker would immediately bring it back and
+    # the time box would be an infinite loop of one-hour sessions.
+    #
+    # Nothing here restarts it. Starting it again is a deliberate act from
+    # OUTSIDE this service — a person, or whatever the CC uses to open a
+    # support window:
+    #
+    #     docker start cc-admin
+    #
+    # `on-failure` would be wrong too: a crash should also leave it down,
+    # because the container being up is what grants access to the box.
+    restart: "no"
     environment:
       # THE line that matters for security review. Without it the app falls
       # back to the "standalone" profile — the remote tool, which carries every
       # capability — and would register the data-fabricating endpoints.
       # See core/policy.py.
       - "ANALYZER_PROFILE=embedded"
+      # Where the hashed password lives inside the container (bind-mounted).
+      - "AUTH_FILE=/app/data/auth.json"
+      # The time box. Zero would disable it; SESSION_WARN_MINUTES is how long
+      # before the end the user is asked whether to keep the window open.
+      - "SESSION_MINUTES=60"
+      - "SESSION_WARN_MINUTES=5"
       - "ES_HOST=kvision-infra-efk"
       - "ES_PORT=9200"
     volumes:
@@ -63,6 +85,12 @@
       # "unknown" and says so on screen. It does not fail, and it does not
       # report health it could not verify.
       - "/opt/radware/storage/data/cc-admin/hostexec:/app/.hostexec"
+      # The login password, hashed. MUST be on a bind mount: applying a
+      # capability unlock recreates this container, and a password living
+      # inside it would revert to the shipped default every time an operator
+      # unlocked something — losing the hardening at exactly the moment
+      # somebody was tightening the box.
+      - "/opt/radware/storage/data/cc-admin/config:/app/data"
     # Bound to loopback like every other service here — reached through nginx,
     # never exposed on the appliance's external interface directly.
     ports:

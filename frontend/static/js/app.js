@@ -30,6 +30,276 @@ function can(capId) {
   return CAPS[capId] === undefined ? true : !!CAPS[capId];
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   LOGIN + SESSION LIFETIME  (embedded profile)
+
+   Two mechanisms that only make sense together. The container is meant to be
+   OFF between uses: nothing restarts it, it stops itself when its window
+   closes, and while it is up it wants a password. Everything below is the
+   browser half; enforcement is core/auth.py and core/lifecycle.py, and every
+   /api path answers 401 on its own. This code makes the door visible — it is
+   not the lock.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+let _loginShown = false;
+let _appStarted = false;
+let _lifeTimer = null;
+let _lifePrompt = null;      // the open extend dialog, so it is never doubled
+let _lifeStopped = false;
+
+/** Show the login screen and keep the app from booting behind it. */
+function showLoginScreen(message) {
+  _loginShown = true;
+  document.getElementById('loginScreen')?.classList.remove('d-none');
+  const err = document.getElementById('loginError');
+  if (err) {
+    err.textContent = message || '';
+    err.classList.toggle('d-none', !message);
+  }
+  setTimeout(() => document.getElementById('loginPass')?.focus(), 0);
+}
+
+function hideLoginScreen() {
+  _loginShown = false;
+  document.getElementById('loginScreen')?.classList.add('d-none');
+}
+
+/** The container has gone. Nothing in this page can bring it back. */
+function showStoppedScreen() {
+  if (_lifeStopped) return;
+  _lifeStopped = true;
+  if (_lifeTimer) { clearInterval(_lifeTimer); _lifeTimer = null; }
+  _lifePrompt?.remove();
+  _lifePrompt = null;
+  hideLoginScreen();
+  document.getElementById('stoppedScreen')?.classList.remove('d-none');
+}
+
+async function submitLogin(ev) {
+  ev?.preventDefault();
+  const btn = document.getElementById('loginBtn');
+  const user = document.getElementById('loginUser')?.value || '';
+  const pass = document.getElementById('loginPass')?.value || '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Signing in…'; }
+
+  const res = await api('/api/auth/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: user, password: pass }),
+  });
+
+  if (btn) { btn.disabled = false; btn.textContent = 'Sign in'; }
+  if (!res || res.error) {
+    const err = document.getElementById('loginError');
+    if (err) { err.textContent = res?.error || 'Sign-in failed.'; err.classList.remove('d-none'); }
+    const pw = document.getElementById('loginPass');
+    if (pw) { pw.value = ''; pw.focus(); }
+    return;
+  }
+
+  hideLoginScreen();
+  const pw = document.getElementById('loginPass');
+  if (pw) pw.value = '';
+  await startApp();
+
+  // The offer to change a shipped password, made once. Deliberately AFTER the
+  // app is up: an engineer who came here to look at a failing CC should reach
+  // it first and be asked about hygiene second.
+  if (res.using_default && !res.change_offered) {
+    setTimeout(() => promptChangePassword(true), 600);
+  }
+}
+
+async function doLogout() {
+  await api('/api/auth/logout', { method: 'POST' });
+  location.reload();
+}
+
+/** Change the appliance password. `offer` marks the one-time first-login ask,
+ *  which may be declined; opened from the menu it is a plain change. */
+function promptChangePassword(offer) {
+  document.querySelector('.rt-modal-overlay.rt-pw')?.remove();
+  const wrap = document.createElement('div');
+  wrap.className = 'rt-modal-overlay rt-pw';
+  wrap.innerHTML = `<div class="rt-modal" style="min-width:22rem;width:26rem;max-width:95vw;">
+      <div class="rt-modal-title"><i class="bi bi-key me-1"></i>${
+        offer ? 'This CC is using its default password' : 'Change password'}</div>
+      <div class="rt-modal-body" style="white-space:normal;">
+        ${offer ? `<div class="small text-secondary mb-2">Anyone who knows the shipped
+             default can sign in to this CC. Changing it now is the single most useful
+             thing you can do on this screen — but you can keep it.</div>` : ''}
+        <label class="small fw-semibold">Current password</label>
+        <input type="password" class="form-control form-control-sm pw-cur mb-2" autocomplete="current-password">
+        <label class="small fw-semibold">New password</label>
+        <input type="password" class="form-control form-control-sm pw-new mb-2" autocomplete="new-password">
+        <label class="small fw-semibold">Confirm new password</label>
+        <input type="password" class="form-control form-control-sm pw-new2" autocomplete="new-password">
+        <div class="small text-secondary mt-2">At least 8 characters. Stored hashed,
+          and it survives a container restart.</div>
+        <div class="pw-err small text-danger mt-2 d-none"></div>
+      </div>
+      <div class="rt-modal-actions">
+        <button class="btn btn-sm btn-primary" data-a="save">Change password</button>
+        <button class="btn btn-sm btn-outline-secondary" data-a="skip">${
+          offer ? 'Keep the current one' : 'Cancel'}</button>
+      </div></div>`;
+  document.body.appendChild(wrap);
+  setTimeout(() => wrap.querySelector('.pw-cur')?.focus(), 0);
+
+  const fail = (msg) => {
+    const el = wrap.querySelector('.pw-err');
+    el.textContent = msg;
+    el.classList.remove('d-none');
+  };
+
+  wrap.addEventListener('click', async (e) => {
+    const act = e.target.closest('button')?.dataset.a;
+    if (!act) return;
+    if (act === 'skip') {
+      // Record the decline so the offer is made once, not at every sign-in. It
+      // does NOT count as hardening: the server still reports the default is in
+      // place, and still says so in its log at every startup.
+      if (offer) await api('/api/auth/keep-default', { method: 'POST' });
+      wrap.remove();
+      if (offer) showToast('Keeping the default password — change it any time from the menu', 'bg-warning');
+      return;
+    }
+    const cur = wrap.querySelector('.pw-cur').value;
+    const nw  = wrap.querySelector('.pw-new').value;
+    const nw2 = wrap.querySelector('.pw-new2').value;
+    if (nw !== nw2) return fail('The two new passwords do not match.');
+    const res = await api('/api/auth/password', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current: cur, new: nw }),
+    });
+    if (!res || res.error) return fail(res?.error || 'Could not change the password.');
+    wrap.remove();
+    showToast('Password changed', 'bg-success');
+  });
+}
+
+/* ── The countdown ─────────────────────────────────────────────────────── */
+
+function _fmtCountdown(sec) {
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return m >= 60
+    ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
+    : `${m}:${String(s).padStart(2, '0')}`;
+}
+
+async function pollSessionLifetime() {
+  let st;
+  try {
+    st = await api('/api/session/lifetime');
+  } catch {
+    return;                                   // transient; the next tick retries
+  }
+  // A stopped container answers nothing at all. That is the expected end state
+  // here, not an error worth a toast.
+  if (!st || st.error) { if (_appStarted) showStoppedScreen(); return; }
+  if (!st.enabled) return;
+
+  const chip = document.getElementById('sessionChip');
+  if (chip) {
+    chip.classList.remove('d-none');
+    chip.classList.toggle('warn', !!st.warning && !st.draining);
+    chip.classList.toggle('drain', !!st.draining);
+    chip.textContent = st.draining ? 'stops when work finishes'
+                                   : _fmtCountdown(st.seconds_left);
+    chip.title = st.draining
+      ? 'The window has closed. This container stops as soon as the running work finishes — click to keep it open.'
+      : `This container stops in ${_fmtCountdown(st.seconds_left)} unless extended. Click to extend.`;
+  }
+
+  renderDrainBar(st);
+
+  // The SERVER decides when the prompt is due, so every open tab agrees and a
+  // browser with a skewed clock cannot sail past the warning window.
+  if ((st.warning || st.draining) && !_lifePrompt) promptExtendSession(false, st);
+  if (st.stopping) showStoppedScreen();
+}
+
+/** Persistent bar while the box has expired and is waiting on running work. */
+function renderDrainBar(st) {
+  const host = document.getElementById('drainBarHost');
+  if (!host) return;
+  if (!st.draining) { host.innerHTML = ''; return; }
+  const jobs = (st.running_jobs || []);
+  host.innerHTML = `<div class="session-drain-bar">
+      <i class="bi bi-hourglass-split"></i>
+      <span>This window has closed. <b>The container will stop as soon as the
+        ${jobs.length ? `${jobs.length} running ${jobs.length > 1 ? 'operations finish' : 'operation finishes'}`
+                      : 'current work finishes'}</b> — it is not being interrupted.</span>
+      <button class="btn btn-sm btn-warning py-0 px-2 ms-auto" onclick="extendSession()">
+        Keep it open for another hour</button>
+    </div>`;
+}
+
+async function extendSession() {
+  const res = await api('/api/session/extend', { method: 'POST' });
+  if (!res || res.error) {
+    showToast('Could not extend: ' + (res?.error || 'request failed'), 'bg-danger');
+    return false;
+  }
+  _lifePrompt?.remove();
+  _lifePrompt = null;
+  showToast(`Extended — this container now runs for another ${res.window_minutes || 60} minutes`,
+            'bg-success');
+  pollSessionLifetime();
+  return true;
+}
+
+/** The T-minus prompt. `manual` = the user clicked the chip themselves. */
+function promptExtendSession(manual, st) {
+  if (_lifePrompt) return;
+  const left = st?.seconds_left;
+  const draining = !!st?.draining;
+  const jobs = (st?.running_jobs || []);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'rt-modal-overlay rt-life';
+  wrap.innerHTML = `<div class="rt-modal" style="min-width:22rem;width:28rem;max-width:95vw;">
+      <div class="rt-modal-title"><i class="bi bi-hourglass-split me-1"></i>${
+        draining ? 'Stopping when the current work finishes' : 'This session is about to end'}</div>
+      <div class="rt-modal-body" style="white-space:normal;">
+        ${draining
+          ? `<p>The window has closed.${jobs.length
+              ? ` <b>${jobs.length} operation${jobs.length > 1 ? 's are' : ' is'} still running</b>,
+                 so nothing is being interrupted — the container stops as soon as
+                 ${jobs.length > 1 ? 'they finish' : 'it finishes'}.`
+              : ''}</p>
+             <p class="mb-0">Keep it open if you still need it.</p>`
+          : `<p>This container stops ${left != null
+                ? `in <b>${_fmtCountdown(left)}</b>` : 'shortly'} and nothing restarts it
+             automatically.</p>
+             <p class="mb-0">Extend it if you are still working.</p>`}
+        <div class="small text-secondary mt-2">
+          Once stopped, it takes a <span class="font-monospace">docker start cc-admin</span>
+          on the CC to bring it back.</div>
+      </div>
+      <div class="rt-modal-actions">
+        <button class="btn btn-sm btn-warning" data-a="extend">Keep it open for another hour</button>
+        <button class="btn btn-sm btn-outline-secondary" data-a="let">Let it stop</button>
+      </div></div>`;
+  document.body.appendChild(wrap);
+  _lifePrompt = wrap;
+
+  wrap.addEventListener('click', async (e) => {
+    const act = e.target.closest('button')?.dataset.a;
+    if (!act) return;
+    if (act === 'extend') { await extendSession(); return; }
+    // "Let it stop" is not a shutdown command — it only dismisses. Doing
+    // nothing has the same effect, which is the point of a time box.
+    wrap.remove();
+    _lifePrompt = null;
+  });
+}
+
+function startLifetimePolling() {
+  if (_lifeTimer) return;
+  pollSessionLifetime();
+  _lifeTimer = setInterval(pollSessionLifetime, 15000);
+}
+
 /* Rail tree: which groups the user collapsed. Persisted because re-collapsing
    the tree on every page load would make collapsing not worth doing. */
 const LS_DB_TREE = 'cc_admin_db_tree';
@@ -126,6 +396,12 @@ function applyPolicyToChrome() {
   // it on their own machine, not on a customer's appliance. The "Possible"
   // button beside this one stays — reading the catalog of families this CC
   // could produce is diagnosis, and it is the half worth keeping here.
+  // Account controls exist only where a login does.
+  if (CAPS && window.APP_AUTH_REQUIRED) {
+    document.getElementById('btnLogout')?.classList.remove('d-none');
+    document.getElementById('btnChangePassword')?.classList.remove('d-none');
+  }
+
   if (!can('es.index.create')) {
     document.getElementById('btnAddIndex')?.remove();
     // The sidebar carries a second, smaller one beside the "Indices" label.
@@ -10215,7 +10491,13 @@ function renderSysDatabases(data) {
 /* ══════════════════════════════════════════════════════════════════════════
    INIT — auto-connect from localStorage on page load
    ══════════════════════════════════════════════════════════════════════════ */
-(async function init() {
+/** Boot the application proper. Split out of init() so that a deployment
+ *  requiring a login can hold everything here until one succeeds — the app
+ *  must not fire a screenful of requests that will all answer 401, both
+ *  because it looks broken and because it buries the real reason. */
+async function startApp() {
+  if (_appStarted) return;
+  _appStarted = true;
   // First — the rest of the UI is built from what this deployment may do.
   await loadPolicy();
   applyPolicyToChrome();
@@ -10308,6 +10590,29 @@ function renderSysDatabases(data) {
   isConnected = false;
   onDisconnected();
   showView('connection');
+}
+
+/* ── Boot ────────────────────────────────────────────────────────────────
+   Ask who we have to be before doing anything. Where a login is required the
+   app is held back entirely rather than started and then 401'd: a screen full
+   of failed panels hides the one thing the user needs to see, which is a
+   password box. */
+(async function boot() {
+  document.getElementById('loginForm')?.addEventListener('submit', submitLogin);
+
+  // The countdown runs even on the login screen — someone should not type a
+  // password into a window that is four minutes from closing.
+  startLifetimePolling();
+
+  let st = null;
+  try { st = await api('/api/auth/state'); } catch { /* handled below */ }
+  window.APP_AUTH_REQUIRED = !!(st && st.required);
+
+  if (st && st.required && !st.authenticated) {
+    showLoginScreen();
+    return;
+  }
+  await startApp();
 })();
 
 /* ── On-line help ────────────────────────────────────────────────────────────

@@ -18,6 +18,47 @@
 </head>
 <body>
 
+<!-- ── LOGIN ─────────────────────────────────────────────────────────────
+     Shown before anything else when this deployment requires a login
+     (embedded). The app behind it is not merely hidden: every /api path
+     answers 401 until the session is authenticated, so this screen is the
+     door and not the lock. -->
+<div id="loginScreen" class="login-screen d-none">
+  <form class="login-card" id="loginForm" autocomplete="on">
+    <div class="login-brand"><i class="bi bi-layers-half text-info me-2"></i>CC Admin</div>
+    <p class="login-sub">Sign in to administer this CyberController.</p>
+
+    <label class="login-label" for="loginUser">Username</label>
+    <input class="form-control form-control-sm mb-2" id="loginUser" name="username"
+           autocomplete="username" value="admin" spellcheck="false">
+
+    <label class="login-label" for="loginPass">Password</label>
+    <input class="form-control form-control-sm" id="loginPass" name="password"
+           type="password" autocomplete="current-password">
+
+    <div id="loginError" class="login-error d-none"></div>
+
+    <button class="btn btn-info w-100 mt-3" type="submit" id="loginBtn">Sign in</button>
+    <div id="loginNote" class="login-note d-none"></div>
+  </form>
+</div>
+
+<!-- ── WINDOW CLOSED ─────────────────────────────────────────────────────
+     The container has stopped. Nothing in this page can bring it back: that
+     is the point of the time box, so the screen says who can. -->
+<div id="stoppedScreen" class="login-screen d-none">
+  <div class="login-card text-center">
+    <div class="login-brand"><i class="bi bi-power text-warning me-2"></i>Session ended</div>
+    <p class="login-sub">
+      This CC Admin container has stopped, as scheduled. Nothing here can restart it.
+    </p>
+    <p class="login-sub" style="margin-bottom:0;">
+      To open another window, run this on the CC — or ask whoever manages it to:
+    </p>
+    <pre class="login-cmd">docker start cc-admin</pre>
+  </div>
+</div>
+
 <!-- ── TOP NAVBAR ────────────────────────────────────────────────────── -->
 <nav class="navbar navbar-dark bg-dark px-3 py-0" style="height:52px;">
   <div class="d-flex align-items-center">
@@ -32,6 +73,11 @@
          available, which is exactly when you want to see why the check failed. -->
     <span id="appVersion" class="text-secondary" style="font-size:.7rem;cursor:pointer;"
           onclick="showUpdateDialog()" title="Installed version"></span>
+    <!-- How long this container has left. Embedded only: it stops itself when
+         the window closes and nothing restarts it. Hidden where there is no
+         time box, so a standalone run shows no dead chrome. -->
+    <button id="sessionChip" class="session-chip d-none" onclick="promptExtendSession(true)"
+            title="This container stops when the window closes. Click to extend."></button>
   </div>
 
   <!-- Active connection pill (shown when connected) -->
@@ -68,8 +114,20 @@
     <button id="presenceMe" class="btn btn-sm btn-outline-secondary py-0 px-2"
             onclick="promptDisplayName()" title="This is how other users see you — click to set your name"
             style="font-size:0.72rem;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></button>
+    <!-- Account controls. Present only where a login is required, so a
+         standalone run shows no sign-out button for a session it never had. -->
+    <button id="btnChangePassword" class="btn btn-sm btn-outline-secondary py-0 px-2 d-none"
+            onclick="promptChangePassword(false)" style="font-size:0.72rem;"
+            title="Change the password for this CC"><i class="bi bi-key"></i></button>
+    <button id="btnLogout" class="btn btn-sm btn-outline-secondary py-0 px-2 d-none"
+            onclick="doLogout()" style="font-size:0.72rem;" title="Sign out">
+      <i class="bi bi-box-arrow-right"></i></button>
   </div>
 </nav>
+
+<!-- Shown only while the time box has expired and the container is waiting for
+     running work to finish before it stops. -->
+<div id="drainBarHost"></div>
 
 <!-- ── LAYOUT ────────────────────────────────────────────────��──────── -->
 <div class="d-flex" style="height: calc(100vh - 52px); overflow: hidden;">

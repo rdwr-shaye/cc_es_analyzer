@@ -86,7 +86,7 @@ ANALYZER_PROFILE=embedded python main.py
 ```
 
 ```bash
-python tests/test_system_checks.py && python tests/test_system_safety.py && python tests/test_profile_surface.py
+python tests/test_system_checks.py && python tests/test_system_safety.py && python tests/test_profile_surface.py && python tests/test_discovery_live_match.py && python tests/test_auth_lifecycle.py
 ```
 
 Tests are plain scripts *and* pytest-compatible. There is no other test runner and no
@@ -220,6 +220,41 @@ would only let the two halves disagree).
 `policy.snapshot()` — served at `GET /api/policy` — tells the UI which capabilities are
 on so it can explain a disabled control instead of showing an unexplained grey box. It
 deliberately **does not** leak the property file's path.
+
+### Locking (turning an unlock back off)
+
+Any of these three locks a capability again — they are equivalent, and the value parser
+treats only `1 / true / yes / on / enabled` (case-insensitive) as an unlock:
+
+```
+capability.es.artificial=false     # flip the value
+#capability.es.artificial=true     # comment the line out
+                                   # or delete the line entirely
+```
+
+Then restart the container, exactly as for an unlock:
+
+```
+docker compose -f /deploy/tools/kvision-infra-monitoring/docker-compose.yaml     up -d --force-recreate cc-admin
+```
+
+**The file is UNLOCK-ONLY, and this is the thing people get wrong.** A capability the
+running profile already grants cannot be taken away with it — resolution is
+`profile in c.profiles OR c.id in unlocked`, so `capability.es.index.delete=false` on an
+embedded box leaves index deletion exactly where it was: on. The file adds, it never
+subtracts. To remove something the profile grants, change the profile or the capability's
+`profiles=` tuple; there is no operator-side switch for it, deliberately, because a
+support tool that can be silently stripped of its read paths by a stray property line is
+worse than one that cannot.
+
+Confirm what actually happened in the startup log — it names both halves, and is the
+fastest way to tell an unlock that took effect from one that was ignored:
+
+```
+[policy] profile=embedded · capabilities on: 13
+[policy] unlocked by cc_admin.properties: es.artificial, es.index.duplicate, system.storage.delete
+[policy] not registered: app.self_update, es.connect, es.doc.import, es.index.create, ...
+```
 
 ### The governing rule
 
@@ -502,6 +537,65 @@ Identity today is a **self-declared name** (`core/sessions.py`) and there is **n
 authentication**. That is a known Phase 1 gap, not a design choice.
 
 ---
+
+## 10a. Login and the time box — embedded only (`core/auth.py`, `core/lifecycle.py`)
+
+Two mechanisms that only make sense together, and both apply to the **embedded**
+profile alone. Standalone runs on the engineer's own machine against a CC they already
+hold credentials for; a second password there guards nothing and a tool that shut itself
+down every hour would be an obstacle, not a control.
+
+### Login
+
+One shared appliance credential — the shape a network device's console password has.
+`admin`, plus a password stored **hashed with `hashlib.scrypt`**. Not bcrypt or passlib:
+both would be new dependencies in an image that has to satisfy the CC pipeline's SBOM
+and CVE rules, and scrypt is memory-hard and already in the standard library.
+
+**The default password ships as a HASH, never as plaintext** (`auth.DEFAULT_PASSWORD_HASH`).
+This repository is public — see §1a — so a literal default credential in the source would
+be the out-of-box password for every appliance carrying this component, readable by
+anyone. Operators learn it from the internal runbook. **Do not add the plaintext to this
+repo, to the sample property file, or to a comment.**
+
+The gate is `_needs_login()` in `main.py`, applied inside `session_middleware` **before**
+the ES session is bound, so an unauthenticated request never reaches a datastore, a host
+operation, or the `_MANIPULATIONS` table. Public paths are an explicit allowlist
+(`_PUBLIC_API`), not a set of protected prefixes: forgetting to add a path there breaks a
+feature and someone reports it within the hour, while forgetting to protect one exposes a
+customer's datastore and nobody notices.
+
+Sessions carry the flag in memory (`core/sessions.py`), so **a restart logs everyone out** —
+which is the behaviour a time-boxed window wants anyway.
+
+This is **not** the identity system the Phase 1 roadmap calls for. A shared password
+cannot answer "which engineer did this", which is what an audit trail needs. It is shaped
+so that the real thing can replace it: everything outside `core/auth.py` asks
+`sessions.is_authenticated(sid)`, never `check_password(...)`.
+
+### The time box
+
+Embedded, this container is meant to be **off** between uses and switched on for as long
+as a job takes. Two halves:
+
+- `restart: "no"` in the monitoring compose. With `always`, docker would immediately
+  bring the container back and the time box would become an infinite loop of one-hour
+  sessions. Starting it again is a deliberate act from outside this service —
+  `docker start cc-admin`, by a person or by whatever opens a support window.
+- `core/lifecycle.py` stops the container **by exiting its own process** (SIGTERM to
+  itself; uvicorn winds down cleanly). The obvious alternative — asking the host to stop
+  the container — would mean a new operation in `deploy/host_agent.py` and a container
+  that can act on the appliance's docker. This needs neither.
+
+`SESSION_MINUTES` (default 60) is the window, `SESSION_WARN_MINUTES` (default 5) is how
+long before the end the browser raises the prompt. **The server decides when the warning
+is due**, not the browser, so every open tab agrees and a skewed clock cannot sail past it.
+
+**Running work is never killed.** If a job is still running at expiry the container enters
+a draining state, says so on screen, and keeps the Extend control live — it stops only
+once the last job finishes. That is why `lifecycle._running_jobs()` reads the export job
+engine, and why a failure to read it is treated as "nothing running": a container that
+refused to stop because it could not read a job table would defeat the whole mechanism.
 
 ## 11. Rules an agent must not break
 

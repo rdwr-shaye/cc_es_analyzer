@@ -131,6 +131,27 @@ def touch(sid: str | None, ip: str, user_agent: str) -> str:
     return sid
 
 
+def set_authenticated(sid: str, value: bool) -> None:
+    """Mark a browser as logged in (or log it out).
+
+    The flag lives on the in-memory session rather than in a signed cookie, and
+    that is the useful property: sessions do not survive a restart, so when the
+    time box stops this container everyone is logged out by construction. The
+    next person to start it has to authenticate, which is the behaviour a
+    time-boxed admin window is for.
+    """
+    with _lock:
+        if sid in _sessions:
+            _sessions[sid]["authenticated"] = bool(value)
+            if not value:
+                _sessions[sid]["name"] = ""
+
+
+def is_authenticated(sid: str) -> bool:
+    with _lock:
+        return bool(_sessions.get(sid, {}).get("authenticated"))
+
+
 def set_name(sid: str, name: str) -> None:
     with _lock:
         if sid in _sessions:

@@ -16,6 +16,26 @@
 #   docker compose -f /deploy/tools/kvision-infra-monitoring/docker-compose.yaml \
 #       up -d --force-recreate cc-admin
 #
+# TO LOCK A CAPABILITY AGAIN, do any one of these — they are equivalent, since
+# only 1 / true / yes / on / enabled (any case) counts as an unlock:
+#
+#   capability.es.artificial=false     flip the value
+#   #capability.es.artificial=true     comment the line out
+#                                      or delete the line entirely
+#
+# ...then restart the container, exactly as for an unlock. The startup log
+# names what was unlocked, which is the quickest way to confirm it took:
+#
+#   [policy] unlocked by cc_admin.properties: es.artificial, ...
+#
+# THIS FILE ONLY ADDS, IT NEVER SUBTRACTS. A capability the running profile
+# already grants cannot be switched off here — on an embedded CC,
+# "capability.es.index.delete=false" leaves index deletion on, because the
+# resolution is "granted by the profile OR unlocked by this file". That is
+# deliberate: a support tool whose read paths could be stripped by a stray
+# property line would be worse than one that cannot. To remove something the
+# profile grants, the profile (or the capability declaration) has to change.
+#
 # IMPORTANT — "embedded" is a deployment shape, not a trust level. An embedded
 # instance on an INTERNAL LAB CC is a perfectly good place to fabricate test
 # data. An embedded instance on a CUSTOMER's production CC is not: synthetic
