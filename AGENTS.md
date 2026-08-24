@@ -235,7 +235,8 @@ deliberately **does not** leak the property file's path.
 | `app.self_update` | standalone | no | An appliance follows the CC release train; the updater cannot reach git from a customer network. |
 | `es.read` | both | — | gates the whole module: if it is off, `discover()` drops `modules.es` rather than registering a console for a store you cannot read |
 | `es.connect` | standalone | — | embedded the datastore is the one running beside the app; there is nothing to pick |
-| `es.doc.write` | both | — | edits to existing data: `/api/doc/update`, the three `/api/docs/bulk-*`, and CSV import |
+| `es.doc.write` | both | — | corrects data already there: `/api/doc/update` and the three `/api/docs/bulk-*` |
+| `es.doc.import` | — | **yes** | bulk-loads a CSV of unknown provenance. Embedded, the sanctioned way to put data back on a CC is an **archive restore**, which carries data this tool exported from a CC in the first place |
 | `es.index.create` | — | **yes** | a CC builds its own indices from its templates. Embedded, `GET /api/indices/possible` still lists every family it *could* produce — reading the catalog is diagnosis, creating from it is not |
 | `es.index.delete` | both | — | deliberately available on a customer's CC: a corrupted index has to be removable by the engineer who found it |
 | `es.archive.export`, `es.archive.restore` | both | — | export also covers `/download/{name}` and `DELETE /{name}`, the verbs that move data off the box |

@@ -165,7 +165,8 @@
             <div class="d-flex align-items-center justify-content-between ps-2 pe-1 mt-2 mb-1">
               <div class="d-flex align-items-center gap-1">
                 <span class="ops-group-label p-0">Indices</span>
-                <button class="btn btn-outline-success py-0 px-1" onclick="createIndex()"
+                <button class="btn btn-outline-success py-0 px-1" id="btnSidebarCreateIndex"
+                        onclick="createIndex()"
                         title="Create a new index" style="font-size:0.7rem;line-height:1.2;">
                   <i class="bi bi-plus-lg"></i>
                 </button>
@@ -556,15 +557,35 @@
           </div>
         </div>
         <div class="card-body p-0">
+          <!-- Filters the LIST by the window each index covers: an index is kept
+               when its range overlaps the one typed here at all, so asking for
+               a single day still finds the weekly slice containing it. Typed
+               values are read as UTC to match the column beside them. -->
+          <div class="d-flex align-items-center gap-2 flex-wrap px-2 py-1 border-bottom">
+            <span class="small text-secondary"><i class="bi bi-clock-history me-1"></i>Time range</span>
+            <input type="datetime-local" id="idxRangeFrom" class="form-control form-control-sm"
+                   style="width:13.5rem;" onchange="applyIndexRangeFilter()"
+                   title="Show indices whose data ends after this (UTC)">
+            <span class="small text-secondary">&rarr;</span>
+            <input type="datetime-local" id="idxRangeTo" class="form-control form-control-sm"
+                   style="width:13.5rem;" onchange="applyIndexRangeFilter()"
+                   title="Show indices whose data starts before this (UTC)">
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="clearIndexRangeFilter()"
+                    title="Clear the time-range filter">Clear</button>
+            <span id="idxRangeNote" class="small text-warning d-none"></span>
+          </div>
           <div id="indicesTableWrap" class="table-responsive sticky-head">
             <table class="table table-sm table-hover mb-0">
               <thead class="table-dark">
                 <tr>
                   <th style="width:28px;"><input type="checkbox" id="idxSelAll" onclick="toggleAllIndexSel(this)" title="Select all visible"/></th>
-                  <th>Index</th><th>Health</th><th>Docs</th><th>Size</th><th>Category</th><th class="text-end">Actions</th>
+                  <th>Index</th><th>Health</th><th>Docs</th><th>Size</th>
+                  <th title="The window this index covers, from its -sl-N suffix and the family slice length">
+                    Time range (UTC)</th>
+                  <th>Category</th><th class="text-end">Actions</th>
                 </tr>
               </thead>
-              <tbody id="indicesTableBody"><tr><td colspan="7" class="text-center text-secondary py-3">Connect to load data</td></tr></tbody>
+              <tbody id="indicesTableBody"><tr><td colspan="8" class="text-center text-secondary py-3">Connect to load data</td></tr></tbody>
             </table>
           </div>
           <pre id="indicesCsv" class="d-none m-0 p-2" style="font-size:0.74rem;white-space:pre;overflow:auto;max-height:420px;">No indices.</pre>
@@ -750,6 +771,10 @@
               </tbody>
             </table>
           </div>
+          <!-- Pager. Rendered by _renderAttackPager() and hidden while there is
+               nothing to page through, so a short result set does not grow a
+               row of dead controls under it. -->
+          <div id="attacksPager" class="px-2 border-top d-none"></div>
         </div>
       </div>
     </div>
@@ -763,15 +788,22 @@
         <h5 class="fw-bold mb-0" id="indexDetailTitle">Index Details</h5>
         <div class="ms-auto d-flex gap-2">
           <button class="btn btn-sm btn-outline-info help-btn" onclick="showHelp('index')" title="Help for this screen"><i class="bi bi-question-circle me-1"></i>Help</button>
-          <button class="btn btn-sm btn-outline-warning" onclick="createArtificialData(_currentIndexName)"
+          <!-- These three are removed outright where the deployment does not
+               carry the capability — see applyPolicyToChrome(). They are the
+               second door into artificial data and duplication: gating only
+               the dashboard's Add menu left this one standing, so an embedded
+               user reached the fabricator by opening any index. -->
+          <button class="btn btn-sm btn-outline-warning" id="btnIndexArtificial"
+                  onclick="createArtificialData(_currentIndexName)"
                   title="Generate synthetic documents into this index (slice-aware, skips existing data)">
             <i class="bi bi-magic me-1"></i>Artificial data
           </button>
-          <button class="btn btn-sm btn-outline-primary" onclick="importCsvToIndex()"
+          <button class="btn btn-sm btn-outline-primary" id="btnIndexImportCsv" onclick="importCsvToIndex()"
                   title="Import a CSV file (same format as export) as documents into this index">
             <i class="bi bi-filetype-csv me-1"></i>Import CSV
           </button>
-          <button class="btn btn-sm btn-outline-info" onclick="duplicateIndex(_currentIndexName)"
+          <button class="btn btn-sm btn-outline-info" id="btnIndexDuplicate"
+                  onclick="duplicateIndex(_currentIndexName)"
                   title="Copy this index to a new name, optionally shifting all date fields">
             <i class="bi bi-copy me-1"></i>Duplicate
           </button>

@@ -128,6 +128,29 @@ function applyPolicyToChrome() {
   // could produce is diagnosis, and it is the half worth keeping here.
   if (!can('es.index.create')) {
     document.getElementById('btnAddIndex')?.remove();
+    // The sidebar carries a second, smaller one beside the "Indices" label.
+    document.getElementById('btnSidebarCreateIndex')?.remove();
+  }
+
+  // The index detail view carries its own copies of these actions, and they
+  // are the ones that matter: the dashboard's Add menu is a front door, but
+  // opening any index put the fabricator one click away regardless of profile.
+  // Removed rather than disabled — a dead control with no explanation reads as
+  // a bug, and there is nothing to explain here because the endpoint behind it
+  // does not exist in this deployment.
+  if (!can('es.artificial')) {
+    document.getElementById('btnIndexArtificial')?.remove();
+  }
+  if (!can('es.index.duplicate')) {
+    document.getElementById('btnIndexDuplicate')?.remove();
+  }
+  // Embedded, the sanctioned way to put data back on a CC is an archive
+  // restore, not a CSV of unknown provenance — see es.doc.import.
+  if (!can('es.doc.import')) {
+    document.getElementById('btnIndexImportCsv')?.remove();
+  }
+  if (!can('es.index.delete')) {
+    document.querySelector('#view-index [onclick="deleteCurrentIndex()"]')?.remove();
   }
   syncDbCount();
 }
@@ -2854,6 +2877,11 @@ function renderSidebarIndices(indices) {
 let _dashboardIndexFilter = '';
 let selectedIndices = new Set();      // index names checked for bulk deletion
 
+/* Above this many documents in a selection, CSV export is not offered at all —
+   only the native ES snapshot. See exportSelectedIndices() for why withdrawing
+   the option beats recommending against it. */
+const CSV_EXPORT_DOC_LIMIT = 50_000;
+
 function onDashboardIndexSearch(inp) {
   _dashboardIndexFilter = (inp.value || '').toLowerCase();
   renderIndicesTable(allIndices);
@@ -2888,23 +2916,47 @@ async function exportSelectedIndices() {
   const names = [...selectedIndices];
   if (!names.length) return;
   // Snapshot (native ES, fast) is recommended for big selections; CSV for small.
-  const totalDocs = names.reduce((s, n) =>
-    s + (allIndices.find(i => i.name === n)?.docs_count || 0), 0);
+  const docsIn = (n) => allIndices.find(i => i.name === n)?.docs_count || 0;
+  const totalDocs = names.reduce((s, n) => s + docsIn(n), 0);
   const snapRec = totalDocs > 10_000;
+
+  // Past this, BOTH CSV routes are withdrawn rather than merely un-recommended.
+  // Scrolling every document into a .csv.gz is linear in document count and the
+  // browser route holds the whole thing in a tab; at this size the honest
+  // options are one. Offering a control that will realistically time out — and
+  // that an engineer will pick because it is familiar — costs them the twenty
+  // minutes before it fails, which is worse than not offering it.
+  // The rule is the SELECTION total, which subsumes "any one index is over":
+  // if a single index exceeds the limit, so does any selection containing it.
+  const biggest = names.reduce((m, n) => Math.max(m, docsIn(n)), 0);
+  const csvBlocked = totalDocs > CSV_EXPORT_DOC_LIMIT;
+
   const mode = await uiChoice(document, {
     title: `Export ${names.length} ${names.length > 1 ? 'indices' : 'index'} `
          + `— ${totalDocs.toLocaleString()} docs`,
-    message: 'Snapshot archive: native ES snapshot on the ES machine, zipped and pulled to '
-           + 'this server — fastest for large data (millions of docs); the recommended method. '
-           + 'CSV archive: the backend scrolls every document into <index>.csv.gz — '
-           + 'universal but far slower at scale. '
-           + 'Direct download streams through this browser tab — small indices only.',
+    message: csvBlocked
+      ? 'Snapshot archive: native ES snapshot on the ES machine, zipped and pulled to '
+        + 'this server. It is the only method offered for this selection — '
+        + `${totalDocs.toLocaleString()} documents`
+        + (biggest > CSV_EXPORT_DOC_LIMIT
+            ? ` (largest single index ${biggest.toLocaleString()})`
+            : '')
+        + ` is past the ${CSV_EXPORT_DOC_LIMIT.toLocaleString()}-document limit for CSV, `
+        + 'which scrolls every document one page at a time and would not finish in a '
+        + 'reasonable time. Select fewer or smaller indices to use CSV.'
+      : 'Snapshot archive: native ES snapshot on the ES machine, zipped and pulled to '
+        + 'this server — fastest for large data (millions of docs); the recommended method. '
+        + 'CSV archive: the backend scrolls every document into <index>.csv.gz — '
+        + 'universal but far slower at scale. '
+        + 'Direct download streams through this browser tab — small indices only.',
     buttons: [
       { value: 'snapshot', text: 'Snapshot archive' + (snapRec ? ' (recommended for this size)' : ''),
         cls: snapRec ? 'btn-info' : 'btn-outline-info' },
-      { value: 'server',   text: 'CSV archive on server' + (snapRec ? '' : ' (recommended)'),
-        cls: snapRec ? 'btn-outline-info' : 'btn-info' },
-      { value: 'browser',  text: 'Direct browser download', cls: 'btn-outline-primary' },
+      ...(csvBlocked ? [] : [
+        { value: 'server',   text: 'CSV archive on server' + (snapRec ? '' : ' (recommended)'),
+          cls: snapRec ? 'btn-outline-info' : 'btn-info' },
+        { value: 'browser',  text: 'Direct browser download', cls: 'btn-outline-primary' },
+      ]),
       { value: null,       text: 'Cancel', cls: 'btn-outline-secondary' },
     ],
   });
@@ -3716,11 +3768,82 @@ async function deleteArchives(names) {
 }
 
 /** The rows the dashboard table currently shows (search filter applied). */
+/* ── Index time ranges ──────────────────────────────────────────────────────
+   The window an index covers, derived server-side from its "-sl-<N>" suffix
+   and its family's slice length (modules/es/discovery.slice_window). Rendered
+   in UTC and labelled as such, because the slice arithmetic IS in UTC and a
+   range silently shown in the browser's zone would not line up with the index
+   name an engineer is reading beside it. */
+
+let _dashboardRangeFrom = null;   // ms, inclusive; null = unbounded
+let _dashboardRangeTo   = null;   // ms, exclusive; null = unbounded
+let _dashboardRangeHidden = 0;    // indices dropped for having no derivable range
+
+function _fmtUtcMinute(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getUTCDate()}/${d.getUTCMonth() + 1}/${d.getUTCFullYear()} `
+       + `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+
+/** "13/8/2026 00:00 > 20/8/2026 00:00 (UTC)", or null when not derivable. */
+function fmtIndexRange(tr) {
+  if (!tr || !tr.start_ms || !tr.end_ms) return null;
+  return `${_fmtUtcMinute(tr.start_ms)} > ${_fmtUtcMinute(tr.end_ms)} (UTC)`;
+}
+
+/** Does an index's window overlap the filter window at all?
+ *  Half-open [start, end) on both sides, so an index ending exactly when the
+ *  filter starts does NOT count — it holds no document inside the filter. */
+function _rangeOverlaps(tr) {
+  if (_dashboardRangeFrom === null && _dashboardRangeTo === null) return true;
+  if (!tr || !tr.start_ms || !tr.end_ms) return false;   // caller counts these
+  if (_dashboardRangeTo !== null && tr.start_ms >= _dashboardRangeTo) return false;
+  if (_dashboardRangeFrom !== null && tr.end_ms <= _dashboardRangeFrom) return false;
+  return true;
+}
+
 function _dashboardVisibleIndices(indices) {
-  if (!_dashboardIndexFilter) return indices;
-  return indices.filter(i =>
-    i.name.toLowerCase().includes(_dashboardIndexFilter) ||
-    (i.cc_meta?.category || '').toLowerCase().includes(_dashboardIndexFilter));
+  let out = indices;
+  if (_dashboardIndexFilter) {
+    out = out.filter(i =>
+      i.name.toLowerCase().includes(_dashboardIndexFilter) ||
+      (i.cc_meta?.category || '').toLowerCase().includes(_dashboardIndexFilter));
+  }
+  _dashboardRangeHidden = 0;
+  if (_dashboardRangeFrom !== null || _dashboardRangeTo !== null) {
+    // Count ONLY the indices dropped because they cannot be dated — not every
+    // index the filter excluded. An index that simply falls outside the window
+    // was answered correctly and needs no explanation; one the tool could not
+    // place is a gap in the answer, and the engineer should know it exists
+    // rather than conclude the data is not on this machine.
+    const undatable = (tr) => !tr || !tr.start_ms || !tr.end_ms;
+    _dashboardRangeHidden = out.filter(i => undatable(i.time_range)).length;
+    out = out.filter(i => _rangeOverlaps(i.time_range));
+  }
+  return out;
+}
+
+/** Read the two date inputs into the filter state and re-render. */
+function applyIndexRangeFilter() {
+  const parse = (id) => {
+    const v = document.getElementById(id)?.value;
+    if (!v) return null;
+    // datetime-local has no zone; the slice arithmetic is UTC, and the column
+    // says UTC, so the typed value is read as UTC to match what is on screen.
+    const ms = Date.parse(v + 'Z');
+    return Number.isNaN(ms) ? null : ms;
+  };
+  _dashboardRangeFrom = parse('idxRangeFrom');
+  _dashboardRangeTo   = parse('idxRangeTo');
+  renderIndicesTable(allIndices);
+}
+
+function clearIndexRangeFilter() {
+  _dashboardRangeFrom = _dashboardRangeTo = null;
+  const a = document.getElementById('idxRangeFrom'), b = document.getElementById('idxRangeTo');
+  if (a) a.value = ''; if (b) b.value = '';
+  renderIndicesTable(allIndices);
 }
 
 function renderIndicesTable(indices) {
@@ -3735,12 +3858,13 @@ function renderIndicesTable(indices) {
   updateDeleteSelectedBtn();
 
   if (!visible.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="text-center text-secondary py-3">${
+    tbody.innerHTML = `<tr><td colspan="8" class="text-center text-secondary py-3">${
       indices.length ? 'No indices match the search' : 'No indices found'}</td></tr>`;
   } else {
     tbody.innerHTML = visible.map(idx => {
       const hClass = idx.health === 'green' ? 'success' : idx.health === 'yellow' ? 'warning' : 'danger';
       const cat = idx.cc_meta?.category || '<span class="text-secondary">—</span>';
+      const rangeTxt = fmtIndexRange(idx.time_range);
       return `<tr onclick="showIndexDetail('${esc(idx.name)}')">
         <td onclick="event.stopPropagation()">
           <input type="checkbox" ${selectedIndices.has(idx.name) ? 'checked' : ''}
@@ -3749,6 +3873,10 @@ function renderIndicesTable(indices) {
         <td><span class="badge bg-${hClass}">${idx.health || '?'}</span></td>
         <td>${(idx.docs_count ?? 0).toLocaleString()}</td>
         <td>${idx.store_size || '—'}</td>
+        <td class="text-nowrap small${rangeTxt ? '' : ' text-secondary'}"
+            title="${rangeTxt ? 'Derived from the -sl-N suffix in the index name and the family slice length'
+                              : 'No slice number in the name, or the family slice length is unknown'}">
+          ${rangeTxt ? esc(rangeTxt) : '—'}</td>
         <td>${cat}</td>
         <td class="text-end text-nowrap">
           ${can('es.index.duplicate') ? `<button class="btn btn-sm btn-outline-info py-0 px-1 me-1"
@@ -3761,6 +3889,13 @@ function renderIndicesTable(indices) {
         </td>
       </tr>`;
     }).join('');
+  }
+  const note = document.getElementById('idxRangeNote');
+  if (note) {
+    note.textContent = _dashboardRangeHidden
+      ? `${_dashboardRangeHidden} ${_dashboardRangeHidden > 1 ? 'indices' : 'index'} hidden — no derivable time range`
+      : '';
+    note.classList.toggle('d-none', !_dashboardRangeHidden);
   }
   if (indicesView === 'csv') setIndicesView('csv');   // keep CSV view in sync
 }
@@ -3775,6 +3910,7 @@ function indicesRows() {
     docs_count: i.docs_count, store_size: i.store_size,
     primaries: i.primaries, replicas: i.replicas,
     category: i.cc_meta?.category || '',
+    time_range_utc: fmtIndexRange(i.time_range) || '',
   }));
 }
 
@@ -4687,7 +4823,12 @@ async function createArtificialData(indexName) {
       <input type="text" class="form-control form-control-sm ad-field-filter" placeholder="Filter fields…" style="max-width:180px;">
       <button class="btn btn-sm btn-outline-secondary py-0" data-act="add-field"
               title="Add a field that is not in the mapping yet">+ Add field</button>
-      <span class="small text-secondary">values: comma-separated list → one doc per combination per time step (blank = omitted) · random / increment: filled per document</span>
+      <span class="small text-secondary">values: comma-separated list → one doc per combination per time step · random / increment: filled per document</span>
+      <label class="small text-secondary d-flex align-items-center gap-1 ms-auto"
+             title="A field left blank is filled with random values chosen from its MAPPING TYPE — ip for an address, a port number, true/false for a boolean, a number in range, or tokens. Unchecked, a blank field is omitted from the documents entirely.">
+        <input type="checkbox" class="ad-autofill" checked>
+        auto-fill blank fields by type
+      </label>
     </div>
     <div class="ad-fields border border-secondary rounded" style="max-height:38vh;overflow:auto;">
       <table class="table table-sm mb-0" style="font-size:0.78rem;">
@@ -4846,6 +4987,8 @@ async function createArtificialData(indexName) {
   /** One spec per configured field row: {field, mode:'list', values} |
    *  {field, mode:'random', kind, min, max, pool} |
    *  {field, mode:'increment', prefix, start, step}. */
+  const autofillBlanks = () => !!wrap.querySelector('.ad-autofill')?.checked;
+
   const fieldSpecs = () => [...wrap.querySelectorAll('.ad-frow')].map(r => {
     const field = r.dataset.field || r.querySelector('.ad-fname')?.value.trim() || '';
     if (!field) return null;
@@ -4853,7 +4996,18 @@ async function createArtificialData(indexName) {
     if (mode === 'list') {
       const values = (r.querySelector('.ad-vals')?.value || '')
         .split(',').map(s => s.trim()).filter(Boolean);
-      return values.length ? { field, mode, values } : null;
+      if (values.length) return { field, mode, values };
+      // Blank used to mean "omit this field", which quietly produced documents
+      // missing half their mapping — realistic-looking until something queried
+      // a field that was never written. Filling it from the field's TYPE gives
+      // a document with the shape the template promises. Still opt-out, because
+      // omitting a field is occasionally the point of the exercise.
+      //
+      // Random rather than a constant: a thousand documents sharing one source
+      // address is not test data, it is one document repeated.
+      if (!autofillBlanks()) return null;
+      return { field, mode: 'random', kind: _adRandKind(field, r.dataset.type || ''),
+               min: null, max: null, pool: 10, autofilled: true };
     }
     if (mode === 'random') {
       const num = (cls) => { const v = parseFloat(r.querySelector(cls)?.value); return isNaN(v) ? null : v; };
@@ -4893,7 +5047,7 @@ async function createArtificialData(indexName) {
     wrap.querySelectorAll('.ad-other-row').forEach(r => {
       if (r.querySelector('.ad-other-on').checked) names.add(r.dataset.field);
     });
-    fieldSpecs().forEach(s => names.add(s.field));      // blank value lists are dropped
+    fieldSpecs().forEach(s => names.add(s.field));      // blank lists are auto-filled or dropped
     derivedRules().forEach(d => names.add(d.field));
     return [...names].filter(Boolean).sort();
   };
@@ -5338,7 +5492,32 @@ const ATTACK_COLS = {                    // column key on the attack object → 
   deviceIp:    { label:'Device IP',  kind:'text' },
   status:      { label:'Status',     kind:'text' },
 };
-let attackColFilters = {};               // col → {kind:'text',v} | {kind:'date',op,v}
+// Operators offered per column kind. "contains" stays the default because it
+// is what the screen did before and what most searches want; the rest exist
+// because "contains" cannot express the two questions people actually asked —
+// exclude a noisy device, and bound a window.
+const ATTACK_TEXT_OPS = [
+  ['contains',  'contains'],
+  ['ncontains', 'does not contain'],
+  ['eq',        'equals'],
+  ['neq',       'does not equal'],
+  ['starts',    'starts with'],
+  ['ends',      'ends with'],
+  ['empty',     'is empty'],
+];
+
+const ATTACK_DATE_OPS = [
+  ['gte',     'after or equal ( ≥ )'],
+  ['gt',      'after ( > )'],
+  ['lte',     'before or equal ( ≤ )'],
+  ['lt',      'before ( < )'],
+  ['eq',      'exact ( = the minute )'],
+  ['between', 'between ( from → to )'],
+];
+
+let attackColFilters = {};               // col → {kind:'text',op,v} | {kind:'date',op,v,v2}
+let _attacksPage = 0;                    // 0-based page index into the FILTERED rows
+let _attacksPageSize = 100;              // 0 = show everything on one page
 let _attacksMatchedTotal = 0;            // total matching server-side (may exceed loaded)
 
 /** Build the /cc/attacks query string from the active column filters, so the
@@ -5347,13 +5526,38 @@ function _attackQueryString() {
   const f = attackColFilters, p = new URLSearchParams();
   const hasF = Object.keys(f).length > 0;
   p.set('size', hasF ? '1000' : '500');
-  if (f.attackIpsId?.v?.trim()) p.set('attack_id', f.attackIpsId.v.trim());
-  if (f.attackType?.v?.trim())  p.set('type',      f.attackType.v.trim());
-  if (f.deviceIp?.v?.trim())    p.set('device_ip', f.deviceIp.v.trim());
-  if (f.status?.v?.trim())      p.set('status',    f.status.v.trim());
+  // The server-side filters NARROW what is fetched; the client then applies the
+  // full operator set to what came back. A narrowing filter is only safe when
+  // every row the user wants is inside it, so a POSITIVE operator may be sent
+  // (equals / starts / ends are all subsets of "contains") and a NEGATIVE one
+  // may not: asking the server for rows containing "x" and then showing the
+  // ones that do NOT contain "x" would return nothing, and the screen would
+  // report "no matches" for a filter that should have matched most of the box.
+  const SENDABLE_TEXT_OPS = new Set(['contains', 'eq', 'starts', 'ends']);
+  const sendText = (key, spec) => {
+    if (!spec?.v?.trim()) return;
+    if (!SENDABLE_TEXT_OPS.has(spec.op || 'contains')) return;
+    p.set(key, spec.v.trim());
+  };
+  sendText('attack_id', f.attackIpsId);
+  sendText('type',      f.attackType);
+  sendText('device_ip', f.deviceIp);
+  sendText('status',    f.status);
+
   for (const [col, key] of [['startTime','start'], ['endTime','end']]) {
     const df = f[col];
-    if (df?.v) { const ms = new Date(df.v).getTime(); if (!isNaN(ms)) { p.set(key+'_op', df.op); p.set(key+'_val', String(ms)); } }
+    if (!df?.v) continue;
+    // "between" has no server-side operator, so send its LOWER bound as >=:
+    // a superset of the range, which the client then trims to the range.
+    let op = df.op, val = df.v;
+    if (op === 'between') {
+      const a = new Date(df.v).getTime(), b = new Date(df.v2 || '').getTime();
+      if (isNaN(a) || isNaN(b)) continue;
+      op = 'gte';
+      val = a <= b ? df.v : df.v2;
+    }
+    const ms = new Date(val).getTime();
+    if (!isNaN(ms)) { p.set(key + '_op', op); p.set(key + '_val', String(ms)); }
   }
   return p.toString();
 }
@@ -5387,6 +5591,7 @@ async function loadAttacks() {
 /** Apply the current filters: instant client refine of the loaded set, then a
  *  server fetch that brings in matches beyond the loaded page. */
 function applyAttackFilters() {
+  _attacksPage = 0;
   renderAttacks();     // instant feedback on what's already loaded
   loadAttacks();       // authoritative: fetch all matches from the backend
 }
@@ -5407,13 +5612,33 @@ function _attackMatches(a) {
   for (const [col, f] of Object.entries(attackColFilters)) {
     if (!f) continue;
     if (f.kind === 'text') {
+      const hay = String(a[col] ?? '').toLowerCase();
       const needle = (f.v || '').trim().toLowerCase();
-      if (needle && !String(a[col] ?? '').toLowerCase().includes(needle)) return false;
+      const op = f.op || 'contains';
+      if (op === 'empty') { if (hay !== '') return false; continue; }
+      if (!needle) continue;
+      switch (op) {
+        case 'contains':  if (!hay.includes(needle)) return false; break;
+        case 'ncontains': if (hay.includes(needle)) return false; break;
+        case 'eq':        if (hay !== needle) return false; break;
+        case 'neq':       if (hay === needle) return false; break;
+        case 'starts':    if (!hay.startsWith(needle)) return false; break;
+        case 'ends':      if (!hay.endsWith(needle)) return false; break;
+      }
     } else {                              // date operators
       if (!f.v) continue;
       const am = _attackMs(a[col]);
       const im = _attackMs(f.v);
       if (am == null || im == null) { if (im != null) return false; continue; }
+      if (f.op === 'between') {
+        const im2 = _attackMs(f.v2);
+        if (im2 == null) continue;                 // half-typed range filters nothing
+        // Inclusive at both ends: the user picked two wall-clock times off the
+        // table and expects the rows they can see at those times to be in.
+        const [lo, hi] = im <= im2 ? [im, im2] : [im2, im];
+        if (am < lo || am > hi) return false;
+        continue;
+      }
       switch (f.op) {
         case 'gt':  if (!(am >  im)) return false; break;
         case 'gte': if (!(am >= im)) return false; break;
@@ -5452,10 +5677,22 @@ function renderAttacks() {
     meta.innerHTML = m;
   }
 
-  if (!_attacksAll.length) { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-secondary py-3">No attacks found</td></tr>'; return; }
-  if (!shown.length)       { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-secondary py-3">No attacks match the filters</td></tr>'; return; }
+  if (!_attacksAll.length) { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-secondary py-3">No attacks found</td></tr>'; _renderAttackPager(0, 0); return; }
+  if (!shown.length)       { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-secondary py-3">No attacks match the filters</td></tr>'; _renderAttackPager(0, 0); return; }
 
-  tbody.innerHTML = shown.map(a => {
+  // Page the FILTERED rows, not the loaded ones: the count under the pager has
+  // to agree with the count in the meta line above it, or the two read as a
+  // contradiction. Clamped rather than reset, so narrowing a filter while on
+  // page 9 lands on the last page instead of silently jumping to the first.
+  const pageSize = _attacksPageSize > 0 ? _attacksPageSize : shown.length;
+  const pageCount = Math.max(1, Math.ceil(shown.length / pageSize));
+  if (_attacksPage >= pageCount) _attacksPage = pageCount - 1;
+  if (_attacksPage < 0) _attacksPage = 0;
+  const from = _attacksPage * pageSize;
+  const pageRows = shown.slice(from, from + pageSize);
+  _renderAttackPager(shown.length, pageCount, from, pageRows.length);
+
+  tbody.innerHTML = pageRows.map(a => {
     const typeBadge = a.attackType
       ? `<span class="badge bg-info text-dark">${esc(a.attackType)}</span>`
       : '—';
@@ -5490,20 +5727,28 @@ function toggleAttackFilter(col, btn) {
   pop.dataset.col = col;
 
   if (meta.kind === 'text') {
+    const op = cur.op || 'contains';
     pop.innerHTML =
       `<div class="afp-title">Filter ${esc(meta.label)}</div>
-       <input class="form-control form-control-sm afp-text" placeholder="contains…" value="${esc(cur.v || '')}">
+       <select class="form-select form-select-sm afp-op">${ATTACK_TEXT_OPS.map(
+         o => `<option value="${o[0]}"${o[0] === op ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select>
+       <input class="form-control form-control-sm afp-text mt-1" placeholder="value…" value="${esc(cur.v || '')}">
        <div class="afp-actions">
          <button class="btn btn-sm btn-primary" data-a="apply">Apply</button>
          <button class="btn btn-sm btn-outline-secondary" data-a="clear">Clear</button>
        </div>`;
   } else {
     const op = cur.op || 'gte';
-    const ops = [['gt','after ( > )'],['gte','after or equal ( ≥ )'],['lt','before ( < )'],['lte','before or equal ( ≤ )'],['eq','exact ( = the minute )']];
+    const between = op === 'between';
     pop.innerHTML =
       `<div class="afp-title">Filter ${esc(meta.label)}</div>
-       <select class="form-select form-select-sm afp-op">${ops.map(o=>`<option value="${o[0]}"${o[0]===op?' selected':''}>${o[1]}</option>`).join('')}</select>
-       <input type="datetime-local" step="1" class="form-control form-control-sm afp-date mt-1" value="${esc(cur.v || '')}">
+       <select class="form-select form-select-sm afp-op">${ATTACK_DATE_OPS.map(
+         o => `<option value="${o[0]}"${o[0] === op ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select>
+       <input type="datetime-local" step="1" class="form-control form-control-sm afp-date mt-1"
+              value="${esc(cur.v || '')}">
+       <input type="datetime-local" step="1"
+              class="form-control form-control-sm afp-date2 mt-1${between ? '' : ' d-none'}"
+              value="${esc(cur.v2 || '')}" placeholder="to">
        <div class="afp-hint">Times match your local timezone (as shown in the table).</div>
        <div class="afp-actions">
          <button class="btn btn-sm btn-primary" data-a="apply">Apply</button>
@@ -5522,11 +5767,17 @@ function toggleAttackFilter(col, btn) {
       delete attackColFilters[col];
     } else if (meta.kind === 'text') {
       const v = pop.querySelector('.afp-text').value;
-      if (v.trim()) attackColFilters[col] = { kind:'text', v }; else delete attackColFilters[col];
-    } else {
-      const v = pop.querySelector('.afp-date').value;
       const op = pop.querySelector('.afp-op').value;
-      if (v) attackColFilters[col] = { kind:'date', op, v }; else delete attackColFilters[col];
+      // "is empty" is the one operator with nothing to type.
+      if (v.trim() || op === 'empty') attackColFilters[col] = { kind:'text', op, v };
+      else delete attackColFilters[col];
+    } else {
+      const v  = pop.querySelector('.afp-date').value;
+      const v2 = pop.querySelector('.afp-date2')?.value || '';
+      const op = pop.querySelector('.afp-op').value;
+      if (v && (op !== 'between' || v2)) attackColFilters[col] = { kind:'date', op, v, v2 };
+      else if (!v) delete attackColFilters[col];
+      else showToast('Between needs both a from and a to time', 'bg-warning');
     }
     pop.remove();
     applyAttackFilters();
@@ -5534,16 +5785,102 @@ function toggleAttackFilter(col, btn) {
   pop.querySelector('.afp-text')?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') pop.querySelector('[data-a="apply"]').click();
   });
+  pop.querySelector('.afp-op')?.addEventListener('change', (e) => {
+    // The second date box only exists for "between"; the text box is pointless
+    // for "is empty". Toggling rather than rebuilding keeps what was typed.
+    pop.querySelector('.afp-date2')?.classList.toggle('d-none', e.target.value !== 'between');
+    pop.querySelector('.afp-text')?.classList.toggle('d-none', e.target.value === 'empty');
+  });
   setTimeout(() => pop.querySelector('input')?.focus(), 0);
 }
 
-function clearAllAttackFilters() { attackColFilters = {}; applyAttackFilters(); }
+/** Draw the pager under the attacks table. Hidden when everything fits. */
+function _renderAttackPager(total, pageCount, from = 0, count = 0) {
+  const el = document.getElementById('attacksPager');
+  if (!el) return;
+  if (!total) { el.innerHTML = ''; el.classList.add('d-none'); return; }
+  el.classList.remove('d-none');
+  const page = _attacksPage;
+  const sizes = [50, 100, 250, 500, 0];
+  el.innerHTML = `
+    <div class="d-flex align-items-center gap-2 flex-wrap py-1">
+      <span class="small text-secondary">
+        ${total ? `${(from + 1).toLocaleString()}–${(from + count).toLocaleString()}` : '0'}
+        of ${total.toLocaleString()}</span>
+      <div class="btn-group btn-group-sm ms-2">
+        <button class="btn btn-outline-secondary py-0 px-2" ${page === 0 ? 'disabled' : ''}
+                onclick="goAttackPage(0)" title="First page">&laquo;</button>
+        <button class="btn btn-outline-secondary py-0 px-2" ${page === 0 ? 'disabled' : ''}
+                onclick="goAttackPage(${page - 1})" title="Previous page">&lsaquo;</button>
+        <button class="btn btn-outline-secondary py-0 px-2 disabled">
+          ${page + 1} / ${pageCount}</button>
+        <button class="btn btn-outline-secondary py-0 px-2" ${page >= pageCount - 1 ? 'disabled' : ''}
+                onclick="goAttackPage(${page + 1})" title="Next page">&rsaquo;</button>
+        <button class="btn btn-outline-secondary py-0 px-2" ${page >= pageCount - 1 ? 'disabled' : ''}
+                onclick="goAttackPage(${pageCount - 1})" title="Last page">&raquo;</button>
+      </div>
+      <label class="small text-secondary d-flex align-items-center gap-1 ms-2">
+        rows
+        <select class="form-select form-select-sm py-0" style="width:5.5rem;"
+                onchange="setAttackPageSize(this.value)">
+          ${sizes.map(n => `<option value="${n}"${n === _attacksPageSize ? ' selected' : ''}>${n || 'all'}</option>`).join('')}
+        </select>
+      </label>
+    </div>`;
+}
+
+function goAttackPage(n) {
+  _attacksPage = n;
+  renderAttacks();
+  document.getElementById('attacksTableBody')?.scrollIntoView({ block: 'start' });
+}
+
+function setAttackPageSize(v) {
+  _attacksPageSize = parseInt(v, 10) || 0;
+  _attacksPage = 0;                       // a new page size makes the old index meaningless
+  renderAttacks();
+}
+
+/** Any change to the filters puts the user back on page one — staying on
+ *  page 7 of a result set they just redefined shows them rows they did not
+ *  ask for and an empty table as often as not. */
+function clearAllAttackFilters() { attackColFilters = {}; _attacksPage = 0; applyAttackFilters(); }
 
 // Close an open attacks filter popover when clicking elsewhere.
 document.addEventListener('click', (e) => {
   if (e.target.closest('.atk-filter-pop') || e.target.closest('.atk-funnel')) return;
   document.querySelector('.atk-filter-pop')?.remove();
 });
+
+/** Copy text to the clipboard and flash the button that asked for it.
+ *  navigator.clipboard is unavailable on a plain-HTTP origin in some browsers,
+ *  and this tool is regularly reached over http on a lab network, so the
+ *  execCommand path is a real fallback rather than legacy politeness. */
+async function copyTextToClipboard(text, btn, okLabel = 'Copied') {
+  let ok = true;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      ok = document.execCommand('copy');
+      ta.remove();
+    } catch { ok = false; }
+  }
+  if (btn) {
+    const orig = btn.innerHTML;
+    btn.innerHTML = ok ? `<i class="bi bi-check2 me-1"></i>${okLabel}`
+                       : '<i class="bi bi-x-lg me-1"></i>Copy failed';
+    setTimeout(() => { if (btn.isConnected) btn.innerHTML = orig; }, 1500);
+  }
+  if (!ok) showToast('Could not reach the clipboard — select the text and copy manually', 'bg-warning');
+  return ok;
+}
 
 /** Drill-down: every document about one attack ID, searched across all
  *  indices whose names contain "dp-" or "attack-data", grouped per index. */
@@ -5563,6 +5900,16 @@ async function showAttackDetails(attackId) {
           Searching "dp-" and "attack-data" indices…</div>
       </div>
       <div class="rt-modal-actions" style="flex:0 0 auto;">
+        <!-- Copying the whole record is the point of opening this: the next
+             step is almost always pasting it into a ticket or a chat with R&D,
+             and doing that by hand from a dozen collapsed groups is why people
+             screenshot it instead. Disabled until the data arrives. -->
+        <button class="btn btn-sm btn-outline-primary atk-copy-json" data-act="copy-json" disabled
+                title="Copy every document, from every index, as JSON">
+          <i class="bi bi-clipboard me-1"></i>Copy all (JSON)</button>
+        <button class="btn btn-sm btn-outline-primary atk-copy-text" data-act="copy-text" disabled
+                title="Copy every document as plain key: value text, grouped by index">
+          <i class="bi bi-clipboard me-1"></i>Copy all (text)</button>
         <button class="btn btn-sm btn-secondary" data-act="close">Close</button>
       </div></div>`;
   document.body.appendChild(wrap);
@@ -5593,7 +5940,11 @@ async function showAttackDetails(attackId) {
     data.indices.map(g => `
       <details class="mb-2 border border-secondary rounded p-2" ${data.indices.length === 1 ? 'open' : ''}>
         <summary class="small fw-semibold" style="cursor:pointer;">${esc(g.index)}
-          <span class="badge bg-info text-dark ms-1">${g.count} doc${g.count > 1 ? 's' : ''}</span></summary>
+          <span class="badge bg-info text-dark ms-1">${g.count} doc${g.count > 1 ? 's' : ''}</span>
+          <button class="btn btn-sm btn-outline-secondary py-0 px-1 ms-2 atk-copy-one"
+                  data-index="${esc(g.index)}" onclick="event.preventDefault();event.stopPropagation();"
+                  title="Copy just this index&apos;s documents as JSON"
+                  style="font-size:0.7rem;"><i class="bi bi-clipboard"></i></button></summary>
         ${g.docs.map(d => `<table class="table table-sm mb-2 mt-2" style="font-size:0.75rem;">
             <tbody>${Object.entries(d).map(([k, v]) => `<tr>
               <td class="text-secondary" style="width:30%;">${esc(k)}</td>
@@ -5601,6 +5952,39 @@ async function showAttackDetails(attackId) {
             </tr>`).join('')}</tbody>
           </table>`).join('<hr class="my-1">')}
       </details>`).join('');
+
+  // ── Copy wiring ──────────────────────────────────────────────────────────
+  // Built from the DATA, not by scraping the DOM: the groups are collapsed
+  // <details> and half of them have never been rendered open, so reading the
+  // table cells back would copy whatever happened to be expanded.
+  const asText = () => data.indices.map(g =>
+    [`── ${g.index} (${g.count} doc${g.count > 1 ? 's' : ''}) ──`]
+      .concat(g.docs.map(d => Object.entries(d)
+        .map(([k, v]) => `${k}: ${fmtVal(v)}`).join('\n')))
+      .join('\n\n')
+  ).join('\n\n');
+
+  const header = `Attack ${attackId} — ${data.returned} document(s) in `
+               + `${data.indices.length} index/indices\n\n`;
+
+  const jsonBtn = wrap.querySelector('.atk-copy-json');
+  const textBtn = wrap.querySelector('.atk-copy-text');
+  if (jsonBtn) {
+    jsonBtn.disabled = false;
+    jsonBtn.onclick = () => copyTextToClipboard(JSON.stringify(data, null, 2), jsonBtn);
+  }
+  if (textBtn) {
+    textBtn.disabled = false;
+    textBtn.onclick = () => copyTextToClipboard(header + asText(), textBtn);
+  }
+  wrap.querySelectorAll('.atk-copy-one').forEach(btn => {
+    btn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();        // must not toggle the <details> it sits in
+      const group = data.indices.find(g => g.index === btn.dataset.index);
+      if (group) copyTextToClipboard(JSON.stringify(group, null, 2), btn, '');
+    };
+  });
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

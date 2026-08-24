@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import logging
 import re
 from datetime import datetime, timezone
 
@@ -9,6 +10,8 @@ from pydantic import BaseModel
 from modules.es.client import get_client
 from modules.es.catalog import CC_INDEX_CATALOG, CATEGORIES, resolve_prefix
 from modules.es.field_types import date_fields, exact_field_map, resolve_exact
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/indices", tags=["indices"])
 
@@ -39,12 +42,39 @@ delete_router = APIRouter(prefix="/api/indices", tags=["indices"])
 import_router = APIRouter(prefix="/api/indices", tags=["indices"])
 
 
+def _time_range(catalog: dict, index_name: str, minutes_of, window_of) -> dict | None:
+    """{start_ms, end_ms, slice_minutes} for one index, or None."""
+    minutes = minutes_of(catalog, index_name)
+    window = window_of(index_name, minutes)
+    if window is None:
+        return None
+    return {"start_ms": window[0], "end_ms": window[1], "slice_minutes": minutes}
+
+
 @router.get("")
 def list_indices(cc_only: bool = Query(default=False)):
     """List all indices with doc count, store size, and CC metadata."""
     try:
         es   = get_client()
         rows = es.cat_indices()
+
+        # The time window each index covers, derived from its "-sl-<N>" suffix
+        # and its family's slice length. The catalog is resolved ONCE here
+        # rather than per row: discover() is cached per cluster, but a hundred
+        # lookups through it on every dashboard refresh is still a hundred
+        # dictionary walks for an answer that does not change between rows.
+        #
+        # A failure here must not cost the caller their index list — the time
+        # range is an extra column, and an index list is the screen itself. So
+        # the catalog degrades to empty and every window comes back None, which
+        # the UI renders as "—" rather than as a wrong date.
+        from modules.es.discovery import discover, slice_minutes_from_catalog, slice_window
+        try:
+            catalog = discover(es)["families"]
+        except Exception as exc:                       # noqa: BLE001
+            logger.warning("[indices] no catalog for time ranges: %s", exc)
+            catalog = {}
+
         result = []
         for row in rows:
             index_name = row.get("index", "")
@@ -62,6 +92,13 @@ def list_indices(cc_only: bool = Query(default=False)):
                 "primaries":  _safe_int(row.get("pri")),
                 "replicas":   _safe_int(row.get("rep")),
                 "cc_meta":    meta,
+                # {start_ms, end_ms} or None. None means "not derivable" — no
+                # slice number in the name, or an unknown slice length — and is
+                # deliberately not a guess: an index silently given the wrong
+                # window would be missed by a date filter looking for exactly
+                # the data it holds.
+                "time_range": _time_range(catalog, index_name,
+                                          slice_minutes_from_catalog, slice_window),
             })
         return {"indices": result, "total": len(result)}
     except Exception as e:

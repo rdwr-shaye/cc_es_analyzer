@@ -58,6 +58,21 @@ def _module() -> Module:
             # a corrupted index is a real thing to meet there and dropping it
             # is often the fastest way back to a green cluster.
             Capability(
+                id="es.doc.import",
+                title="Import a CSV file as documents into an index",
+                profiles=_STANDALONE_ONLY,
+                unlockable=True,
+                note="Separate from es.doc.write because it is a different "
+                     "act: editing a document corrects data that is already "
+                     "there, while importing a CSV bulk-loads a file of "
+                     "unknown provenance into a customer's index, which is "
+                     "nearer to fabricating data than to correcting it. "
+                     "Embedded, the sanctioned way to put data back on a CC is "
+                     "an ARCHIVE restore (es.archive.restore) — that path "
+                     "carries data this tool exported from a CC in the first "
+                     "place, and it stays on.",
+            ),
+            Capability(
                 id="es.index.create",
                 title="Create an index",
                 profiles=_STANDALONE_ONLY,
@@ -123,7 +138,7 @@ def _module() -> Module:
             # that route registration does not keep, and a reviewer reading the
             # registry would place the boundary somewhere it is not.
             (query.write_router, "es.doc.write"),
-            (indices.import_router, "es.doc.write"),
+            (indices.import_router, "es.doc.import"),
             (indices.create_router, "es.index.create"),
             (indices.delete_router, "es.index.delete"),
             (exports.export_router, "es.archive.export"),

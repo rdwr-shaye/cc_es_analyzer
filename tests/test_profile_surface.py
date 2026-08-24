@@ -56,6 +56,11 @@ STANDALONE_ONLY = {
         "hand there is a reproduction activity. DELETE /api/indices/{name} is "
         "deliberately NOT here — a corrupted index has to be removable by the "
         "engineer who found it, on a customer's box included",
+    "/api/indices/{index_name}/import":
+        "bulk-loads a CSV of unknown provenance into a customer's index — "
+        "nearer to fabricating data than to correcting it. Embedded, the "
+        "sanctioned way to put data back is an ARCHIVE restore, which carries "
+        "data this tool exported from a CC in the first place",
     "/api/update/check":   "the embedded build upgrades with the CC",
     "/api/update/apply":   "the embedded build upgrades with the CC",
     "/api/update/status":  "the embedded build upgrades with the CC",
@@ -68,7 +73,6 @@ STANDALONE_ONLY = {
 IN_BOTH = [
     "/api/indices/possible",          # the point of the read-only catalog
     "/api/indices/{index_name}",      # delete a corrupted index
-    "/api/indices/{index_name}/import",
     "/api/doc/update",
     "/api/docs/bulk-delete",
     "/api/docs/bulk-field",

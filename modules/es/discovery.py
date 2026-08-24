@@ -121,17 +121,51 @@ def _flatten(props: dict, parent: str = "") -> dict:
     return out
 
 
-def _empirical_slices(es) -> dict:
-    """prefix -> (slice_minutes, latest_example) measured from live creation dates."""
+def _live_rows(es) -> list:
+    """[(name, created_ms)] for every non-system index, newest last per caller."""
     rows = es.get("/_cat/indices", params={"format": "json", "h": "index,creation.date"})
-    by_prefix: dict[str, list] = defaultdict(list)
+    out = []
     for row in rows:
         name, created = row.get("index", ""), row.get("creation.date")
         if not name or name.startswith(".") or not created:
             continue
+        out.append((name, int(created)))
+    return out
+
+
+def unsliced_live_example(pattern: str, family: str, live: list) -> str | None:
+    """Newest live index matching a family that does NOT use sliced naming.
+
+    _LIVE_NAME_RE only recognises `<family>-ty-<type>-sid-<n>-sl-<n>`, which is
+    how most CC indices are named. The families in UNSLICED are not named that
+    way at all — `dp-https-server` IS the index name — so they never matched,
+    never got a live_example, and the picker labelled every one of them "new"
+    while the index sat in the cluster. That mislabelling is the whole reason
+    this function exists: "new" and "live" is the one column an engineer uses
+    to tell a MISSING index from one that was never expected here.
+
+    `live` is [(name, created_ms)]. Exact name first, then the template pattern
+    as a glob; newest wins when several match.
+    """
+    names = {n for n, _ in live}
+    if family and family in names:
+        return family
+    stripped = (pattern or "").strip()
+    if not stripped:
+        return None
+    if "*" not in stripped:
+        return stripped if stripped in names else None
+    matches = [(created, n) for n, created in live if fnmatch.fnmatch(n, stripped)]
+    return max(matches)[1] if matches else None
+
+
+def _empirical_slices(rows: list) -> dict:
+    """prefix -> (slice_minutes, latest_example) measured from live creation dates."""
+    by_prefix: dict[str, list] = defaultdict(list)
+    for name, created in rows:
         m = _LIVE_NAME_RE.match(name)
         if m and int(m.group(4)) > 0:
-            by_prefix[m.group(1)].append((int(m.group(4)), int(created), name))
+            by_prefix[m.group(1)].append((int(m.group(4)), created, name))
     result = {}
     for prefix, entries in by_prefix.items():
         est = min(created / (sl * 60000) for sl, created, _n in entries)
@@ -192,7 +226,8 @@ def discover(es, refresh: bool = False) -> dict:
             return hit[1]
 
     info = es.info()
-    emp = _empirical_slices(es)
+    live_rows = _live_rows(es)
+    emp = _empirical_slices(live_rows)
     cfg = _config_slices(es)
     templates = es.get("/_template", params={})
 
@@ -253,6 +288,18 @@ def discover(es, refresh: bool = False) -> dict:
             "live_example": example, "fields": fields, "field_count": len(fields),
             "template_names": tnames}
 
+    # Families whose live index is NOT named the sliced way never matched
+    # _LIVE_NAME_RE above, so they reached here with live_example=None and the
+    # picker labelled them "new" while the index sat in the cluster —
+    # dp-https-server and the eleven other UNSLICED families among them. Fill
+    # them from the live list before anything reads live_example.
+    for family, entry in catalog.items():
+        if entry.get("live_example"):
+            continue
+        found = unsliced_live_example(entry.get("index_pattern", ""), family, live_rows)
+        if found:
+            entry["live_example"] = found
+
     # Every family gets an example name usable today: the latest LIVE index when
     # one exists, otherwise a CONSTRUCTED name (what ES will create on first write).
     now_ms = int(time.time() * 1000)
@@ -311,6 +358,60 @@ def discover(es, refresh: bool = False) -> dict:
     logger.info("[discovery] %s: %s families, %s with slice size", key, len(catalog),
                 sum(1 for v in catalog.values() if v["slice_minutes"]))
     return result
+
+
+# ── The time window an index covers ──────────────────────────────────────────
+# A CC index name ends in "-sl-<N>" where N = epoch_seconds // slice_seconds
+# (the convention scripts/time_slice.sh uses and modules/es/routers/artificial.py
+# documents). So the window an index covers is arithmetic on its NAME plus its
+# family's slice length — no query, no date-field aggregation, and an answer
+# even for an index that is empty or RED. That matters on the dashboard, where
+# the alternative would be a min/max aggregation per index on every refresh.
+_SLICE_SUFFIX_RE = re.compile(r"-sl-(\d+)(?:-pt-\d+)?$")
+
+
+def slice_window(index_name: str, slice_minutes: int | None) -> tuple[int, int] | None:
+    """(start_ms, end_ms) covered by *index_name*, or None if not derivable.
+
+    None — not a guess — whenever the name carries no slice number or the
+    family's slice length is unknown. A wrong time range on a dashboard is
+    worse than a blank one: an engineer filtering by date would silently miss
+    the index holding the data they came for.
+    """
+    if not slice_minutes or slice_minutes <= 0:
+        return None
+    match = _SLICE_SUFFIX_RE.search(index_name or "")
+    if not match:
+        return None
+    number = int(match.group(1))
+    # "-sl-0" is the open/unsliced marker seen in export names, not slice zero;
+    # treating it as a window would date the index to 1970.
+    if number <= 0:
+        return None
+    span_ms = slice_minutes * 60_000
+    start_ms = number * span_ms
+    return start_ms, start_ms + span_ms
+
+
+def family_of(index_name: str) -> str:
+    """The family key an index name belongs to — the part before "-ty-"."""
+    return index_name.split("-ty-")[0] if "-ty-" in index_name else index_name
+
+
+def slice_minutes_from_catalog(catalog: dict, index_name: str) -> int | None:
+    """Slice length for one index against an ALREADY-FETCHED catalog.
+
+    Split out from slice_for_index so a caller listing hundreds of indices
+    resolves the catalog once rather than once per row.
+    """
+    family = family_of(index_name)
+    entry = catalog.get(family)
+    if entry is None:
+        for fam_key, cand in catalog.items():
+            if "*" in fam_key and fnmatch.fnmatch(family, fam_key):
+                entry = cand
+                break
+    return entry.get("slice_minutes") if entry else None
 
 
 def slice_for_index(es, index_name: str) -> tuple[int | None, str | None]:

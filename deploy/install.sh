@@ -11,6 +11,9 @@
 #      deploy/setup_nginx_path.py --local, detection in deploy/nginx_detect.py).
 #      If there is no nginx proxy, that step is skipped cleanly and the app is
 #      reachable directly on its port.
+#   0. Verifies the docker prerequisites and installs them from the DISTRO
+#      packages if missing (never by piping a remote script into a shell), then
+#      starts and enables the daemon. Opt out with --no-docker-install.
 #   4. Installs the update agent (deploy/update_agent.sh) so the UI can tell
 #      users when a newer version is in the repository and update in one click.
 #
@@ -22,16 +25,19 @@
 #   ./deploy/install.sh                 # HTTPS app + nginx path (recommended)
 #   ./deploy/install.sh --no-ssl        # keep the app on plain HTTP
 #   ./deploy/install.sh --no-updater    # skip the update agent
+#   ./deploy/install.sh --no-docker-install   # check docker, never install it
 #   HOST_PORT=9000 ./deploy/install.sh  # publish the app on a different host port
 set -euo pipefail
 
 SSL="true"
 UPDATER="true"
+DOCKER_INSTALL="true"
 for arg in "$@"; do
   case "$arg" in
     --no-ssl|--http) SSL="false" ;;
     --ssl|--https)   SSL="true"  ;;
     --no-updater)    UPDATER="false" ;;
+    --no-docker-install) DOCKER_INSTALL="false" ;;
     -h|--help)
       sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "install.sh: unknown option: $arg" >&2; exit 2 ;;
@@ -46,13 +52,106 @@ cd "$PROJECT_ROOT"
 HOST_PORT="${HOST_PORT:-8801}"
 export HOST_PORT
 
+# ── Docker prerequisites ─────────────────────────────────────────────────────
+# Everything below this point assumes docker and a compose implementation. On a
+# CC they are already there; on an engineer's own Linux box, often not, and the
+# old behaviour was to fail here with "install Docker first", which is a
+# instruction, not an installer.
+#
+# Deliberately uses the DISTRO PACKAGE MANAGER rather than the convenience
+# script at get.docker.com. Piping a remote script into a root shell is exactly
+# the supply-chain shape this project refuses elsewhere, and a support tool that
+# does it on a customer-adjacent machine would be indefensible in review. The
+# distro packages are signed by a repo the host already trusts. If they are not
+# available, the script SAYS what to run rather than reaching for the pipe.
+#
+# Skip with --no-docker-install to check and report without changing anything.
+run_as_root() {
+  if [ "$(id -u)" = "0" ]; then "$@"; else sudo "$@"; fi
+}
+
+docker_daemon_ok() { docker info >/dev/null 2>&1; }
+
+install_docker_packages() {
+  local mgr=""
+  for candidate in dnf yum apt-get zypper; do
+    if command -v "$candidate" >/dev/null 2>&1; then mgr="$candidate"; break; fi
+  done
+  if [ -z "$mgr" ]; then
+    echo "install.sh: no supported package manager (dnf/yum/apt-get/zypper) found." >&2
+    return 1
+  fi
+  echo "install.sh: installing Docker with $mgr — this needs root and network access."
+  case "$mgr" in
+    apt-get)
+      run_as_root apt-get update
+      # docker.io + the compose PLUGIN; docker-compose-v2 is the plugin package
+      # on current Debian/Ubuntu, and the older standalone binary is the fallback.
+      run_as_root apt-get install -y docker.io         || return 1
+      run_as_root apt-get install -y docker-compose-v2         || run_as_root apt-get install -y docker-compose         || echo "install.sh: no compose package available from apt; continuing to check." ;;
+    dnf|yum)
+      run_as_root "$mgr" install -y docker docker-compose-plugin         || run_as_root "$mgr" install -y docker         || return 1 ;;
+    zypper)
+      run_as_root zypper --non-interactive install docker docker-compose         || return 1 ;;
+  esac
+}
+
+ensure_docker() {
+  if command -v docker >/dev/null 2>&1 && docker_daemon_ok      && { docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1; }; then
+    echo "install.sh: docker + compose present."
+    return 0
+  fi
+
+  if [ "$DOCKER_INSTALL" != "true" ]; then
+    echo "install.sh: docker prerequisites are missing and --no-docker-install was given." >&2
+    return 1
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "install.sh: docker not found."
+    install_docker_packages || return 1
+  fi
+
+  # A freshly installed docker is usually stopped and not enabled at boot. This
+  # is also the fix when docker was already installed but the daemon was down,
+  # which reads identically to "not installed" from the caller's side.
+  if ! docker_daemon_ok; then
+    if command -v systemctl >/dev/null 2>&1; then
+      echo "install.sh: starting and enabling the docker service."
+      run_as_root systemctl enable --now docker || true
+    fi
+  fi
+
+  if ! docker_daemon_ok; then
+    echo "install.sh: the docker daemon is still not responding." >&2
+    echo "  Check: systemctl status docker" >&2
+    echo "  If this user is not root, it may also need: usermod -aG docker $USER" >&2
+    echo "  (log out and back in for the group to take effect)" >&2
+    return 1
+  fi
+
+  if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+    echo "install.sh: docker works but no compose implementation is installed." >&2
+    echo "  Install the compose plugin for your distro, e.g.:" >&2
+    echo "    apt-get install docker-compose-v2   |   dnf install docker-compose-plugin" >&2
+    return 1
+  fi
+
+  echo "install.sh: docker prerequisites satisfied."
+}
+
+if ! ensure_docker; then
+  echo "install.sh: cannot continue without docker + compose." >&2
+  exit 3
+fi
+
 # Pick a docker compose invocation (v2 plugin preferred, fall back to v1).
 if docker compose version >/dev/null 2>&1; then
   COMPOSE="docker compose"
 elif command -v docker-compose >/dev/null 2>&1; then
   COMPOSE="docker-compose"
 else
-  echo "install.sh: docker compose not found — install Docker first." >&2
+  echo "install.sh: docker compose not found after the prerequisite check." >&2
   exit 3
 fi
 
