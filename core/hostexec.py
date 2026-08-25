@@ -177,6 +177,56 @@ def _cmd_maria_check(_args: dict) -> str:
             f"docker exec \"$c\" sh -c \"mariadb-check $creds --check --all-databases\" 2>&1")
 
 
+# ── Connectivity probing ─────────────────────────────────────────────────────
+# The hostnames this operation may be pointed at. A SECOND copy of the list in
+# modules/diag/targets.py, and deliberately not an import: core/ does not
+# depend on modules/, and more importantly this is the allowlist that stops the
+# op being a general-purpose network probe. deploy/host_agent.py carries a THIRD
+# copy for the same reason it carries its own copy of everything else — the
+# host's rules live on the host.
+#
+# Without this the op would take a hostname from the caller, and "run a
+# connection attempt to any address you name, from inside the customer's data
+# centre, and tell me what answered" is a port scanner with a friendly UI.
+_PROBE_HOSTS = frozenset({
+    "services.radware.com",
+    "radwareti.s3.amazonaws.com",
+    "radware.flexnetoperations.com",
+    "filepile.radware.com",
+    "support.radware.com",
+})
+
+
+def _probe_host(value) -> str:
+    host = str(value or "").strip().lower()
+    if host not in _PROBE_HOSTS:
+        raise HostExecError(f"not a probeable host: {value!r}")
+    return host
+
+
+def _cmd_net_probe(args: dict) -> str:
+    """One shell run that reports DNS, TCP and HTTP for a known host.
+
+    Written for what a CC actually has — getent, bash, curl, timeout — rather
+    than for what would be tidy. The output is three fixed lines so the parser
+    cannot be surprised by locale or by a curl version that words things
+    differently. curl's EXIT CODE carries the TLS verdict that the HTTP status
+    cannot: 35 and 60 are handshake and certificate failures respectively, and
+    both mean something quite different from "no answer".
+    """
+    host = args["host"]
+    port = int(args["port"])
+    return (
+        f"H={host}; P={port}; "
+        "A=$(getent ahostsv4 \"$H\" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, -); "
+        "echo \"DNS ${A:--}\"; "
+        "if timeout 5 bash -c \"cat < /dev/null > /dev/tcp/$H/$P\" 2>/dev/null; "
+        "then echo 'TCP ok'; else echo 'TCP fail'; fi; "
+        "C=$(timeout 12 curl -s -o /dev/null -w '%{http_code}' \"https://$H/\" 2>/dev/null); E=$?; "
+        "echo \"HTTP ${C:-000} $E\""
+    )
+
+
 OPS: dict[str, dict] = {
     "compose.ps": {
         "args": {},
@@ -198,6 +248,15 @@ OPS: dict[str, dict] = {
         "command": _cmd_container_logs,
         "timeout": 120,
         "what": "read the tail of one container's log",
+    },
+    "net.probe": {
+        "args": {
+            "host": (_probe_host, None),
+            "port": (_bounded_int(1, 65535), 443),
+        },
+        "command": _cmd_net_probe,
+        "timeout": 45,
+        "what": "check whether this CC can reach one known Radware service",
     },
     "disk.usage": {
         "args": {},

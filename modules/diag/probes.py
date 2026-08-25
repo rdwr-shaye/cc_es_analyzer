@@ -24,6 +24,7 @@ be tested without a network.
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import ssl
@@ -36,6 +37,8 @@ OK, UNKNOWN, WARN, CRIT = "ok", "unknown", "warn", "crit"
 _ORDER = {OK: 0, UNKNOWN: 1, WARN: 2, CRIT: 3}
 
 STAGES = ("dns", "tcp", "tls", "http")
+
+logger = logging.getLogger(__name__)
 
 
 def _stage(name: str, status: str, detail: str = "", ms: int | None = None,
@@ -220,6 +223,109 @@ def roll_up(results: list[dict]) -> dict:
         return {"severity": worst, "headline": "; ".join(parts)}
     return {"severity": UNKNOWN,
             "headline": f"{len(unknown)} destination(s) could not be checked"}
+
+
+# ── Probing from the CC itself ───────────────────────────────────────────────
+# The vantage point that actually answers the question. Running the probe in
+# this process answers "can the machine running CC Admin reach X" — which
+# STANDALONE is the engineer's own laptop, and is very nearly the wrong
+# question: a laptop on the open internet will happily report a service as
+# reachable while the customer's appliance cannot resolve it at all. That is
+# not a hypothetical; it is what the lab CC does with services.radware.com.
+#
+# So when there is a way to run commands on the CC, the probe runs THERE and
+# this parser turns the result back into the same stage structure the in-process
+# probe produces. One set of interpretation rules, two vantage points — the
+# rules that decide what a failure MEANS must not fork, or the two paths will
+# drift and only one of them will be tested.
+
+# curl exit codes worth naming. The HTTP status cannot express these: a
+# certificate failure and a refused connection both yield no status at all.
+_CURL_ERRORS = {
+    5:  ("tcp",  "could not resolve the proxy"),
+    6:  ("dns",  "could not resolve the host"),
+    7:  ("tcp",  "could not connect — refused, or no route"),
+    28: ("tcp",  "timed out"),
+    35: ("tls",  "TLS handshake failed"),
+    51: ("tls",  "the certificate did not match the host name"),
+    60: ("tls",  "certificate not trusted — commonly a TLS-inspecting proxy "
+                 "whose CA this appliance does not have"),
+}
+
+
+def parse_remote_probe(text: str, target) -> list[dict]:
+    """Turn `net.probe` output into stages. Pure, and therefore tested."""
+    dns_line = tcp_line = http_line = ""
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if line.startswith("DNS "):
+            dns_line = line[4:].strip()
+        elif line.startswith("TCP "):
+            tcp_line = line[4:].strip()
+        elif line.startswith("HTTP "):
+            http_line = line[5:].strip()
+
+    stages: list[dict] = []
+
+    # DNS
+    if not dns_line or dns_line == "-":
+        stages.append(_stage("dns", CRIT, "the name did not resolve on this CC"))
+        return stages
+    addrs = [a for a in dns_line.split(",") if a]
+    stages.append(_stage("dns", OK, ", ".join(addrs[:4]), None,
+                         addresses=addrs,
+                         private_only=addresses_are_private(addrs)))
+
+    # TCP
+    if tcp_line != "ok":
+        stages.append(_stage("tcp", CRIT,
+                             f"no connection to port {target.port} from this CC"))
+        return stages
+    stages.append(_stage("tcp", OK, f"connected to port {target.port}"))
+
+    # TLS + HTTP, both carried by curl
+    parts = http_line.split()
+    code = int(parts[0]) if parts and parts[0].isdigit() else 0
+    exit_code = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+
+    if exit_code in _CURL_ERRORS:
+        stage_name, why = _CURL_ERRORS[exit_code]
+        if stage_name == "tls":
+            stages.append(_stage("tls", CRIT, why))
+            return stages
+        # A DNS or TCP error surfacing only now contradicts the stages above,
+        # which usually means something intercepted the connection. Report it
+        # against HTTP rather than rewriting an earlier stage that genuinely
+        # succeeded.
+        stages.append(_stage("tls", UNKNOWN, "not reached"))
+        stages.append(_stage("http", CRIT if target.critical else UNKNOWN, why))
+        return stages
+
+    stages.append(_stage("tls", OK, "handshake completed"))
+    if code == 0:
+        stages.append(_stage("http", CRIT if target.critical else UNKNOWN,
+                             f"no HTTP response (curl exit {exit_code})"))
+    else:
+        status, detail = http_verdict(code, target.critical)
+        stages.append(_stage("http", status, detail, status_code=code))
+    return stages
+
+
+def run_probe_on_cc(target) -> dict | None:
+    """Probe *target* from the CC itself. None when that is not possible."""
+    from core import hostexec
+    try:
+        out = hostexec.run_op("net.probe", host=target.host, port=target.port)
+    except Exception as exc:                                   # noqa: BLE001
+        logger.info("[diag] cannot probe from the CC: %s", exc)
+        return None
+    if out.get("rc") not in (0, None):
+        logger.info("[diag] net.probe on the CC returned rc=%s", out.get("rc"))
+    stages = parse_remote_probe(out.get("stdout", ""), target)
+    result = _result(target, stages, {"in_use": False, "url": "",
+                                      "reason": "probed on the CC"})
+    result["vantage"] = "cc"
+    return result
 
 
 # ── The probe itself (IO) ────────────────────────────────────────────────────

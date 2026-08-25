@@ -72,8 +72,30 @@ def check_connectivity(target: str = Query(default=""),
     else:
         chosen = list(targets.TARGETS)
 
+    # WHERE to probe from. This is the whole correctness question for this
+    # screen: probing in-process answers "can the machine running CC Admin
+    # reach X", and standalone that machine is the engineer's laptop — which
+    # can sit on the open internet while the CC they are debugging resolves the
+    # same name to a sinkhole. Answering the wrong question confidently is
+    # worse than not answering.
+    #
+    # So the CC itself is preferred wherever it can be reached, and the answer
+    # says which vantage point produced it.
+    from core import hostexec
+    backend = hostexec.backend()
+    probe_on_cc = bool(backend.get("ok"))
+
+    def _probe(t):
+        if probe_on_cc:
+            remote = probes.run_probe_on_cc(t)
+            if remote is not None:
+                return remote
+        local = probes.run_probe(t, timeout)
+        local["vantage"] = "local"
+        return local
+
     with ThreadPoolExecutor(max_workers=min(8, len(chosen))) as pool:
-        results = list(pool.map(lambda t: probes.run_probe(t, timeout), chosen))
+        results = list(pool.map(_probe, chosen))
 
     summary = probes.roll_up(results)
     # WHOSE connectivity this describes. Embedded the answer is "this CC", and
@@ -83,16 +105,33 @@ def check_connectivity(target: str = Query(default=""),
     # then is worse than reporting nothing. The distinction is returned as data
     # so the UI can put it where it cannot be skimmed past.
     embedded = settings.profile.strip().lower() in ("embedded",)
+    from_cc = any(r.get("vantage") == "cc" for r in results)
+
+    if from_cc:
+        label = "the CC itself"
+        warning = ""
+    elif embedded:
+        # Embedded the container runs ON the appliance, so its own egress is
+        # the appliance's egress for practical purposes.
+        label = "this CC — the container runs on the appliance being reported on"
+        warning = ""
+    else:
+        label = "THIS MACHINE, not the CC you are connected to"
+        warning = (
+            "These results describe the machine CC Admin is running on, NOT the "
+            "CC you are connected to. That appliance has its own DNS, routes "
+            "and firewall, and routinely differs — a name that resolves here "
+            "can resolve to a sinkhole there. "
+            + (f"The CC could not be probed directly: {backend.get('detail') or backend.get('reason') or 'no host access'}. "
+               "Configure SSH access to the CC, or run CC Admin on the appliance, "
+               "to get an answer about the box you are debugging."))
+
     vantage = {
         "embedded": embedded,
-        "label": ("this CC — the container runs on the appliance being reported on"
-                  if embedded else
-                  "THIS MACHINE, not the CC you are connected to"),
-        "warning": ("" if embedded else
-                    "CC Admin is running standalone, so these results describe "
-                    "the machine it runs on. They say nothing about whether the "
-                    "connected CC can reach these services — that box has its "
-                    "own DNS, its own routes and its own firewall."),
+        "from_cc": from_cc,
+        "backend": backend.get("kind"),
+        "label": label,
+        "warning": warning,
     }
     for r in results:
         if r["severity"] in (probes.WARN, probes.CRIT):

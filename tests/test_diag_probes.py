@@ -192,6 +192,69 @@ def test_private_address_that_works_is_not_a_fault():
     check("...and flagged for the UI", out.get("dns_override"), True)
 
 
+def test_remote_probe_parsing():
+    """Parsing what the CC itself reported.
+
+    This path exists because of a real misreading: standalone, the tool probed
+    the ENGINEER'S LAPTOP and showed a green tick for services.radware.com
+    while the CC being debugged resolved that name to a sinkhole. The laptop's
+    answer was correct and irrelevant. Probing the appliance is the only way to
+    answer the question actually being asked, and this parser turns the
+    appliance's answer back into the same stages the local probe produces — so
+    the rules that decide what a failure MEANS are shared, not forked.
+    """
+    from modules.diag import targets
+    t = targets.get("radware-services")
+    tf = targets.get("radware-ti-feed")
+    print("\nparsing a probe that ran on the CC")
+
+    def out_of(*lines):
+        """The three lines net.probe emits, assembled without escapes."""
+        return "\n".join(lines) + "\n"
+
+    # The lab CC, exactly as it answers today.
+    st = probes.parse_remote_probe(
+        out_of("DNS 10.10.10.10", "TCP fail", "HTTP 000 7"), t)
+    out = probes.summarize(st, t.critical)
+    check("the sinkhole is caught remotely too", out["failed_stage"], "dns")
+    check("...and named", "10.10.10.10" in out["headline"], True)
+
+    st = probes.parse_remote_probe(
+        out_of("DNS 66.22.15.208", "TCP ok", "HTTP 200 0"), t)
+    check("a healthy CC reports reachable",
+          probes.summarize(st, t.critical)["severity"], OK)
+
+    # The 403 rule has to hold on this path too, or the two vantage points
+    # would disagree about the same service.
+    st = probes.parse_remote_probe(
+        out_of("DNS 16.15.191.134", "TCP ok", "HTTP 403 0"), tf)
+    check("403 from the feed bucket is still reachable",
+          probes.summarize(st, tf.critical)["severity"], OK)
+
+    # curl's exit code carries what the HTTP status cannot: a certificate
+    # failure and a refused connection both yield no status at all.
+    st = probes.parse_remote_probe(
+        out_of("DNS 66.22.15.208", "TCP ok", "HTTP 000 60"), t)
+    check("a certificate failure is a TLS failure",
+          probes.summarize(st, t.critical)["failed_stage"], "tls")
+    st = probes.parse_remote_probe(
+        out_of("DNS 66.22.15.208", "TCP ok", "HTTP 000 35"), t)
+    check("a handshake failure is a TLS failure",
+          probes.summarize(st, t.critical)["failed_stage"], "tls")
+
+    st = probes.parse_remote_probe(
+        out_of("DNS -", "TCP fail", "HTTP 000 6"), t)
+    check("a name that does not resolve on the CC",
+          probes.summarize(st, t.critical)["failed_stage"], "dns")
+
+    # Garbage in must not become a confident verdict. An agent that answered
+    # oddly must degrade to "could not check", never to "reachable".
+    for junk in ("", "nonsense", out_of("DNS", "TCP", "HTTP")):
+        st = probes.parse_remote_probe(junk, t)
+        sev = probes.summarize(st, t.critical)["severity"]
+        check(f"unparseable output {junk[:12]!r} never reports ok", sev != OK, True)
+
+
 def test_roll_up():
     print("\nthe global verdict is the worst of them")
     ok = [{"severity": OK, "label": "A"}, {"severity": OK, "label": "B"}]
@@ -269,6 +332,7 @@ def main() -> int:
     test_non_critical_is_downgraded()
     test_unknown_never_becomes_ok()
     test_dns_override_is_detected()
+    test_remote_probe_parsing()
     test_private_address_that_works_is_not_a_fault()
     test_roll_up()
     test_proxy_resolution()

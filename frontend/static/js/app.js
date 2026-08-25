@@ -459,6 +459,9 @@ function _connCard(r) {
           <span class="font-monospace small text-secondary">${esc(r.host)}:${r.port}</span>
           ${r.critical ? '' : '<span class="badge bg-secondary">informational</span>'}
           ${r.proxy?.in_use ? `<span class="badge bg-info text-dark" title="${esc(r.proxy.url)}">via proxy</span>` : ''}
+          ${r.vantage === 'cc'
+            ? '<span class="badge bg-success-subtle text-success border border-success" title="This check ran on the CC itself, over SSH — so it describes the appliance, not the machine running CC Admin.">probed on the CC</span>'
+            : '<span class="badge bg-secondary" title="This check ran in the CC Admin process, so it describes the machine CC Admin runs on.">probed locally</span>'}
           <span class="ms-auto small text-${sev.cls}">${esc(r.headline || '')}</span>
         </div>
         <div class="small text-secondary mt-1">${esc(r.purpose || '')}</div>

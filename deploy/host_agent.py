@@ -140,6 +140,23 @@ def build(op: str, args: dict, compose_file: str) -> str:
         return (f"docker compose --file {shlex.quote(compose_file)} "
                 f"config --services")
 
+    if op == "net.probe":
+        # Deliberately the same three lines core/hostexec.py builds, so both
+        # sides produce output the one parser understands. The host is already
+        # validated against PROBE_HOSTS above; quoting it as well because a
+        # validator and a quote protect against different mistakes.
+        host = shlex.quote(args["host"])
+        port = int(args["port"])
+        return (
+            f"H={host}; P={port}; "
+            "A=$(getent ahostsv4 \"$H\" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, -); "
+            "echo \"DNS ${A:--}\"; "
+            "if timeout 5 bash -c \"cat < /dev/null > /dev/tcp/$H/$P\" 2>/dev/null; "
+            "then echo 'TCP ok'; else echo 'TCP fail'; fi; "
+            "C=$(timeout 12 curl -s -o /dev/null -w '%{http_code}' \"https://$H/\" 2>/dev/null); E=$?; "
+            "echo \"HTTP ${C:-000} $E\""
+        )
+
     if op == "container.logs":
         return (f"docker logs --timestamps --tail {args['lines']} "
                 f"{shlex.quote(args['name'])} 2>&1")
@@ -179,12 +196,40 @@ def v_path(value):
     return text
 
 
+# The hostnames this agent will attempt a connection to. The THIRD copy of this
+# list — core/hostexec.py and modules/diag/targets.py hold the others — and the
+# duplication is the security property, not an oversight. The container asks;
+# the host decides. Nothing the app can say adds a hostname here, so the op
+# cannot be turned into a port scanner pointed at the customer's own network by
+# anyone who finds a bug on the other side of the spool directory.
+PROBE_HOSTS = frozenset({
+    "services.radware.com",
+    "radwareti.s3.amazonaws.com",
+    "radware.flexnetoperations.com",
+    "filepile.radware.com",
+    "support.radware.com",
+})
+
+
+def v_probe_host(value):
+    host = str(value or "").strip().lower()
+    if host not in PROBE_HOSTS:
+        raise Refused(f"not a probeable host: {value!r}")
+    return host
+
+
 OPS = {
     "compose.ps":       {"args": {}, "timeout": 60},
     "compose.expected": {"args": {}, "timeout": 60},
     "container.logs": {"args": {"name": (v_name, None),
                                 "lines": (v_int(1, 5000), 500)},
                        "timeout": 120},
+    # Read-only, and confined to the fixed host list above. It answers "can
+    # THIS APPLIANCE reach one known Radware service", which is a question the
+    # container cannot answer for itself: its own egress is not the CC's.
+    "net.probe":      {"args": {"host": (v_probe_host, None),
+                                "port": (v_int(1, 65535), 443)},
+                       "timeout": 45},
     "disk.usage":     {"args": {}, "timeout": 30},
     "disk.largest":   {"args": {"mount": (v_mount, None),
                                 "n": (v_int(1, 100), 20)},
