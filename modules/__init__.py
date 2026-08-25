@@ -27,8 +27,12 @@ ENABLED: tuple[str, ...] = (
     "modules.system",
     "modules.es",
     "modules.maria",
+    # Read-only diagnostics: can this CC reach the services it depends on?
+    # The first half of the corrective-actions work — the half that changes
+    # nothing and is therefore safe on a customer's production appliance.
+    "modules.diag",
     # Phase 2: "modules.pg"
-    # Phase 3: "modules.diag", "modules.kb"
+    # Phase 3: "modules.kb"
 )
 
 

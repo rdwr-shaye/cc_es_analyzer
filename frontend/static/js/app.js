@@ -203,11 +203,16 @@ async function pollSessionLifetime() {
     chip.classList.remove('d-none');
     chip.classList.toggle('warn', !!st.warning && !st.draining);
     chip.classList.toggle('drain', !!st.draining);
-    chip.textContent = st.draining ? 'stops when work finishes'
-                                   : _fmtCountdown(st.seconds_left);
-    chip.title = st.draining
-      ? 'The window has closed. This container stops as soon as the running work finishes — click to keep it open.'
-      : `This container stops in ${_fmtCountdown(st.seconds_left)} unless extended. Click to extend.`;
+    // The server is the authority; the local tick only fills the gaps between
+    // polls, so every answer re-seeds it and clock drift can never accumulate.
+    _lifeSecondsLeft = st.seconds_left;
+    if (st.draining) {
+      chip.textContent = 'stops when work finishes';
+      chip.title = 'The window has closed. This container stops as soon as the '
+                 + 'running work finishes — click to keep it open.';
+    } else {
+      _paintSessionChip();
+    }
   }
 
   renderDrainBar(st);
@@ -269,7 +274,7 @@ function promptExtendSession(manual, st) {
               : ''}</p>
              <p class="mb-0">Keep it open if you still need it.</p>`
           : `<p>This container stops ${left != null
-                ? `in <b>${_fmtCountdown(left)}</b>` : 'shortly'} and nothing restarts it
+                ? `in <b class="life-remaining">${_fmtCountdown(left)}</b>` : 'shortly'} and nothing restarts it
              automatically.</p>
              <p class="mb-0">Extend it if you are still working.</p>`}
         <div class="small text-secondary mt-2">
@@ -283,6 +288,20 @@ function promptExtendSession(manual, st) {
   document.body.appendChild(wrap);
   _lifePrompt = wrap;
 
+  // The number in the dialog ticks as well. A countdown that sits still while
+  // someone reads it looks like a page that has stopped responding — which is
+  // an unfortunate impression for a dialog whose whole subject is whether this
+  // thing is about to shut down.
+  const liveEl = wrap.querySelector('.life-remaining');
+  if (liveEl && !draining) {
+    const paint = () => {
+      if (!wrap.isConnected) { clearInterval(t); return; }
+      liveEl.textContent = _fmtCountdown(Math.max(0, _lifeSecondsLeft ?? 0));
+    };
+    const t = setInterval(paint, 1000);
+    paint();
+  }
+
   wrap.addEventListener('click', async (e) => {
     const act = e.target.closest('button')?.dataset.a;
     if (!act) return;
@@ -294,10 +313,159 @@ function promptExtendSession(manual, st) {
   });
 }
 
+/* The chip counts down every SECOND, but the server is only asked every 15.
+   Polling once a second to animate a clock would be fifteen times the requests
+   for information the browser can work out for itself; showing a number that
+   sits still for fifteen seconds reads as a frozen page. So the server remains
+   the authority — every poll re-seeds this — and between polls the browser
+   just decrements its own copy. */
+let _lifeSecondsLeft = null;
+let _lifeTick = null;
+
+function _startLifeTick() {
+  if (_lifeTick) return;
+  _lifeTick = setInterval(() => {
+    if (_lifeSecondsLeft == null || _lifeStopped) return;
+    if (_lifeSecondsLeft > 0) _lifeSecondsLeft -= 1;
+    _paintSessionChip();
+  }, 1000);
+}
+
+function _paintSessionChip() {
+  const chip = document.getElementById('sessionChip');
+  if (!chip || _lifeSecondsLeft == null) return;
+  if (chip.classList.contains('drain')) return;   // draining shows text, not a clock
+  chip.textContent = _fmtCountdown(Math.max(0, _lifeSecondsLeft));
+  chip.title = `This container stops in ${_fmtCountdown(Math.max(0, _lifeSecondsLeft))} `
+             + 'unless extended. Click to extend.';
+}
+
 function startLifetimePolling() {
   if (_lifeTimer) return;
   pollSessionLifetime();
   _lifeTimer = setInterval(pollSessionLifetime, 15000);
+  _startLifeTick();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   CONNECTIVITY  — can this CC reach the services it depends on?
+
+   Several CC features fetch from the internet: signature updates, the ERT
+   Active Attackers Feed, GeoDB location updates, licence activation. When one
+   silently stops working, the first question is whether the box can reach the
+   outside world at all — and today that is answered by SSHing in and running
+   `wget services.radware.com`, a step the knowledge base documents verbatim.
+
+   The screen shows each stage — DNS, TCP, TLS, HTTP — separately, because
+   which one failed decides WHO fixes it: DNS is the resolver, TCP is the
+   firewall, TLS is almost always the customer's inspecting proxy. "Cannot
+   reach it" identifies none of those.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+let _connData = null;
+
+const _CONN_SEV = {
+  ok:      { cls: 'success', icon: 'bi-check-circle-fill',       label: 'reachable' },
+  unknown: { cls: 'secondary', icon: 'bi-question-circle-fill',  label: 'unknown' },
+  warn:    { cls: 'warning', icon: 'bi-exclamation-triangle-fill', label: 'problem' },
+  crit:    { cls: 'danger',  icon: 'bi-x-octagon-fill',          label: 'unreachable' },
+};
+
+const _STAGE_LABEL = {
+  dns:  'DNS',
+  tcp:  'TCP',
+  tls:  'TLS',
+  http: 'HTTP',
+};
+
+async function loadConnectivity(manual) {
+  const results = document.getElementById('connResults');
+  const banner = document.getElementById('connBanner');
+  if (!results) return;
+  if (manual || !_connData) {
+    results.innerHTML = `<div class="text-center text-secondary py-4">
+        <span class="spinner-border spinner-border-sm me-2"></span>
+        Checking each destination — DNS, TCP, TLS, then HTTP…</div>`;
+    if (banner) banner.innerHTML = '';
+  }
+
+  const data = await api('/api/diag/connectivity');
+  if (!data || data.error) {
+    results.innerHTML = `<div class="alert alert-danger py-2 small mb-0">${
+      esc(data?.error || 'The connectivity check could not run.')}</div>`;
+    return;
+  }
+  _connData = data;
+  renderConnectivity(data);
+}
+
+function renderConnectivity(data) {
+  const sev = _CONN_SEV[data.severity] || _CONN_SEV.unknown;
+  const banner = document.getElementById('connBanner');
+  if (banner) {
+    // Standalone, this screen reports the ENGINEER'S laptop, which may sit on
+    // the open internet while the CC being debugged reaches nothing. Said
+    // first, and in its own alert, because a caveat in grey small text under a
+    // green tick is a caveat nobody reads.
+    const warn = data.vantage?.warning
+      ? `<div class="alert alert-warning py-2 mb-2 d-flex align-items-start gap-2">
+           <i class="bi bi-exclamation-triangle-fill fs-5"></i>
+           <div><div class="fw-semibold">These results are about this machine, not the CC</div>
+           <div class="small">${esc(data.vantage.warning)}</div></div></div>`
+      : '';
+    banner.innerHTML = warn + `<div class="alert alert-${sev.cls} py-2 mb-0 d-flex align-items-center gap-2">
+        <i class="bi ${sev.icon} fs-5"></i>
+        <div>
+          <div class="fw-semibold">${esc(data.headline || '')}</div>
+          <div class="small opacity-75">Probed from ${esc(data.vantage_point || 'this container')}
+            — strong evidence about this appliance, though not necessarily the
+            same network path as the service that fetches the feed.</div>
+        </div></div>`;
+  }
+
+  const meta = document.getElementById('connMeta');
+  if (meta) meta.textContent = `checked ${new Date().toLocaleTimeString()}`;
+
+  const dot = document.getElementById('connNavDot');
+  if (dot) dot.className = 'sys-dot ms-1 sys-' + (data.severity || 'unknown');
+
+  document.getElementById('connResults').innerHTML =
+    (data.results || []).map(_connCard).join('');
+}
+
+function _connCard(r) {
+  const sev = _CONN_SEV[r.severity] || _CONN_SEV.unknown;
+  const stages = (r.stages || []).map(s => {
+    const ss = _CONN_SEV[s.status] || _CONN_SEV.unknown;
+    return `<div class="d-flex align-items-start gap-2 py-1">
+        <span class="badge bg-${ss.cls}" style="min-width:3.4rem;">${esc(_STAGE_LABEL[s.stage] || s.stage)}</span>
+        <div class="small flex-grow-1">
+          ${esc(s.detail || ss.label)}
+          ${s.ms != null ? `<span class="text-secondary ms-1">· ${s.ms} ms</span>` : ''}
+        </div></div>`;
+  }).join('');
+
+  // Provenance: the knowledge-base articles that establish this as a real
+  // dependency. An engineer must be able to check why the tool believes this
+  // matters, the same way a corrective action will have to cite its source.
+  const src = (r.sources || []).length
+    ? `<div class="small text-secondary mt-2">Source: KB ${r.sources.map(esc).join(', ')}</div>` : '';
+
+  return `<div class="card mb-2 shadow-sm">
+      <div class="card-body py-2 px-3">
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <i class="bi ${sev.icon} text-${sev.cls}"></i>
+          <span class="fw-semibold">${esc(r.label)}</span>
+          <span class="font-monospace small text-secondary">${esc(r.host)}:${r.port}</span>
+          ${r.critical ? '' : '<span class="badge bg-secondary">informational</span>'}
+          ${r.proxy?.in_use ? `<span class="badge bg-info text-dark" title="${esc(r.proxy.url)}">via proxy</span>` : ''}
+          <span class="ms-auto small text-${sev.cls}">${esc(r.headline || '')}</span>
+        </div>
+        <div class="small text-secondary mt-1">${esc(r.purpose || '')}</div>
+        ${r.caveat ? `<div class="small text-warning mt-1"><i class="bi bi-info-circle me-1"></i>${esc(r.caveat)}</div>` : ''}
+        <div class="mt-2 border-top pt-2">${stages}</div>
+        ${src}
+      </div></div>`;
 }
 
 /* Rail tree: which groups the user collapsed. Persisted because re-collapsing
@@ -483,6 +651,10 @@ function showView(name) {
   // the host, not Elasticsearch, and "the CC is up but ES is down" is precisely
   // the situation this screen exists to show.
   if (name === 'system') loadSystemHealth();
+  // Also not gated on isConnected: whether this CC can reach the outside
+  // world has nothing to do with whether Elasticsearch is answering, and
+  // an ES outage is one of the times you most want to ask.
+  if (name === 'connectivity') loadConnectivity();
   if (name === 'attacks'  && isConnected) loadAttacks();
   if (name === 'dashboard'&& isConnected) loadClusterHealth();
   if (name === 'summary'  && isConnected) loadSummary();
@@ -505,6 +677,7 @@ const _autoTimers = {};   // view name -> setInterval handle
 
 const REFRESHERS = {
   system:    (manual) => loadSystemHealth(!!manual),
+  connectivity: (manual) => loadConnectivity(!!manual),
   dashboard: () => { loadClusterHealth(); loadIndices(); },
   summary:   () => loadSummary(),
   attacks:   () => loadAttacks(),
@@ -10620,6 +10793,59 @@ async function startApp() {
    context-specific guidance. Content is authored HTML kept in HELP_CONTENT,
    keyed by the same view names used by showView(). */
 const HELP_CONTENT = {
+  connectivity: {
+    title: 'Connectivity', icon: 'bi-globe2',
+    body: `
+      <p>Several things a CC does depend on reaching the internet — signature
+      updates, the ERT Active Attackers Feed, GeoDB location updates, licence
+      activation. When one of them quietly stops working, the first thing worth
+      establishing is whether the appliance can reach the outside world at all,
+      so that you can either <b>eliminate or confirm</b> that as the cause
+      before going any further.</p>
+
+      <p>This screen replaces the manual version of that step — SSHing in and
+      running <span class="font-monospace">wget services.radware.com</span>.</p>
+
+      <h6>Why the stages are shown separately</h6>
+      <p>Because <b>which stage failed decides who fixes it</b>. "Cannot reach
+      it" identifies nobody.</p>
+      <ul>
+        <li><b>DNS</b> — the name does not resolve. The resolver or the search
+          domain configuration, not the firewall.</li>
+        <li><b>TCP</b> — it resolves but the connection is refused or times
+          out. A firewall or a proxy in the path. A timeout usually means
+          packets are being dropped rather than refused.</li>
+        <li><b>TLS</b> — it connects but the handshake fails. Very often the
+          customer's TLS-inspecting proxy, whose CA this appliance does not
+          trust. The fix is to trust that CA, <i>not</i> to open the
+          firewall.</li>
+        <li><b>HTTP</b> — everything below worked and the request itself
+          failed.</li>
+      </ul>
+
+      <h6>Results that look like failures but are not</h6>
+      <p>An <b>HTTP 401 or 403</b> counts as <i>reachable</i>. The request
+      arrived, was understood and was answered — which proves the path works.
+      The feed bucket answers 403 to an unauthenticated request by design.
+      Treating that as a network fault is how an afternoon gets spent on a
+      firewall that was never the problem.</p>
+
+      <h6>What the result does and does not prove</h6>
+      <p>The probe runs from the <b>CC Admin container</b>. That is strong
+      evidence about the appliance, but it is not necessarily the identical
+      network path used by the service that actually fetches the feed. The
+      banner says so on every run rather than letting you assume otherwise.</p>
+
+      <p>If this deployment egresses through a <b>proxy</b>, the DNS, TCP and
+      TLS stages are skipped and marked unknown — through a proxy they would
+      describe the proxy rather than the destination, and a confident answer
+      about the wrong machine is worse than none.</p>
+
+      <h6>Provenance</h6>
+      <p>Each destination cites the knowledge-base articles that establish it
+      as a real dependency. Nothing here was guessed, and you can check the
+      reasoning.</p>`,
+  },
   system: {
     title: 'System Health', icon: 'bi-heart-pulse',
     body: `

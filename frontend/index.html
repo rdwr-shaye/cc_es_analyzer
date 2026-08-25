@@ -162,6 +162,14 @@
           <i class="bi bi-heart-pulse me-2"></i>System Health
           <span class="sys-dot sys-unknown ms-1" id="sysNavDot" title="Not checked yet"></span>
         </button>
+        <!-- Sibling of System Health rather than a datastore screen: "can this
+             CC reach the outside world" is a question about the appliance, not
+             about anything stored on it. -->
+        <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn ps-4" id="nav-connectivity"
+                onclick="showView('connectivity')">
+          <i class="bi bi-globe2 me-2"></i>Connectivity
+          <span class="sys-dot sys-unknown ms-1" id="connNavDot" title="Not checked yet"></span>
+        </button>
       </div>
 
       <!-- Datastores. The tool is growing from "the ES analyzer" into one
@@ -447,6 +455,23 @@
          the most severe of them. Clicking a tile opens its drilldown below —
          a panel rather than a modal, because a container log needs the height
          and an engineer wants to keep the verdict on screen while reading it. -->
+    <!-- ── CONNECTIVITY VIEW ── -->
+    <div id="view-connectivity" class="view-panel p-3 d-none">
+      <div class="d-flex justify-content-between align-items-center mb-2 gap-2 flex-wrap">
+        <h5 class="fw-bold mb-0">
+          <i class="bi bi-globe2 me-2 text-info"></i>Connectivity</h5>
+        <div class="d-flex align-items-center gap-2 ms-auto flex-wrap">
+          <span id="connMeta" class="small text-secondary"></span>
+          <button class="btn btn-sm btn-outline-primary py-0 px-2" onclick="loadConnectivity(true)">
+            <i class="bi bi-arrow-clockwise me-1"></i>Re-check</button>
+          <button class="btn btn-sm btn-outline-info help-btn py-0 px-2" onclick="showHelp('connectivity')"
+                  title="Help for this screen"><i class="bi bi-question-circle me-1"></i>Help</button>
+        </div>
+      </div>
+      <div id="connBanner" class="mb-3"></div>
+      <div id="connResults"></div>
+    </div>
+
     <div id="view-system" class="view-panel p-3 d-none">
       <div class="d-flex justify-content-between align-items-center mb-3 gap-2 flex-wrap">
         <h5 class="fw-bold mb-0"><i class="bi bi-heart-pulse me-2 text-danger"></i>System Health</h5>
