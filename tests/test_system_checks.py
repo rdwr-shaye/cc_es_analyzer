@@ -301,24 +301,32 @@ def test_es():
     print("\nes_indices_health")
     idx = lambda name, health: {"index": name, "health": health}  # noqa: E731
 
+    # appconfig2 used to be exempt from the yellow rule: on a single-node CC it
+    # asks for a replica nothing can place, so its yellow was called "expected"
+    # and hidden from the verdict. The exemption is gone. An index that is
+    # permanently excused is an index nobody looks at — and because the
+    # exemption applied everywhere, a CC where appconfig2 went yellow for some
+    # OTHER reason would have been told every index was green.
     result = C.es_indices_health([idx("appconfig2", "yellow"),
                                   idx("cc-attacks-2026.08", "green")])
-    check("appconfig2 yellow is expected, so green overall",
-          result["severity"], C.OK)
-    check("and it is reported as expected rather than hidden",
-          [r["index"] for r in result["expected_yellow"]], ["appconfig2"])
-    check("the headline says so",
-          C.es_pane(result)["headline"], "every index is green (1 expected yellow)")
+    check("appconfig2 yellow is a warning like any other index",
+          result["severity"], C.WARN)
+    check("...and it is counted as yellow",
+          [r["index"] for r in result["yellow"]], ["appconfig2"])
+    check("...and named in the headline",
+          C.es_pane(result)["headline"], "1 yellow index")
+    check("nothing is excused any more",
+          result["expected_yellow"], [])
 
     result = C.es_indices_health([idx("appconfig2", "yellow"),
                                   idx("cc-attacks-2026.08", "yellow")])
-    check("any other yellow index is a warning", result["severity"], C.WARN)
-    check("appconfig2 is not counted among them",
-          [r["index"] for r in result["yellow"]], ["cc-attacks-2026.08"])
+    check("two yellow indices are both counted", result["severity"], C.WARN)
+    check("...including appconfig2",
+          sorted(r["index"] for r in result["yellow"]),
+          ["appconfig2", "cc-attacks-2026.08"])
 
     result = C.es_indices_health([idx("appconfig2", "red")])
-    check("appconfig2 RED is critical — the exemption is yellow only",
-          result["severity"], C.CRIT)
+    check("appconfig2 RED is still critical", result["severity"], C.CRIT)
 
     result = C.es_indices_health([idx("a", "green"), idx("b", "green")])
     check("all green is green", result["severity"], C.OK)

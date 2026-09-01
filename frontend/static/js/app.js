@@ -10603,10 +10603,6 @@ function renderSysDatabases(data) {
     : (!esRows.length
         ? `<div class="p-3 text-secondary small"><i class="bi bi-check-circle me-2 text-success"></i>
              ${esc(es.headline || 'every index is green')}.
-             ${(es.expected_yellow || []).length
-               ? `<span class="ms-1">Yellow on
-                  ${(es.expected_yellow || []).map(r => `<code>${esc(r.index)}</code>`).join(', ')}
-                  is expected on a single-node CC and is not counted.</span>` : ''}
            </div>`
         : `<table class="table table-sm table-hover sys-detail-table mb-0">
              <thead class="table-light"><tr>
@@ -10866,9 +10862,12 @@ const HELP_CONTENT = {
             90%. The container <code>overlay</code> mounts are hidden: a CC reports
             about fifty of them and every one describes the same disk.</li>
         <li><b>Databases</b> — Elasticsearch index health and MariaDB table
-            integrity, in one tile. Any RED index is red. A yellow index is amber,
-            <i>except</i> <code>appconfig2</code>, which is expected to be yellow on
-            a single-node CC. Any corrupt MariaDB table is red.</li>
+            integrity, in one tile. Any RED index is red, any yellow index is
+            amber, and <b>no index is exempt</b> — <code>appconfig2</code>
+            included. It is often yellow on a single-node CC, which asks for a
+            replica it cannot place; that is a true statement about the cluster
+            and it belongs on the screen rather than being quietly excused. Any
+            corrupt MariaDB table is red.</li>
       </ul>
       <h6>Keeping it open</h6>
       <p><b>Auto</b> re-runs every check on a 10, 30 or 60 second timer, and the

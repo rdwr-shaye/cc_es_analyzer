@@ -369,29 +369,35 @@ def maria_pane(tables: list[dict], error: str = "") -> dict:
 
 
 # ── Elasticsearch ────────────────────────────────────────────────────────────
-# The rule is the operator's, not ours: a yellow index is normal for
-# `appconfig2` on a single-node CC (it asks for a replica nothing can hold), so
-# yellow there is expected and yellow anywhere else is not. RED is never
-# expected, appconfig2 included.
-
-_EXPECTED_YELLOW = ("appconfig2",)
-
-
-def _expected_yellow(index: str) -> bool:
-    name = (index or "").lstrip(".")
-    return any(name == e or name.startswith(e) for e in _EXPECTED_YELLOW)
+# EVERY index is judged the same way. `appconfig2` used to be exempt from the
+# yellow rule — it asks for a replica a single-node CC cannot place, so its
+# yellow was treated as expected and hidden from the verdict.
+#
+# That exemption is gone, at the operator's request, and the reasoning is worth
+# keeping: an index that is permanently excused is an index nobody looks at. The
+# exemption was written for the single-node case, but it applied everywhere,
+# so on a CC where appconfig2 turned yellow for some OTHER reason the screen
+# would have said "every index is green". A dashboard with a permanent blind
+# spot is worse than one with a known-noisy row, because the noisy row is at
+# least visible.
+#
+# If a genuinely single-node CC now shows one steady yellow index, that is a
+# true statement about its replica settings and belongs on the screen.
 
 
 def es_indices_health(indices: list[dict]) -> dict:
-    """`_cat/indices` rows → {severity, red[], yellow[], expected_yellow[]}."""
-    red, yellow, expected = [], [], []
+    """`_cat/indices` rows → {severity, red[], yellow[]}.
+
+    `expected_yellow` is still returned, always empty, so a caller written
+    against the old shape keeps working rather than raising a KeyError.
+    """
+    red, yellow = [], []
     for row in indices or []:
-        name = row.get("index") or ""
         health = (row.get("health") or "").lower()
         if health == "red":
             red.append(row)
         elif health == "yellow":
-            (expected if _expected_yellow(name) else yellow).append(row)
+            yellow.append(row)
 
     if red:
         severity = CRIT
@@ -400,7 +406,7 @@ def es_indices_health(indices: list[dict]) -> dict:
     else:
         severity = OK
     return {"severity": severity, "red": red, "yellow": yellow,
-            "expected_yellow": expected}
+            "expected_yellow": []}
 
 
 def es_pane(result: dict, error: str = "") -> dict:
@@ -416,8 +422,6 @@ def es_pane(result: dict, error: str = "") -> dict:
         headline = (f"{len(yellow)} yellow "
                     f"{'index' if len(yellow) == 1 else 'indices'}")
     else:
-        extra = result.get("expected_yellow", [])
-        headline = ("every index is green"
-                    + (f" ({len(extra)} expected yellow)" if extra else ""))
+        headline = "every index is green"
     return {"severity": result.get("severity", UNKNOWN), "headline": headline,
             "total": len(red) + len(yellow), "problems": len(red) + len(yellow)}
