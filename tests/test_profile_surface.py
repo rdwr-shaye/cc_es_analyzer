@@ -208,6 +208,7 @@ def test_every_capability_governs_a_router() -> None:
         # cannot read, so there is no separate router to gate.
         "es.read":               "gates the whole es module",
         "maria.read":            "gates the whole maria module",
+        "pg.read":               "gates the whole pg module",
         # Standalone-only by profile, and what it controls is a SCREEN plus the
         # meaning of ES_HOST, not a distinct set of routes.
         "es.connect":            "controls the connection screen, not a router",

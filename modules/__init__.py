@@ -1,9 +1,9 @@
 """CC Admin feature modules.
 
 Each module is a package exporting ``MODULE`` — a zero-arg callable returning a
-``core.policy.Module``. Adding PostgreSQL means writing ``modules/pg/`` and
-adding one line to ENABLED below; main.py does not change, and neither does
-core/policy.py.
+``core.policy.Module``. modules/pg/ (PostgreSQL) followed exactly that recipe:
+one new package, one line in ENABLED below; main.py did not change, and
+neither did core/policy.py.
 
 Deferred as a callable rather than a plain attribute because a module's routers
 import its own siblings, so building the Module at import time would create a
@@ -27,11 +27,11 @@ ENABLED: tuple[str, ...] = (
     "modules.system",
     "modules.es",
     "modules.maria",
+    "modules.pg",
     # Read-only diagnostics: can this CC reach the services it depends on?
     # The first half of the corrective-actions work — the half that changes
     # nothing and is therefore safe on a customer's production appliance.
     "modules.diag",
-    # Phase 2: "modules.pg"
     # Phase 3: "modules.kb"
 )
 

@@ -11,4 +11,7 @@ cryptography>=41.0.0
 # and mariadb need a C toolchain and libmariadb headers at build time, which the
 # CC's CI/CD base-image rules are unlikely to welcome in a slim image.
 PyMySQL>=1.1.0
+# PostgreSQL driver (modules/pg). pg8000 for the same reason as PyMySQL above:
+# psycopg2 needs libpq headers and a C build step; pg8000 is pure Python.
+pg8000>=1.31.0
 

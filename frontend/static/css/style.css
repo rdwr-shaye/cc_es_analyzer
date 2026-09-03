@@ -887,7 +887,7 @@ body {
 /* Rows in the MariaDB schema/table pickers. Full-width buttons rather than a
    list so the whole row is the target — these are picked constantly while
    navigating, and a text-only hit area makes that tedious. */
-.maria-item {
+.sql-item {
   display: block;
   width: 100%;
   text-align: left;
@@ -898,12 +898,12 @@ body {
   font-size: 12.5px;
   color: inherit;
 }
-.maria-item:hover { background: rgba(0, 82, 204, .06); }
-.maria-item.active {
+.sql-item:hover { background: rgba(0, 82, 204, .06); }
+.sql-item.active {
   background: rgba(0, 82, 204, .11);
   box-shadow: inset 3px 0 0 var(--ops-blue, #0052CC);
 }
-.maria-desc {
+.sql-desc {
   font-size: 10.5px;
   line-height: 1.35;
   color: var(--bs-secondary-color, #6c757d);
@@ -917,19 +917,19 @@ body {
    body. min-height/min-width:0 at every level is what actually permits the
    shrink — without them a flex item refuses to go below its content size and
    the panes push past the bottom of the screen instead of scrolling. */
-#view-maria {
+#view-maria, #view-pg {
   display: flex;
   flex-direction: column;
   height: 100%;
 }
-.maria-panes {
+.sql-panes {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   align-items: stretch;
   gap: 0;
 }
-.maria-pane {
+.sql-pane {
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -937,18 +937,18 @@ body {
   flex: 0 0 auto;
   width: 23%;                 /* starting widths; the splitter overwrites these */
 }
-#mariaPaneTables { width: 30%; }
+#mariaPaneTables, #pgPaneTables { width: 30%; }
 /* The detail pane takes whatever the other two leave, so the strip always
    spans the full width no matter where the splitters were dragged to. */
-.maria-pane-grow { flex: 1 1 auto; width: auto; }
-.maria-pane > .card {
+.sql-pane-grow { flex: 1 1 auto; width: auto; }
+.sql-pane > .card {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
   border-radius: 6px;
 }
-.maria-pane > .card > .card-body {
+.sql-pane > .card > .card-body {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
@@ -956,7 +956,7 @@ body {
 /* The detail pane's body is a column (columns block · relations · grid) and
    must NOT scroll as a whole — the grid inside it does, which is what lets the
    grid's header stay pinned while rows move under it. */
-.maria-pane > .card > .card-body.maria-detail-body {
+.sql-pane > .card > .card-body.sql-detail-body {
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -965,14 +965,14 @@ body {
 /* ── Splitters ──────────────────────────────────────────────────────────
    A 7px hit area with a 1px visual line: anything thinner is genuinely hard
    to grab, and the wider target does not have to look wide. */
-.maria-splitter {
+.sql-splitter {
   flex: 0 0 7px;
   cursor: col-resize;
   position: relative;
   background: transparent;
   align-self: stretch;
 }
-.maria-splitter::after {
+.sql-splitter::after {
   content: "";
   position: absolute;
   top: 0; bottom: 0; left: 3px;
@@ -980,16 +980,16 @@ body {
   background: var(--bs-border-color, rgba(0,0,0,.12));
   transition: background .12s ease, box-shadow .12s ease;
 }
-.maria-splitter:hover::after,
-.maria-splitter:focus-visible::after,
-.maria-splitter.dragging::after {
+.sql-splitter:hover::after,
+.sql-splitter:focus-visible::after,
+.sql-splitter.dragging::after {
   background: var(--ops-blue, #0052CC);
   box-shadow: 0 0 0 1px rgba(0, 82, 204, .25);
 }
-.maria-splitter:focus-visible { outline: none; }
+.sql-splitter:focus-visible { outline: none; }
 /* While dragging, the pointer is captured and may travel over text and
    iframes; killing selection stops the whole page highlighting behind it. */
-body.maria-resizing { cursor: col-resize; user-select: none; }
+body.sql-resizing { cursor: col-resize; user-select: none; }
 
 /* ── Detail pane internals ──────────────────────────────────────────────
    The three stacked blocks compete for one pane's height, and the rows grid
@@ -997,14 +997,14 @@ body.maria-resizing { cursor: col-resize; user-select: none; }
    (`0 1 auto` + min-height:0) and scroll internally, while the rows section
    keeps a floor. With `0 0 auto` here the sections refused to give way, took
    34vh each, and drove the grid to zero height and out of the pane entirely. */
-.maria-detail-section {
+.sql-detail-section {
   flex: 0 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
-.maria-detail-head { flex: 0 0 auto; }
-.maria-detail-head {
+.sql-detail-head { flex: 0 0 auto; }
+.sql-detail-head {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1020,13 +1020,13 @@ body.maria-resizing { cursor: col-resize; user-select: none; }
   color: var(--bs-secondary-color, #6c757d);
   text-align: left;
 }
-button.maria-detail-head { cursor: pointer; }
-button.maria-detail-head:hover { background: rgba(0, 82, 204, .07); }
-.maria-detail-head .ops-caret { margin-left: auto; }
-.maria-detail-head.collapsed .ops-caret { transform: rotate(-90deg); }
+button.sql-detail-head { cursor: pointer; }
+button.sql-detail-head:hover { background: rgba(0, 82, 204, .07); }
+.sql-detail-head .ops-caret { margin-left: auto; }
+.sql-detail-head.collapsed .ops-caret { transform: rotate(-90deg); }
 /* Collapsed: the body is removed from the flow entirely so the rows grid
    claims the height, which is the point of collapsing it. */
-.maria-detail-body-section {
+.sql-detail-body-section {
   flex: 0 1 auto;
   min-height: 0;
   overflow: auto;
@@ -1037,21 +1037,21 @@ button.maria-detail-head:hover { background: rgba(0, 82, 204, .07); }
    rows grid (flex 1 1 auto) simply reclaims the space and the drag appears to
    do nothing. Safe only because the drag is clamped to leave the grid its
    floor, so the section can never grow enough to push it out of the pane. */
-.maria-detail-body-section[style*="height"] {
+.sql-detail-body-section[style*="height"] {
   max-height: none;
   flex: 0 0 auto;
 }
-.maria-detail-body-section.d-none { display: none !important; }
+.sql-detail-body-section.d-none { display: none !important; }
 
 /* Horizontal splitter: resizes the section ABOVE it. Same 7px hit area and
    1px line as the vertical ones, rotated. */
-.maria-hsplit {
+.sql-hsplit {
   flex: 0 0 7px;
   cursor: row-resize;
   position: relative;
   background: transparent;
 }
-.maria-hsplit::after {
+.sql-hsplit::after {
   content: "";
   position: absolute;
   left: 0; right: 0; top: 3px;
@@ -1059,32 +1059,32 @@ button.maria-detail-head:hover { background: rgba(0, 82, 204, .07); }
   background: var(--bs-border-color, rgba(0,0,0,.12));
   transition: background .12s ease, box-shadow .12s ease;
 }
-.maria-hsplit:hover::after,
-.maria-hsplit:focus-visible::after,
-.maria-hsplit.dragging::after {
+.sql-hsplit:hover::after,
+.sql-hsplit:focus-visible::after,
+.sql-hsplit.dragging::after {
   background: var(--ops-blue, #0052CC);
   box-shadow: 0 0 0 1px rgba(0, 82, 204, .25);
 }
-.maria-hsplit:focus-visible { outline: none; }
-body.maria-resizing-y { cursor: row-resize; user-select: none; }
+.sql-hsplit:focus-visible { outline: none; }
+body.sql-resizing-y { cursor: row-resize; user-select: none; }
 
 /* The rows grid is the one part that grows, so the pane always ends at the
    bottom of the screen regardless of how much is collapsed above it. The
    floor is what guarantees it never gets squeezed out by the blocks above. */
-.maria-rows-section {
+.sql-rows-section {
   flex: 1 1 auto;
   min-height: 132px;
   display: flex;
   flex-direction: column;
 }
-.maria-grid-scroll {
+.sql-grid-scroll {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
 }
 /* Pinned header. Opaque background is load-bearing — rows scrolling under a
    translucent header is unreadable. */
-.maria-grid thead th {
+.sql-grid thead th {
   position: sticky;
   top: 0;
   z-index: 2;
@@ -1093,13 +1093,13 @@ body.maria-resizing-y { cursor: row-resize; user-select: none; }
   font-weight: 600;
   white-space: nowrap;
 }
-.maria-grid tbody td { vertical-align: top; }
+.sql-grid tbody td { vertical-align: top; }
 
 /* An edited cell, until the row is reloaded. */
-.maria-cell-edited { background: rgba(25, 135, 84, .13); }
-.maria-cell-editable { cursor: text; }
-.maria-cell-editable:hover { box-shadow: inset 0 0 0 1px rgba(0, 82, 204, .45); }
-.maria-cell-input {
+.sql-cell-edited { background: rgba(25, 135, 84, .13); }
+.sql-cell-editable { cursor: text; }
+.sql-cell-editable:hover { box-shadow: inset 0 0 0 1px rgba(0, 82, 204, .45); }
+.sql-cell-input {
   width: 100%;
   min-width: 90px;
   font: inherit;
@@ -1109,14 +1109,14 @@ body.maria-resizing-y { cursor: row-resize; user-select: none; }
 }
 
 /* ── Relations ──────────────────────────────────────────────────────── */
-.maria-rel-row {
+.sql-rel-row {
   padding: 4px 10px;
   border-bottom: 1px solid var(--bs-border-color, rgba(0,0,0,.06));
   font-size: 11.5px;
   line-height: 1.5;
 }
-.maria-rel-row:last-child { border-bottom: 0; }
-.maria-chip {
+.sql-rel-row:last-child { border-bottom: 0; }
+.sql-chip {
   display: inline-block;
   padding: 0 5px;
   border-radius: 3px;
@@ -1125,18 +1125,18 @@ body.maria-resizing-y { cursor: row-resize; user-select: none; }
   font-size: 10.5px;
   line-height: 1.6;
 }
-.maria-chip-link {
+.sql-chip-link {
   background: rgba(0, 82, 204, .1);
   color: var(--ops-blue, #0052CC);
   border: 0;
   cursor: pointer;
 }
-.maria-chip-link:hover { background: rgba(0, 82, 204, .2); }
+.sql-chip-link:hover { background: rgba(0, 82, 204, .2); }
 
 /* Join builder: the bar sits above the relation list and stays put while it
    scrolls, so the action is reachable without scrolling back up on a table
    with a dozen relations. */
-.maria-join-bar {
+.sql-join-bar {
   position: sticky;
   top: 0;
   z-index: 3;
@@ -1149,7 +1149,7 @@ body.maria-resizing-y { cursor: row-resize; user-select: none; }
   background: var(--bs-tertiary-bg, #f6f8fa);
   border-bottom: 1px solid var(--bs-border-color, rgba(0,0,0,.08));
 }
-.maria-rel-tick { margin-right: 4px; vertical-align: middle; cursor: pointer; }
+.sql-rel-tick { margin-right: 4px; vertical-align: middle; cursor: pointer; }
 
 /* Join builder — the filter panel. Given a border and a title so the WHERE
    clause reads as a first-class part of the query rather than an optional
@@ -1176,7 +1176,7 @@ body.maria-resizing-y { cursor: row-resize; user-select: none; }
 .mj-where:empty { display: none; }
 
 /* ── SQL Query screen: editor over results, both filling the viewport ──── */
-#view-mariaquery {
+#view-mariaquery, #view-pgquery {
   display: flex;
   flex-direction: column;
   height: 100%;

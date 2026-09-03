@@ -270,6 +270,32 @@
               <i class="bi bi-terminal me-2"></i>SQL Query
             </button>
           </div>
+
+          <!-- Level 2 — PostgreSQL. Same sibling arrangement as MariaDB above,
+               and for the same reason: another store beside Elasticsearch,
+               added as markup here plus modules/pg on the server, nothing else
+               moves. Hidden entirely when pg.read is off (its routes 404 then). -->
+          <button class="ops-db-toggle mt-1" id="db-pg-toggle" onclick="toggleDbGroup('pg')"
+                  title="PostgreSQL on this CC">
+            <i class="bi bi-caret-down-fill ops-caret"></i>
+            <i class="bi bi-database"></i>
+            <span class="ops-db-label">
+              <span class="ops-db-name">PostgreSQL</span>
+              <span class="ops-db-meta" id="db-pg-meta"></span>
+            </span>
+            <span class="conn-dot disconnected ops-db-dot" id="db-pg-dot"></span>
+          </button>
+
+          <div class="ops-db-children" id="db-pg-children">
+            <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-pg"
+                    onclick="showView('pg')">
+              <i class="bi bi-diagram-3 me-2"></i>Databases &amp; Tables
+            </button>
+            <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn" id="nav-pgquery"
+                    onclick="showView('pgquery')">
+              <i class="bi bi-terminal me-2"></i>SQL Query
+            </button>
+          </div>
         </div>
 
         <!-- Hidden in the embedded profile: ES runs beside the app on the CC,
@@ -1255,8 +1281,8 @@
       <!-- Three panes filling the viewport, separated by draggable splitters.
            Widths are inline because the splitter writes them there; the CSS
            only supplies the starting values. -->
-      <div class="maria-panes" id="mariaPanes">
-        <div class="maria-pane" id="mariaPaneSchemas">
+      <div class="sql-panes" id="mariaPanes">
+        <div class="sql-pane" id="mariaPaneSchemas">
           <div class="card">
             <div class="card-header py-1 px-2 small fw-semibold text-secondary">Schemas</div>
             <div class="card-body p-0" id="mariaSchemas">
@@ -1265,11 +1291,11 @@
           </div>
         </div>
 
-        <div class="maria-splitter" data-split="0" role="separator"
+        <div class="sql-splitter" data-split="0" role="separator"
              tabindex="0" aria-orientation="vertical"
              title="Drag to resize · double-click to reset"></div>
 
-        <div class="maria-pane" id="mariaPaneTables">
+        <div class="sql-pane" id="mariaPaneTables">
           <div class="card">
             <div class="card-header py-1 px-2 d-flex align-items-center gap-2">
               <span class="small fw-semibold text-secondary text-truncate" id="mariaTablesTitle">Tables</span>
@@ -1283,11 +1309,11 @@
           </div>
         </div>
 
-        <div class="maria-splitter" data-split="1" role="separator"
+        <div class="sql-splitter" data-split="1" role="separator"
              tabindex="0" aria-orientation="vertical"
              title="Drag to resize · double-click to reset"></div>
 
-        <div class="maria-pane maria-pane-grow" id="mariaPaneDetail">
+        <div class="sql-pane sql-pane-grow" id="mariaPaneDetail">
           <div class="card">
             <div class="card-header py-1 px-2 d-flex align-items-center gap-2">
               <span class="small fw-semibold text-secondary text-truncate"
@@ -1296,7 +1322,7 @@
             <!-- Not a single scroller: the detail pane is itself a column of
                  (columns block · relations · rows grid), and only the grid
                  scrolls, so its header can stay pinned. -->
-            <div class="card-body p-0 maria-detail-body" id="mariaDetail">
+            <div class="card-body p-0 sql-detail-body" id="mariaDetail">
               <div class="text-secondary small p-3">Pick a table.</div>
             </div>
           </div>
@@ -1347,7 +1373,7 @@
       </div>
 
       <!-- Resizes the editor against the results below it. -->
-      <div class="maria-hsplit" data-mqsplit="1" role="separator"
+      <div class="sql-hsplit" data-mqsplit="1" role="separator"
            tabindex="0" aria-orientation="horizontal"
            title="Drag to resize · double-click to reset"></div>
 
@@ -1368,6 +1394,140 @@
           </button>
         </div>
         <div class="card-body p-0" id="mariaQueryResults">
+          <div class="text-secondary small p-3">Run a query to see results here…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── POSTGRESQL: DATABASES & TABLES ──────────────────────────────────
+         Same three-pane layout as MariaDB above, and the same reason for it —
+         see modules/pg/catalog.py for why the curated column here is called
+         "Databases" rather than "Schemas": one PostgreSQL connection sees
+         exactly one database, unlike MariaDB where one connection sees every
+         schema on the server. -->
+    <div id="view-pg" class="view-panel p-3 d-none">
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <h5 class="mb-0"><i class="bi bi-diagram-3 me-2 text-primary"></i>PostgreSQL — Databases &amp; Tables</h5>
+        <span id="pgServer" class="badge bg-secondary" style="font-size:.65rem;"></span>
+        <div class="ms-auto d-flex align-items-center gap-2">
+          <div class="form-check form-switch mb-0">
+            <input class="form-check-input" type="checkbox" id="pgShowSystem"
+                   onchange="loadPgDatabases()">
+            <label class="form-check-label small text-secondary" for="pgShowSystem">
+              System databases
+            </label>
+          </div>
+          <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+                  onclick="loadPgDatabases()" style="font-size:.75rem;">
+            <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+          </button>
+        </div>
+      </div>
+
+      <div id="pgError" class="alert alert-warning py-2 px-3 small d-none"></div>
+
+      <div class="sql-panes" id="pgPanes">
+        <div class="sql-pane" id="pgPaneSchemas">
+          <div class="card">
+            <div class="card-header py-1 px-2 small fw-semibold text-secondary">Databases</div>
+            <div class="card-body p-0" id="pgSchemas">
+              <div class="text-secondary small p-3">Loading…</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sql-splitter" data-split="0" role="separator"
+             tabindex="0" aria-orientation="vertical"
+             title="Drag to resize · double-click to reset"></div>
+
+        <div class="sql-pane" id="pgPaneTables">
+          <div class="card">
+            <div class="card-header py-1 px-2 d-flex align-items-center gap-2">
+              <span class="small fw-semibold text-secondary text-truncate" id="pgTablesTitle">Tables</span>
+              <input id="pgTableSearch" type="text" class="form-control form-control-sm ms-auto"
+                     placeholder="Filter…" oninput="renderPgTables()"
+                     style="width:110px;font-size:.72rem;padding:2px 6px;">
+            </div>
+            <div class="card-body p-0" id="pgTables">
+              <div class="text-secondary small p-3">Pick a database.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sql-splitter" data-split="1" role="separator"
+             tabindex="0" aria-orientation="vertical"
+             title="Drag to resize · double-click to reset"></div>
+
+        <div class="sql-pane sql-pane-grow" id="pgPaneDetail">
+          <div class="card">
+            <div class="card-header py-1 px-2 d-flex align-items-center gap-2">
+              <span class="small fw-semibold text-secondary text-truncate"
+                    id="pgDetailTitle">Table</span>
+            </div>
+            <div class="card-body p-0 sql-detail-body" id="pgDetail">
+              <div class="text-secondary small p-3">Pick a table.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── POSTGRESQL: SQL QUERY ───────────────────────────────────────────
+         The escape hatch, not the front door — same role as the MariaDB
+         screen above. Read-only is enforced on the server
+         (modules/pg/client.py) at the transaction as well as the statement.
+         No visual query wizard here yet: PostgreSQL's WHERE-condition editor
+         and join builder are deferred (see the MariaDB screen's "Build
+         query"), so this is the SQL box on its own — still the full escape
+         hatch, just typed rather than point-and-click for now. -->
+    <div id="view-pgquery" class="view-panel p-3 d-none">
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <h5 class="mb-0"><i class="bi bi-terminal me-2 text-primary"></i>PostgreSQL — SQL Query</h5>
+        <span class="badge bg-secondary-subtle text-secondary-emphasis" style="font-size:.65rem;">
+          read-only
+        </span>
+      </div>
+
+      <div class="card mq-editor">
+        <div class="card-body p-2 d-flex flex-column" style="min-height:0;">
+          <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+            <label class="small text-secondary mb-0">Database</label>
+            <select id="pgQuerySchema" class="form-select form-select-sm" style="width:200px;font-size:.78rem;"></select>
+            <label class="small text-secondary mb-0 ms-2">Max rows</label>
+            <input id="pgQueryLimit" type="number" min="1" max="10000" value="200"
+                   class="form-control form-control-sm" style="width:90px;font-size:.78rem;">
+            <button class="btn btn-sm btn-primary ms-auto py-0 px-3" onclick="runPgQuery()"
+                    style="font-size:.78rem;">
+              <i class="bi bi-play-fill me-1"></i>Run
+            </button>
+          </div>
+          <textarea id="pgQuerySql" class="form-control font-monospace" wrap="off"
+                    spellcheck="false" style="font-size:.8rem;flex:1 1 auto;min-height:70px;
+                    white-space:pre;overflow:auto;"
+                    placeholder="SELECT * FROM active_policy LIMIT 20"></textarea>
+          <div class="form-text mb-0" style="font-size:.7rem;">
+            SELECT, WITH, EXPLAIN, SHOW, TABLE and VALUES only. One statement at a time.
+          </div>
+        </div>
+      </div>
+
+      <div class="sql-hsplit" data-mqsplit="1" role="separator"
+           tabindex="0" aria-orientation="horizontal"
+           title="Drag to resize · double-click to reset"></div>
+
+      <div id="pgQueryError" class="alert alert-warning py-2 px-3 small d-none"></div>
+
+      <div class="card mq-results">
+        <div class="card-header py-1 px-2 d-flex align-items-center gap-2">
+          <span id="pgQueryMeta" class="small text-secondary"></span>
+          <button id="pgQueryColsBtn"
+                  class="btn btn-sm btn-outline-secondary ms-auto py-0 px-2 d-none"
+                  onclick="openPgQueryColumnPicker()" style="font-size:.7rem;"
+                  title="Choose which columns to show">
+            <i class="bi bi-eye me-1"></i>Columns
+          </button>
+        </div>
+        <div class="card-body p-0" id="pgQueryResults">
           <div class="text-secondary small p-3">Run a query to see results here…</div>
         </div>
       </div>

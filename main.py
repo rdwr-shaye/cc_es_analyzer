@@ -94,6 +94,7 @@ _MANIPULATIONS: list[tuple[str, re.Pattern, str]] = [
     ("POST",   re.compile(r"^/api/artificial$"),                    "generated artificial data"),
     ("POST",   re.compile(r"^/api/exports/restore$"),               "restored an archive"),
     ("POST",   re.compile(r"^/api/maria/cell$"),                    "edited a MariaDB cell"),
+    ("POST",   re.compile(r"^/api/pg/cell$"),                       "edited a PostgreSQL cell"),
     ("POST",   re.compile(r"^/api/system/storage/delete$"),         "DELETED a file from this CC"),
 ]
 

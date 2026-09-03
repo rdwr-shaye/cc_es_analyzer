@@ -41,6 +41,33 @@ class Settings(BaseSettings):
     maria_timeout_s: int = Field(default=15, alias="MARIA_TIMEOUT_S")
     maria_max_rows: int = Field(default=1000, alias="MARIA_MAX_ROWS")
 
+    # ── PostgreSQL (modules/pg) ───────────────────────────────────────────
+    # Same shape as the MariaDB block above, and for the same reason: embedded,
+    # PostgreSQL is another CC datastore sitting on the same docker network, so
+    # the container name resolves with nothing to publish; standalone follows
+    # whichever CC the session is pointed at (modules/pg/client.py, mirroring
+    # modules/maria/client.py::resolve_host).
+    #
+    # There is no per-CC wrapper file to read this account from the way
+    # modules/maria/credentials.py reads /usr/local/bin/mysql — the account
+    # lives only as this container's own environment (POSTGRES_USER /
+    # POSTGRES_PASSWORD, set on the config_postgres_1 image), so PG_USER /
+    # PG_PASSWORD below and these defaults are the only two sources. Same
+    # caveat as MariaDB's: a default, not a secret, since anyone who has the
+    # image has it; the answer that holds up for real is a dedicated read-only
+    # account per install, once Phase 1's identity work exists to put behind it.
+    pg_host: str = Field(default="config_postgres_1", alias="PG_HOST")
+    pg_port: int = Field(default=5432, alias="PG_PORT")
+    pg_user: str = Field(default="postgres", alias="PG_USER")
+    pg_password: str = Field(default="dfc", alias="PG_PASSWORD")
+    # A PostgreSQL connection is scoped to ONE database (unlike MariaDB, where
+    # one connection sees every schema) — reached before any database on this
+    # CC has been chosen yet, e.g. to list them. `postgres` is the server's own
+    # always-present maintenance database, never a CC datastore itself.
+    pg_default_database: str = Field(default="postgres", alias="PG_DEFAULT_DATABASE")
+    pg_timeout_s: int = Field(default=15, alias="PG_TIMEOUT_S")
+    pg_max_rows: int = Field(default=1000, alias="PG_MAX_ROWS")
+
     # ── Host access (core/hostexec.py, modules/system) ───────────────────
     # Directory shared with deploy/host_agent.py, the root process that runs
     # the System dashboard's checks on the CC host. Bind-mounted into the

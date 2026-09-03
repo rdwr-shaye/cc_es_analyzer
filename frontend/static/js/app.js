@@ -499,7 +499,7 @@ function toggleDbGroup(id, force) {
 /** Re-apply the persisted collapse state. Default is expanded. */
 function initDbTree() {
   const st = _dbTreeState();
-  for (const id of ['root', 'es', 'maria']) if (st[id]) toggleDbGroup(id, true);
+  for (const id of ['root', 'es', 'maria', 'pg']) if (st[id]) toggleDbGroup(id, true);
 }
 
 /** The count badge on "Databases" must be what is actually listed, not a
@@ -560,6 +560,13 @@ function applyPolicyToChrome() {
   }
   if (!can('maria.query.raw')) {
     document.getElementById('nav-mariaquery')?.classList.add('d-none');
+  }
+  if (!can('pg.read')) {
+    document.getElementById('db-pg-toggle')?.classList.add('d-none');
+    document.getElementById('db-pg-children')?.classList.add('d-none');
+  }
+  if (!can('pg.query.raw')) {
+    document.getElementById('nav-pgquery')?.classList.add('d-none');
   }
 
   // Embedded, POST /api/indices/create is not registered: a CC builds its own
@@ -668,6 +675,9 @@ function showView(name) {
   // own reachability, so these must NOT be gated on isConnected.
   if (name === 'maria' && !mariaSchemas.length) loadMariaSchemas();
   if (name === 'mariaquery' && !mariaSchemas.length) loadMariaSchemas();
+  // Same reasoning as MariaDB above: PostgreSQL is its own store.
+  if (name === 'pg' && !pgDatabases.length) loadPgDatabases();
+  if (name === 'pgquery' && !pgDatabases.length) loadPgDatabases();
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -3012,6 +3022,12 @@ function onConnected(settings, info) {
   // The detail pane too, or the new CC's screen opens showing the previous
   // one's columns and rows under a heading that names neither.
   mariaColumns = []; mariaSample = null; mariaRelations = null;
+
+  // Same reasoning, same reset, for PostgreSQL.
+  loadPgHealth();
+  pgDatabases = []; pgTableList = [];
+  pgDatabase = ''; pgTable = '';
+  pgColumns = []; pgSample = null; pgRelations = null;
 
   // The store's own identity, on the store's own row.
   const meta = document.getElementById('db-es-meta');
@@ -7770,18 +7786,18 @@ function initMariaPanes() {
   detail?.addEventListener('dblclick', ev => {
     const td = ev.target.closest('td[data-editcol]');
     if (td) beginMariaCellEdit(td);
-    const hs = ev.target.closest('.maria-hsplit');
+    const hs = ev.target.closest('.sql-hsplit');
     if (hs) resetMariaSectionHeight(hs.dataset.hsplit);
   });
 
   // Delegated, because the detail pane is rebuilt on every table change and
   // per-render binding would leak a listener each time.
   detail?.addEventListener('pointerdown', ev => {
-    const hs = ev.target.closest('.maria-hsplit');
+    const hs = ev.target.closest('.sql-hsplit');
     if (hs) startMariaSectionDrag(hs, ev);
   });
   detail?.addEventListener('keydown', ev => {
-    const hs = ev.target.closest('.maria-hsplit');
+    const hs = ev.target.closest('.sql-hsplit');
     if (!hs || (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown')) return;
     ev.preventDefault();
     const body = document.querySelector(`[data-sect-body="${hs.dataset.hsplit}"]`);
@@ -7859,14 +7875,14 @@ function initMariaQueryScreen() {
     const startY = ev.clientY, startH = editor.getBoundingClientRect().height;
     sp.setPointerCapture?.(ev.pointerId);
     sp.classList.add('dragging');
-    document.body.classList.add('maria-resizing-y');
+    document.body.classList.add('sql-resizing-y');
     const onMove = e => clamp(startH + e.clientY - startY);
     const onUp = () => {
       sp.removeEventListener('pointermove', onMove);
       sp.removeEventListener('pointerup', onUp);
       sp.removeEventListener('pointercancel', onUp);
       sp.classList.remove('dragging');
-      document.body.classList.remove('maria-resizing-y');
+      document.body.classList.remove('sql-resizing-y');
     };
     sp.addEventListener('pointermove', onMove);
     sp.addEventListener('pointerup', onUp);
@@ -7887,7 +7903,7 @@ function startMariaSectionDrag(hs, ev) {
 
   hs.setPointerCapture?.(ev.pointerId);
   hs.classList.add('dragging');
-  document.body.classList.add('maria-resizing-y');
+  document.body.classList.add('sql-resizing-y');
 
   const onMove = e => _setMariaSectionHeight(id, body, startH + e.clientY - startY);
   const onUp = () => {
@@ -7895,7 +7911,7 @@ function startMariaSectionDrag(hs, ev) {
     hs.removeEventListener('pointerup', onUp);
     hs.removeEventListener('pointercancel', onUp);
     hs.classList.remove('dragging');
-    document.body.classList.remove('maria-resizing-y');
+    document.body.classList.remove('sql-resizing-y');
     _mariaSave('ccadmin.maria.sectionH', mariaSectionH);
   };
   hs.addEventListener('pointermove', onMove);
@@ -7907,7 +7923,7 @@ function startMariaSectionDrag(hs, ev) {
  *  section without that ceiling squeezes the grid to nothing — the same
  *  failure the flex chain was fixed for, just reached by dragging. */
 function _setMariaSectionHeight(id, body, wanted) {
-  const rows = document.querySelector('.maria-rows-section');
+  const rows = document.querySelector('.sql-rows-section');
   const slack = rows ? Math.max(0, rows.getBoundingClientRect().height - 132) : 0;
   const max = body.getBoundingClientRect().height + slack;
   const h = Math.round(Math.min(max, Math.max(48, wanted)));
@@ -7937,7 +7953,7 @@ function initMariaSplitters() {
     panes.forEach((p, i) => { if (p && mariaPaneWidths[i]) p.style.width = mariaPaneWidths[i] + 'px'; });
   }
 
-  strip.querySelectorAll('.maria-splitter').forEach(sp => {
+  strip.querySelectorAll('.sql-splitter').forEach(sp => {
     const idx  = parseInt(sp.dataset.split, 10);
     const pane = panes[idx];
     if (!pane) return;
@@ -7955,7 +7971,7 @@ function initMariaSplitters() {
       const startW = pane.getBoundingClientRect().width;
       sp.setPointerCapture(ev.pointerId);
       sp.classList.add('dragging');
-      document.body.classList.add('maria-resizing');
+      document.body.classList.add('sql-resizing');
 
       const onMove = e => {
         // Floors keep a pane from being dragged to nothing (from which it
@@ -7968,7 +7984,7 @@ function initMariaSplitters() {
         sp.removeEventListener('pointerup', onUp);
         sp.removeEventListener('pointercancel', onUp);
         sp.classList.remove('dragging');
-        document.body.classList.remove('maria-resizing');
+        document.body.classList.remove('sql-resizing');
         mariaPaneWidths = panes.map(p => p ? Math.round(p.getBoundingClientRect().width) : 0);
         _mariaSave('ccadmin.maria.paneWidths', mariaPaneWidths);
       };
@@ -8001,7 +8017,7 @@ function toggleMariaSection(name) {
   body?.classList.toggle('d-none', !!mariaCollapsed[name]);
   // The resize handle belongs to the section, so it goes away with it —
   // otherwise a collapsed section leaves a grab handle that resizes nothing.
-  document.querySelector(`.maria-hsplit[data-hsplit="${name}"]`)
+  document.querySelector(`.sql-hsplit[data-hsplit="${name}"]`)
     ?.classList.toggle('d-none', !!mariaCollapsed[name]);
 }
 
@@ -8115,7 +8131,7 @@ function renderMariaSchemas() {
   // the names come from the database rather than from us, so the rendering
   // must not depend on what they happen to contain.
   pane.innerHTML = mariaSchemas.map(s => `
-    <button class="maria-item ${s.name === mariaSchema ? 'active' : ''}"
+    <button class="sql-item ${s.name === mariaSchema ? 'active' : ''}"
             data-schema="${esc(s.name)}">
       <div class="d-flex align-items-center gap-2">
         <span class="fw-semibold">${esc(s.title)}</span>
@@ -8126,8 +8142,8 @@ function renderMariaSchemas() {
         </span>
       </div>
       ${s.description
-        ? `<div class="maria-desc">${esc(s.description)}</div>`
-        : `<div class="maria-desc font-monospace">${esc(s.name)}</div>`}
+        ? `<div class="sql-desc">${esc(s.description)}</div>`
+        : `<div class="sql-desc font-monospace">${esc(s.name)}</div>`}
     </button>`).join('');
 }
 
@@ -8173,14 +8189,14 @@ function renderMariaTables() {
     return;
   }
   pane.innerHTML = rows.map(t => `
-    <button class="maria-item ${t.name === mariaTable ? 'active' : ''}"
+    <button class="sql-item ${t.name === mariaTable ? 'active' : ''}"
             data-table="${esc(t.name)}">
       <div class="d-flex align-items-center gap-2">
         <span class="font-monospace" style="font-size:.75rem;">${esc(t.name)}</span>
         <span class="ms-auto text-secondary" style="font-size:.68rem;"
               title="InnoDB row counts are estimates">~${t.row_estimate} rows</span>
       </div>
-      ${t.comment ? `<div class="maria-desc">${esc(t.comment)}</div>` : ''}
+      ${t.comment ? `<div class="sql-desc">${esc(t.comment)}</div>` : ''}
     </button>`).join('');
 }
 
@@ -8234,22 +8250,22 @@ function renderMariaDetail(sampleError) {
   const shown  = total - [...hidden].filter(c => (mariaSample?.columns || []).includes(c)).length;
 
   pane.innerHTML = `
-    <div class="maria-detail-section">
+    <div class="sql-detail-section">
       ${_mariaHead('columns', `Columns (${mariaColumns.length})`)}
-      <div class="maria-detail-body-section ${mariaCollapsed.columns ? 'd-none' : ''}"
+      <div class="sql-detail-body-section ${mariaCollapsed.columns ? 'd-none' : ''}"
            data-sect-body="columns"${_mariaSectionStyle('columns')}>${_mariaColumnsTable()}</div>
     </div>
     ${_mariaHSplit('columns')}
 
-    <div class="maria-detail-section">
+    <div class="sql-detail-section">
       ${_mariaHead('relations', _mariaRelationsLabel())}
-      <div class="maria-detail-body-section ${mariaCollapsed.relations ? 'd-none' : ''}"
+      <div class="sql-detail-body-section ${mariaCollapsed.relations ? 'd-none' : ''}"
            data-sect-body="relations"${_mariaSectionStyle('relations')}>${_mariaRelations()}</div>
     </div>
     ${_mariaHSplit('relations')}
 
-    <div class="maria-rows-section">
-      <div class="maria-detail-head">
+    <div class="sql-rows-section">
+      <div class="sql-detail-head">
         <span>First rows</span>
         <span class="text-secondary" style="text-transform:none;font-weight:500;">
           ${shown === total ? `${total} columns` : `${shown} of ${total} columns`}
@@ -8260,7 +8276,7 @@ function renderMariaDetail(sampleError) {
           <i class="bi bi-eye me-1"></i>Columns
         </button>
       </div>
-      <div class="maria-grid-scroll">${rowsHtml}</div>
+      <div class="sql-grid-scroll">${rowsHtml}</div>
     </div>`;
 }
 
@@ -8274,13 +8290,13 @@ function _mariaSectionStyle(id) {
  *  nothing to resize — so it is simply not rendered. */
 function _mariaHSplit(id) {
   if (mariaCollapsed[id]) return '';
-  return `<div class="maria-hsplit" data-hsplit="${id}" role="separator"
+  return `<div class="sql-hsplit" data-hsplit="${id}" role="separator"
                tabindex="0" aria-orientation="horizontal"
                title="Drag to resize · double-click to reset"></div>`;
 }
 
 function _mariaHead(id, label) {
-  return `<button class="maria-detail-head ${mariaCollapsed[id] ? 'collapsed' : ''}"
+  return `<button class="sql-detail-head ${mariaCollapsed[id] ? 'collapsed' : ''}"
                   data-sect="${id}" aria-expanded="${!mariaCollapsed[id]}">
             <span>${esc(label)}</span>
             <i class="bi bi-chevron-down ops-caret"></i>
@@ -8330,54 +8346,54 @@ function _mariaRelations() {
   if (!r) return '<div class="text-secondary small p-2">—</div>';
 
   const idx = (r.indexes || []).map(i => `
-    <div class="maria-rel-row">
+    <div class="sql-rel-row">
       <span class="badge bg-${i.primary ? 'primary' : 'secondary'}-subtle
                    text-${i.primary ? 'primary' : 'secondary'}-emphasis"
             style="font-size:.6rem;">${i.primary ? 'PRIMARY' : (i.unique ? 'UNIQUE' : 'INDEX')}</span>
       <span class="ms-1 text-secondary">${esc(i.primary ? '' : i.name)}</span>
-      <span class="ms-1">${i.columns.map(c => `<span class="maria-chip">${esc(c)}</span>`).join(' + ')}</span>
+      <span class="ms-1">${i.columns.map(c => `<span class="sql-chip">${esc(c)}</span>`).join(' + ')}</span>
     </div>`).join('');
 
   const link = (schema, table, label) =>
     schema === mariaSchema
-      ? `<button class="maria-chip maria-chip-link" data-goto-table="${esc(table)}"
+      ? `<button class="sql-chip sql-chip-link" data-goto-table="${esc(table)}"
                  title="Open ${esc(table)}">${esc(label)}</button>`
-      : `<span class="maria-chip">${esc(schema)}.${esc(label)}</span>`;
+      : `<span class="sql-chip">${esc(schema)}.${esc(label)}</span>`;
 
   // A tick box per declared relation: these ARE join conditions, so selecting
   // them is the whole of composing the join.
-  const tick = (id) => `<input type="checkbox" class="maria-rel-tick"
+  const tick = (id) => `<input type="checkbox" class="sql-rel-tick"
       data-joinsel="${id}" ${mariaJoinSel.has(id) ? 'checked' : ''}
       title="Include this relation in a join query">`;
 
   const out = (r.outbound || []).map((f, i) => `
-    <div class="maria-rel-row">
+    <div class="sql-rel-row">
       ${tick('out:' + i)}
       <i class="bi bi-arrow-right-short text-primary"></i>
-      ${f.columns.map(c => `<span class="maria-chip">${esc(c)}</span>`).join(' + ')}
+      ${f.columns.map(c => `<span class="sql-chip">${esc(c)}</span>`).join(' + ')}
       <span class="text-secondary mx-1">references</span>
       ${link(f.ref_schema, f.ref_table, f.ref_table)}
       <span class="text-secondary">.</span>
-      ${f.ref_columns.map(c => `<span class="maria-chip">${esc(c)}</span>`).join(' + ')}
+      ${f.ref_columns.map(c => `<span class="sql-chip">${esc(c)}</span>`).join(' + ')}
     </div>`).join('');
 
   const inb = (r.inbound || []).map((f, i) => `
-    <div class="maria-rel-row">
+    <div class="sql-rel-row">
       ${tick('in:' + i)}
       <i class="bi bi-arrow-left-short text-success"></i>
       ${link(f.from_schema, f.from_table, f.from_table)}
       <span class="text-secondary">.</span>
-      ${f.columns.map(c => `<span class="maria-chip">${esc(c)}</span>`).join(' + ')}
+      ${f.columns.map(c => `<span class="sql-chip">${esc(c)}</span>`).join(' + ')}
       <span class="text-secondary mx-1">references</span>
-      ${f.ref_columns.map(c => `<span class="maria-chip">${esc(c)}</span>`).join(' + ')}
+      ${f.ref_columns.map(c => `<span class="sql-chip">${esc(c)}</span>`).join(' + ')}
     </div>`).join('');
 
   // The inferred half. Kept visually and verbally distinct from the declared
   // half above: this is a guess from column names, and an engineer acting on
   // it needs to know that before they treat it as the data model.
   const cand = (r.candidates || []).map(c => `
-    <div class="maria-rel-row">
-      <span class="maria-chip">${esc(c.column)}</span>
+    <div class="sql-rel-row">
+      <span class="sql-chip">${esc(c.column)}</span>
       <span class="text-secondary mx-1">also in ${c.count} table${c.count === 1 ? '' : 's'}:</span>
       ${c.tables.map(t => link(mariaSchema, t, t)).join(' ')}
       ${c.truncated ? '<span class="text-secondary"> …</span>' : ''}
@@ -8399,7 +8415,7 @@ function _mariaRelations() {
 
   const n = mariaJoinSel.size;
   const bar = (out.length || inb.length)
-    ? `<div class="maria-join-bar">
+    ? `<div class="sql-join-bar">
          <i class="bi bi-diagram-2 me-1"></i>
          <span>${n ? `${n} relation${n === 1 ? '' : 's'} selected` : 'Tick relations to build a join'}</span>
          <button class="btn btn-sm btn-primary py-0 px-2 ms-auto" data-join-build="1"
@@ -8902,7 +8918,7 @@ function _mariaTable(columns, rows, truncated, ctx) {
       if (!canEdit || !_mariaColEditable(c))
         return '<td class="text-secondary fst-italic">null</td>';
       const nkey = {}; for (const k of pk) nkey[k] = r[k];
-      return `<td class="text-secondary fst-italic maria-cell-editable"`
+      return `<td class="text-secondary fst-italic sql-cell-editable"`
            + ` title="NULL&#10;Double-click to edit" data-editcol="${esc(c)}"`
            + ` data-rk="${esc(JSON.stringify(nkey))}" data-val="" data-null="1">null</td>`;
     }
@@ -8948,7 +8964,7 @@ function _mariaTable(columns, rows, truncated, ctx) {
       return `<td class="text-nowrap" title="${esc(s)}">${shown}</td>`;
     }
     const key = {}; for (const k of pk) key[k] = r[k];
-    return `<td class="text-nowrap maria-cell-editable" title="${esc(s)}&#10;`
+    return `<td class="text-nowrap sql-cell-editable" title="${esc(s)}&#10;`
          + `Double-click to edit" data-editcol="${esc(c)}"`
          + ` data-rk="${esc(JSON.stringify(key))}"`
          + ` data-val="${esc(s)}">${shown}</td>`;
@@ -8958,7 +8974,7 @@ function _mariaTable(columns, rows, truncated, ctx) {
   const ownScroller = !!(ctx && (ctx.editable || ctx.scroll));
   return `
     <div style="${ownScroller ? '' : 'overflow:auto;max-height:60vh;'}">
-      <table class="table table-sm table-hover mb-0 font-monospace maria-grid" style="font-size:.72rem;">
+      <table class="table table-sm table-hover mb-0 font-monospace sql-grid" style="font-size:.72rem;">
         <thead><tr>${head}</tr></thead>
         <tbody>${body}</tbody>
       </table>
@@ -8988,7 +9004,7 @@ function beginMariaCellEdit(td) {
   const original = td.dataset.val ?? '';
   const wasNull  = td.dataset.null === '1';
   const width = Math.max(td.getBoundingClientRect().width, 90);
-  td.innerHTML = `<input class="maria-cell-input" style="width:${Math.round(width)}px"`
+  td.innerHTML = `<input class="sql-cell-input" style="width:${Math.round(width)}px"`
                + `${wasNull ? ' placeholder="NULL"' : ''}>`;
   const input = td.querySelector('input');
   input.value = original;
@@ -9058,7 +9074,7 @@ async function commitMariaCellEdit(td, before, after, wasNull) {
   if (row) row[col] = after;
   renderMariaDetail();
   document.querySelectorAll(`td[data-editcol="${CSS.escape(col)}"]`).forEach(cell => {
-    if (cell.dataset.rk === td.dataset.rk) cell.classList.add('maria-cell-edited');
+    if (cell.dataset.rk === td.dataset.rk) cell.classList.add('sql-cell-edited');
   });
 }
 
@@ -9627,6 +9643,929 @@ function openMariaQueryColumnPicker() {
     locked: [],
     hidden: _mariaQueryHidden,
     onChange: (hidden) => { _mariaQueryHidden = hidden; renderMariaQueryResults(); },
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PostgreSQL — Databases & Tables, and the SQL Query screen
+   ══════════════════════════════════════════════════════════════════════════
+   Deliberately its own set of functions rather than a generalisation of the
+   MariaDB ones above: MariaDB's screen is shipped and tested, and threading a
+   backend parameter through ~2000 lines of closures over global state (drag
+   handles, the join builder, the WHERE wizard) risked a subtle regression
+   there for a save on typing here. What IS shared is the generic furniture
+   that was already parameterised before PostgreSQL existed —
+   _openColumnPicker() (takes its target as `opts`) and the sql-* CSS classes
+   (already structural, not MariaDB-specific).
+
+   Two things MariaDB's screen has that this one does not, both deliberately
+   deferred rather than ported: the visual join builder and the WHERE-clause
+   wizard (openMariaQueryWizard and the regex-based mini SQL parser behind
+   it — _sqlMap/_sqlFindTop/parseMariaWhere). Porting a hand-rolled SQL parser
+   to a second dialect and re-verifying its edge cases is a project of its
+   own; the raw SQL box below is still the full read-only escape hatch, typed
+   rather than point-and-click for now. The relations panel below also skips
+   the join tick-boxes for the same reason — nothing here builds a join, so
+   nothing offers to select one.
+
+   PostgreSQL's own difference from MariaDB shapes the naming throughout:
+   one connection sees exactly one DATABASE (no `USE`), so what MariaDB calls
+   a schema is a database here — see modules/pg/catalog.py. */
+
+let pgDatabases  = [];
+let pgTableList  = [];
+let pgDatabase   = '';       // selected database
+let pgTable      = '';       // selected table
+let pgColumns    = [];       // column definitions for the selected table
+let pgSample     = null;     // last /sample payload for the selected table
+let pgRelations  = null;     // last /keys payload for the selected table
+
+/* Same per-table hidden-column and layout memory as MariaDB, under its own
+   storage keys so the two stores' preferences do not collide. */
+let pgHiddenCols = _mariaLoad('ccadmin.pg.hiddenCols', {});
+let pgCollapsed  = _mariaLoad('ccadmin.pg.collapsed', {});
+let pgPaneWidths = _mariaLoad('ccadmin.pg.paneWidths', null);
+let pgSectionH   = _mariaLoad('ccadmin.pg.sectionH', {});
+
+function _pgTableKey() { return `${pgDatabase}.${pgTable}`; }
+function _pgHiddenSet() { return new Set(pgHiddenCols[_pgTableKey()] || []); }
+
+function initPgPanes() {
+  document.getElementById('pgSchemas')?.addEventListener('click', ev => {
+    const btn = ev.target.closest('[data-schema]');
+    if (btn) selectPgDatabase(btn.dataset.schema);
+  });
+  document.getElementById('pgTables')?.addEventListener('click', ev => {
+    const btn = ev.target.closest('[data-table]');
+    if (btn) selectPgTable(btn.dataset.table);
+  });
+  document.addEventListener('click', ev => {
+    const btn = ev.target.closest('[data-pg-blob-qs]');
+    if (btn) { ev.preventDefault(); showPgBlobViewer(btn.dataset.pgBlobQs); }
+  });
+
+  const detail = document.getElementById('pgDetail');
+  detail?.addEventListener('click', ev => {
+    const head = ev.target.closest('[data-sect]');
+    if (head) { togglePgSection(head.dataset.sect); return; }
+    const jump = ev.target.closest('[data-goto-table]');
+    if (jump) { selectPgTable(jump.dataset.gotoTable); return; }
+    if (ev.target.closest('[data-pg-cols]')) { openPgColumnPicker(); return; }
+  });
+  detail?.addEventListener('dblclick', ev => {
+    const td = ev.target.closest('td[data-editcol]');
+    if (td) beginPgCellEdit(td);
+    const hs = ev.target.closest('.sql-hsplit');
+    if (hs) resetPgSectionHeight(hs.dataset.hsplit);
+  });
+  detail?.addEventListener('pointerdown', ev => {
+    const hs = ev.target.closest('.sql-hsplit');
+    if (hs) startPgSectionDrag(hs, ev);
+  });
+  detail?.addEventListener('keydown', ev => {
+    const hs = ev.target.closest('.sql-hsplit');
+    if (!hs || (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown')) return;
+    ev.preventDefault();
+    const body = document.querySelector(`[data-sect-body="${hs.dataset.hsplit}"]`);
+    const step = (ev.shiftKey ? 40 : 12) * (ev.key === 'ArrowDown' ? 1 : -1);
+    _setPgSectionHeight(hs.dataset.hsplit, body,
+                        body.getBoundingClientRect().height + step);
+  });
+
+  initPgSplitters();
+  initPgQueryScreen();
+}
+
+function initPgQueryScreen() {
+  // The editor / results splitter, same contract as MariaDB's SQL screen.
+  const sp = document.querySelector('#view-pgquery [data-mqsplit]');
+  const editor = document.querySelector('#view-pgquery .mq-editor');
+  if (!sp || !editor) return;
+
+  const saved = _mariaLoad('ccadmin.pg.editorH', null);
+  if (saved) editor.style.height = saved + 'px';
+
+  const clamp = (wanted) => {
+    const res = document.querySelector('#view-pgquery .mq-results');
+    const slack = res ? Math.max(0, res.getBoundingClientRect().height - 140) : 0;
+    const max = editor.getBoundingClientRect().height + slack;
+    const h = Math.round(Math.min(max, Math.max(130, wanted)));
+    editor.style.height = h + 'px';
+    _mariaSave('ccadmin.pg.editorH', h);
+  };
+
+  sp.addEventListener('dblclick', () => {
+    editor.style.height = '';
+    _mariaSave('ccadmin.pg.editorH', null);
+  });
+  sp.addEventListener('keydown', ev => {
+    if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
+    ev.preventDefault();
+    clamp(editor.getBoundingClientRect().height
+          + (ev.shiftKey ? 40 : 12) * (ev.key === 'ArrowDown' ? 1 : -1));
+  });
+  sp.addEventListener('pointerdown', ev => {
+    ev.preventDefault();
+    const startY = ev.clientY, startH = editor.getBoundingClientRect().height;
+    sp.setPointerCapture?.(ev.pointerId);
+    sp.classList.add('dragging');
+    document.body.classList.add('sql-resizing-y');
+    const onMove = e => clamp(startH + e.clientY - startY);
+    const onUp = () => {
+      sp.removeEventListener('pointermove', onMove);
+      sp.removeEventListener('pointerup', onUp);
+      sp.removeEventListener('pointercancel', onUp);
+      sp.classList.remove('dragging');
+      document.body.classList.remove('sql-resizing-y');
+    };
+    sp.addEventListener('pointermove', onMove);
+    sp.addEventListener('pointerup', onUp);
+    sp.addEventListener('pointercancel', onUp);
+  });
+}
+
+function startPgSectionDrag(hs, ev) {
+  ev.preventDefault();
+  const id   = hs.dataset.hsplit;
+  const body = document.querySelector(`[data-sect-body="${id}"]`);
+  if (!body) return;
+  const startY = ev.clientY;
+  const startH = body.getBoundingClientRect().height;
+
+  hs.setPointerCapture?.(ev.pointerId);
+  hs.classList.add('dragging');
+  document.body.classList.add('sql-resizing-y');
+
+  const onMove = e => _setPgSectionHeight(id, body, startH + e.clientY - startY);
+  const onUp = () => {
+    hs.removeEventListener('pointermove', onMove);
+    hs.removeEventListener('pointerup', onUp);
+    hs.removeEventListener('pointercancel', onUp);
+    hs.classList.remove('dragging');
+    document.body.classList.remove('sql-resizing-y');
+    _mariaSave('ccadmin.pg.sectionH', pgSectionH);
+  };
+  hs.addEventListener('pointermove', onMove);
+  hs.addEventListener('pointerup', onUp);
+  hs.addEventListener('pointercancel', onUp);
+}
+
+function _setPgSectionHeight(id, body, wanted) {
+  const rows = document.querySelector('#pgDetail .sql-rows-section');
+  const slack = rows ? Math.max(0, rows.getBoundingClientRect().height - 132) : 0;
+  const max = body.getBoundingClientRect().height + slack;
+  const h = Math.round(Math.min(max, Math.max(48, wanted)));
+  body.style.height = h + 'px';
+  pgSectionH[id] = h;
+  _mariaSave('ccadmin.pg.sectionH', pgSectionH);
+}
+
+function resetPgSectionHeight(id) {
+  delete pgSectionH[id];
+  _mariaSave('ccadmin.pg.sectionH', pgSectionH);
+  const body = document.querySelector(`[data-sect-body="${id}"]`);
+  if (body) body.style.height = '';
+}
+
+function initPgSplitters() {
+  const strip = document.getElementById('pgPanes');
+  if (!strip) return;
+  const panes = [document.getElementById('pgPaneSchemas'),
+                 document.getElementById('pgPaneTables')];
+
+  if (Array.isArray(pgPaneWidths)) {
+    panes.forEach((p, i) => { if (p && pgPaneWidths[i]) p.style.width = pgPaneWidths[i] + 'px'; });
+  }
+
+  strip.querySelectorAll('.sql-splitter').forEach(sp => {
+    const idx  = parseInt(sp.dataset.split, 10);
+    const pane = panes[idx];
+    if (!pane) return;
+
+    sp.addEventListener('dblclick', () => {
+      panes.forEach(p => { if (p) p.style.width = ''; });
+      pgPaneWidths = null;
+      _mariaSave('ccadmin.pg.paneWidths', null);
+    });
+
+    sp.addEventListener('pointerdown', ev => {
+      ev.preventDefault();
+      const startX = ev.clientX;
+      const startW = pane.getBoundingClientRect().width;
+      sp.setPointerCapture(ev.pointerId);
+      sp.classList.add('dragging');
+      document.body.classList.add('sql-resizing');
+
+      const onMove = e => {
+        const max = Math.max(160, strip.getBoundingClientRect().width - 320);
+        pane.style.width = Math.min(max, Math.max(140, startW + e.clientX - startX)) + 'px';
+      };
+      const onUp = () => {
+        sp.removeEventListener('pointermove', onMove);
+        sp.removeEventListener('pointerup', onUp);
+        sp.removeEventListener('pointercancel', onUp);
+        sp.classList.remove('dragging');
+        document.body.classList.remove('sql-resizing');
+        pgPaneWidths = panes.map(p => p ? Math.round(p.getBoundingClientRect().width) : 0);
+        _mariaSave('ccadmin.pg.paneWidths', pgPaneWidths);
+      };
+      sp.addEventListener('pointermove', onMove);
+      sp.addEventListener('pointerup', onUp);
+      sp.addEventListener('pointercancel', onUp);
+    });
+
+    sp.addEventListener('keydown', ev => {
+      const step = ev.shiftKey ? 40 : 12;
+      if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+      ev.preventDefault();
+      const w = pane.getBoundingClientRect().width + (ev.key === 'ArrowRight' ? step : -step);
+      const max = Math.max(160, strip.getBoundingClientRect().width - 320);
+      pane.style.width = Math.min(max, Math.max(140, w)) + 'px';
+      pgPaneWidths = panes.map(p => p ? Math.round(p.getBoundingClientRect().width) : 0);
+      _mariaSave('ccadmin.pg.paneWidths', pgPaneWidths);
+    });
+  });
+}
+
+function togglePgSection(name) {
+  pgCollapsed[name] = !pgCollapsed[name];
+  _mariaSave('ccadmin.pg.collapsed', pgCollapsed);
+  const head = document.querySelector(`#pgDetail [data-sect="${name}"]`);
+  const body = document.querySelector(`#pgDetail [data-sect-body="${name}"]`);
+  head?.classList.toggle('collapsed', !!pgCollapsed[name]);
+  body?.classList.toggle('d-none', !!pgCollapsed[name]);
+  document.querySelector(`#pgDetail .sql-hsplit[data-hsplit="${name}"]`)
+    ?.classList.toggle('d-none', !!pgCollapsed[name]);
+}
+
+/** Decoded view of one bytea column value. Same modal and same decoding
+ *  (modules/maria/blobs.py is generic byte analysis, reused unchanged by
+ *  modules/pg) as showBlobViewer(), pointed at /api/pg instead of
+ *  /api/maria — kept as its own function rather than a shared one with a
+ *  prefix argument so neither screen's blob button has to carry which
+ *  backend it belongs to beyond its own data attribute name. */
+async function showPgBlobViewer(qs) {
+  const body = document.getElementById('blobViewerBody');
+  const dl   = document.getElementById('blobViewerDownload');
+  if (dl) dl.href = appUrl('/api/pg/blob?' + qs);
+  body.innerHTML = '<div class="text-secondary small p-3">Decoding…</div>';
+  const modal = new bootstrap.Modal(document.getElementById('blobViewerModal'));
+  modal.show();
+
+  const d = await api('/api/pg/blob/preview?' + qs);
+  if (!d || d.error) {
+    body.innerHTML = `<div class="alert alert-warning py-2 px-3 small mb-0">`
+      + `${esc((d && d.error) || 'could not decode')}</div>`;
+    return;
+  }
+
+  document.getElementById('blobViewerTitle').textContent =
+    `${d.database}.${d.table}.${d.column}`;
+
+  const header = `<div class="small text-secondary mb-2">
+      ${esc(d.label)} · ${_fmtBytes(d.size)}</div>`;
+
+  let main = '';
+  if (d.json !== null && d.json !== undefined) {
+    main = `<div class="small fw-semibold text-secondary mb-1">JSON payload</div>
+      <pre class="bg-body-tertiary p-2 rounded" style="font-size:.75rem;max-height:45vh;
+           overflow:auto;white-space:pre-wrap;word-break:break-word;">${
+        esc(JSON.stringify(d.json, null, 2))}</pre>`;
+  } else if (d.text) {
+    main = `<pre class="bg-body-tertiary p-2 rounded" style="font-size:.75rem;
+             max-height:45vh;overflow:auto;white-space:pre-wrap;">${esc(d.text)}</pre>`;
+  }
+
+  const strings = (d.strings || []).length
+    ? `<details ${d.json ? '' : 'open'} class="mt-2">
+         <summary class="small text-secondary">Readable strings (${d.strings.length})</summary>
+         <pre class="bg-body-tertiary p-2 rounded mt-1" style="font-size:.72rem;
+              max-height:30vh;overflow:auto;white-space:pre-wrap;">${
+           esc(d.strings.join('\n'))}</pre>
+       </details>`
+    : '';
+
+  const nothing = (!main && !strings)
+    ? '<div class="text-secondary small">Nothing readable in these bytes — '
+      + 'download it if you need the raw content.</div>' : '';
+
+  body.innerHTML = header + main + strings + nothing;
+}
+
+/** Version + reachability onto the PostgreSQL node in the rail. */
+async function loadPgHealth() {
+  if (!can('pg.read')) return;
+  const dot  = document.getElementById('db-pg-dot');
+  const meta = document.getElementById('db-pg-meta');
+  const d = await api('/api/pg/health');
+  const ok = !!(d && d.connected);
+  if (dot) dot.className = 'conn-dot ops-db-dot ' + (ok ? 'connected' : 'disconnected');
+  if (meta) {
+    // "PostgreSQL 18.3 (Debian 18.3-1.pgdg13+1) on x86_64-pc-linux-gnu, ..." —
+    // trim to the part anyone reading a ~150px rail is actually checking.
+    const v = ok ? String(d.version || '').split(' on ')[0] : '';
+    meta.textContent = ok ? (v || 'connected') : 'not responding';
+    meta.title = ok ? `${d.version || ''} · ${d.user || ''} (${d.credential_source || ''})`
+                    : (d && d.error) || 'not responding';
+  }
+  const badge = document.getElementById('pgServer');
+  if (badge) badge.textContent = ok ? `${d.host}:${d.port}` : '';
+}
+
+function _pgError(id, msg) {
+  const box = document.getElementById(id);
+  if (!box) return;
+  box.classList.toggle('d-none', !msg);
+  box.textContent = msg || '';
+}
+
+async function loadPgDatabases() {
+  const showSystem = !!document.getElementById('pgShowSystem')?.checked;
+  const pane = document.getElementById('pgSchemas');
+  if (pane) pane.innerHTML = '<div class="text-secondary small p-3">Loading…</div>';
+
+  const d = await api(`/api/pg/databases?include_system=${showSystem}`);
+  if (!d || d.error) {
+    _pgError('pgError', (d && d.error) || 'could not list databases');
+    if (pane) pane.innerHTML = '<div class="text-secondary small p-3">—</div>';
+    return;
+  }
+  _pgError('pgError', '');
+  pgDatabases = d.databases || [];
+  renderPgDatabases();
+  _fillPgQuerySchemas();
+}
+
+function renderPgDatabases() {
+  const pane = document.getElementById('pgSchemas');
+  if (!pane) return;
+  if (!pgDatabases.length) {
+    pane.innerHTML = '<div class="text-secondary small p-3">No databases.</div>';
+    return;
+  }
+  pane.innerHTML = pgDatabases.map(s => `
+    <button class="sql-item ${s.name === pgDatabase ? 'active' : ''}"
+            data-schema="${esc(s.name)}">
+      <div class="d-flex align-items-center gap-2">
+        <span class="fw-semibold">${esc(s.title)}</span>
+        ${s.catalogued ? '' : '<span class="badge bg-warning-subtle text-warning-emphasis" '
+          + 'style="font-size:.6rem;" title="Not in the curated catalog — worth adding">new</span>'}
+        <span class="ms-auto text-secondary" style="font-size:.68rem;">
+          ${s.size_mb} MB
+        </span>
+      </div>
+      ${s.description
+        ? `<div class="sql-desc">${esc(s.description)}</div>`
+        : `<div class="sql-desc font-monospace">${esc(s.name)}</div>`}
+    </button>`).join('');
+}
+
+async function selectPgDatabase(name) {
+  pgDatabase = name;
+  pgTable = '';
+  pgTableList = [];
+  renderPgDatabases();
+  document.getElementById('pgTablesTitle').textContent = `Tables — ${name}`;
+  document.getElementById('pgDetailTitle').textContent = 'Table';
+  document.getElementById('pgDetail').innerHTML =
+    '<div class="text-secondary small p-3">Pick a table.</div>';
+  const search = document.getElementById('pgTableSearch');
+  if (search) search.value = '';
+
+  const pane = document.getElementById('pgTables');
+  pane.innerHTML = '<div class="text-secondary small p-3">Loading…</div>';
+  const d = await api(`/api/pg/tables?database=${encodeURIComponent(name)}`);
+
+  if (pgDatabase !== name) return;   // superseded by a later click
+
+  if (!d || d.error) {
+    pane.innerHTML = `<div class="text-danger small p-3">${esc((d && d.error) || 'failed')}</div>`;
+    return;
+  }
+  pgTableList = d.tables || [];
+  renderPgTables();
+}
+
+function renderPgTables() {
+  const pane = document.getElementById('pgTables');
+  if (!pane) return;
+  const q = (document.getElementById('pgTableSearch')?.value || '').toLowerCase();
+  const rows = pgTableList.filter(t => !q || t.name.toLowerCase().includes(q));
+  if (!rows.length) {
+    pane.innerHTML = '<div class="text-secondary small p-3">No matching tables.</div>';
+    return;
+  }
+  pane.innerHTML = rows.map(t => `
+    <button class="sql-item ${t.name === pgTable ? 'active' : ''}"
+            data-table="${esc(t.name)}">
+      <div class="d-flex align-items-center gap-2">
+        <span class="font-monospace" style="font-size:.75rem;">${esc(t.name)}</span>
+        <span class="ms-auto text-secondary" style="font-size:.68rem;"
+              title="n_live_tup is refreshed by autovacuum/ANALYZE, not a live count">~${t.row_estimate} rows</span>
+      </div>
+      ${t.comment ? `<div class="sql-desc">${esc(t.comment)}</div>` : ''}
+    </button>`).join('');
+}
+
+async function selectPgTable(name) {
+  pgTable = name;
+  renderPgTables();
+  document.getElementById('pgDetailTitle').textContent = `${pgDatabase}.${name}`;
+  const pane = document.getElementById('pgDetail');
+  pane.innerHTML = '<div class="text-secondary small p-3">Loading…</div>';
+
+  const qs = `database=${encodeURIComponent(pgDatabase)}&table=${encodeURIComponent(name)}`;
+  const [cols, sample, keys] = await Promise.all([
+    api(`/api/pg/columns?${qs}`),
+    api(`/api/pg/sample?${qs}&size=25`),
+    api(`/api/pg/keys?${qs}`),
+  ]);
+
+  if (pgTable !== name) return;
+
+  if (cols && cols.error) {
+    pane.innerHTML = `<div class="text-danger small p-3">${esc(cols.error)}</div>`;
+    return;
+  }
+
+  pgColumns   = cols.columns || [];
+  pgSample    = (sample && !sample.error) ? sample : null;
+  pgRelations = (keys && !keys.error) ? keys : null;
+  renderPgDetail(sample && sample.error ? sample.error : '');
+}
+
+function renderPgDetail(sampleError) {
+  const pane = document.getElementById('pgDetail');
+  if (!pane) return;
+
+  const rowsHtml = sampleError
+    ? `<div class="text-danger small p-2">${esc(sampleError)}</div>`
+    : _pgTable(pgSample?.columns || [], pgSample?.rows || [], pgSample?.truncated,
+              {database: pgDatabase, table: pgTable,
+               primaryKey: pgSample?.primary_key || [],
+               blobColumns: pgSample?.blob_columns || [],
+               hidden: _pgHiddenSet(), editable: true});
+
+  const hidden = _pgHiddenSet();
+  const total  = (pgSample?.columns || []).length;
+  const shown  = total - [...hidden].filter(c => (pgSample?.columns || []).includes(c)).length;
+
+  pane.innerHTML = `
+    <div class="sql-detail-section">
+      ${_pgHead('columns', `Columns (${pgColumns.length})`)}
+      <div class="sql-detail-body-section ${pgCollapsed.columns ? 'd-none' : ''}"
+           data-sect-body="columns"${_pgSectionStyle('columns')}>${_pgColumnsTable()}</div>
+    </div>
+    ${_pgHSplit('columns')}
+
+    <div class="sql-detail-section">
+      ${_pgHead('relations', _pgRelationsLabel())}
+      <div class="sql-detail-body-section ${pgCollapsed.relations ? 'd-none' : ''}"
+           data-sect-body="relations"${_pgSectionStyle('relations')}>${_pgRelations()}</div>
+    </div>
+    ${_pgHSplit('relations')}
+
+    <div class="sql-rows-section">
+      <div class="sql-detail-head">
+        <span>First rows</span>
+        <span class="text-secondary" style="text-transform:none;font-weight:500;">
+          ${shown === total ? `${total} columns` : `${shown} of ${total} columns`}
+        </span>
+        <button class="btn btn-sm btn-outline-secondary ms-auto py-0 px-2"
+                data-pg-cols="1" style="font-size:.7rem;text-transform:none;"
+                title="Choose which columns to show">
+          <i class="bi bi-eye me-1"></i>Columns
+        </button>
+      </div>
+      <div class="sql-grid-scroll">${rowsHtml}</div>
+    </div>`;
+}
+
+function _pgSectionStyle(id) {
+  const h = pgSectionH[id];
+  return (h && !pgCollapsed[id]) ? ` style="height:${h}px;"` : '';
+}
+
+function _pgHSplit(id) {
+  if (pgCollapsed[id]) return '';
+  return `<div class="sql-hsplit" data-hsplit="${id}" role="separator"
+               tabindex="0" aria-orientation="horizontal"
+               title="Drag to resize · double-click to reset"></div>`;
+}
+
+function _pgHead(id, label) {
+  return `<button class="sql-detail-head ${pgCollapsed[id] ? 'collapsed' : ''}"
+                  data-sect="${id}" aria-expanded="${!pgCollapsed[id]}">
+            <span>${esc(label)}</span>
+            <i class="bi bi-chevron-down ops-caret"></i>
+          </button>`;
+}
+
+function _pgColumnsTable() {
+  if (!pgColumns.length)
+    return '<div class="text-secondary small p-2">No columns.</div>';
+  const body = pgColumns.map(c => `
+    <tr>
+      <td class="font-monospace">${esc(c.name)}</td>
+      <td class="text-secondary">${esc(c.data_type)}</td>
+      <td>${_pgKeyBadge(c)}</td>
+      <td class="text-secondary">${c.nullable === 'YES' ? 'null' : ''}</td>
+    </tr>`).join('');
+  return `<table class="table table-sm table-hover mb-0" style="font-size:.74rem;">
+      <thead class="table-light"><tr>
+        <th>Name</th><th>Type</th><th>Key</th><th></th>
+      </tr></thead><tbody>${body}</tbody></table>`;
+}
+
+/** Same badge as MariaDB's, but PostgreSQL's columns endpoint only ever marks
+ *  PRI (see modules/pg/routers/browse.py::pg_columns) — there is no MUL/UNI
+ *  equivalent surfaced there today, so the tooltip falls back to the index
+ *  list alone. */
+function _pgKeyBadge(col) {
+  if (!col.key_type) return '';
+  const idx = (pgRelations?.indexes || []).filter(i => i.columns.includes(col.name));
+  const tip = idx.length
+    ? idx.map(i => `${i.name} (${i.columns.join(', ')})`).join('\n')
+    : 'Primary key';
+  return `<span class="badge bg-primary-subtle text-primary-emphasis"
+                style="font-size:.6rem;" title="${esc(tip)}">${esc(col.key_type)}</span>`;
+}
+
+function _pgRelationsLabel() {
+  const r = pgRelations;
+  if (!r) return 'Keys & relations';
+  const n = (r.outbound?.length || 0) + (r.inbound?.length || 0);
+  return n ? `Keys & relations (${n} declared)` : 'Keys & relations';
+}
+
+/** Same three-part answer as MariaDB's _mariaRelations(), minus the join
+ *  tick-boxes and the "Build join query" bar — see this file's PostgreSQL
+ *  section header for why the join builder itself is not here yet. */
+function _pgRelations() {
+  const r = pgRelations;
+  if (!r) return '<div class="text-secondary small p-2">—</div>';
+
+  const idx = (r.indexes || []).map(i => `
+    <div class="sql-rel-row">
+      <span class="badge bg-${i.primary ? 'primary' : 'secondary'}-subtle
+                   text-${i.primary ? 'primary' : 'secondary'}-emphasis"
+            style="font-size:.6rem;">${i.primary ? 'PRIMARY' : (i.unique ? 'UNIQUE' : 'INDEX')}</span>
+      <span class="ms-1 text-secondary">${esc(i.primary ? '' : i.name)}</span>
+      <span class="ms-1">${i.columns.map(c => `<span class="sql-chip">${esc(c)}</span>`).join(' + ')}</span>
+    </div>`).join('');
+
+  const link = (database, table, label) =>
+    database === pgDatabase
+      ? `<button class="sql-chip sql-chip-link" data-goto-table="${esc(table)}"
+                 title="Open ${esc(table)}">${esc(label)}</button>`
+      : `<span class="sql-chip">${esc(database)}.${esc(label)}</span>`;
+
+  const out = (r.outbound || []).map(f => `
+    <div class="sql-rel-row">
+      <i class="bi bi-arrow-right-short text-primary"></i>
+      ${f.columns.map(c => `<span class="sql-chip">${esc(c)}</span>`).join(' + ')}
+      <span class="text-secondary mx-1">references</span>
+      ${link(f.ref_schema, f.ref_table, f.ref_table)}
+      <span class="text-secondary">.</span>
+      ${f.ref_columns.map(c => `<span class="sql-chip">${esc(c)}</span>`).join(' + ')}
+    </div>`).join('');
+
+  const inb = (r.inbound || []).map(f => `
+    <div class="sql-rel-row">
+      <i class="bi bi-arrow-left-short text-success"></i>
+      ${link(f.from_schema, f.from_table, f.from_table)}
+      <span class="text-secondary">.</span>
+      ${f.columns.map(c => `<span class="sql-chip">${esc(c)}</span>`).join(' + ')}
+      <span class="text-secondary mx-1">references</span>
+      ${f.ref_columns.map(c => `<span class="sql-chip">${esc(c)}</span>`).join(' + ')}
+    </div>`).join('');
+
+  const cand = (r.candidates || []).map(c => `
+    <div class="sql-rel-row">
+      <span class="sql-chip">${esc(c.column)}</span>
+      <span class="text-secondary mx-1">also in ${c.count} table${c.count === 1 ? '' : 's'}:</span>
+      ${c.tables.map(t => link(pgDatabase, t, t)).join(' ')}
+      ${c.truncated ? '<span class="text-secondary"> …</span>' : ''}
+    </div>`).join('');
+
+  const section = (title, html, note) => html
+    ? `<div class="px-2 pt-2 pb-1 small fw-semibold text-secondary">${esc(title)}</div>
+       ${note ? `<div class="px-2 pb-1 text-secondary" style="font-size:10.5px;">${esc(note)}</div>` : ''}
+       ${html}` : '';
+
+  const body = section('Indexes', idx)
+    + section('References out', out)
+    + section('Referenced by', inb)
+    + section('Possibly related', cand,
+        'Matched on column name, not on a declared constraint — a strong hint '
+        + 'about where to look next, not a guarantee that the values line up.');
+
+  if (!body) return '<div class="text-secondary small p-2">No keys on this table.</div>';
+
+  const none = (!out.length && !inb.length)
+    ? `<div class="px-2 py-1 text-secondary" style="font-size:10.5px;">
+         This database declares no FOREIGN KEY constraints on this table, so
+         the relationships below are inferred rather than read from the catalog.
+       </div>` : '';
+  return none + body;
+}
+
+function openPgColumnPicker() {
+  const pk = pgSample?.primary_key || [];
+  const cols = (pgSample?.columns || []).length
+    ? pgSample.columns : pgColumns.map(c => c.name);
+  _openColumnPicker({
+    title: `Columns — ${pgTable}`,
+    columns: cols,
+    locked: pk,
+    hidden: _pgHiddenSet(),
+    onChange: (hidden) => {
+      pgHiddenCols[_pgTableKey()] = [...hidden];
+      _mariaSave('ccadmin.pg.hiddenCols', pgHiddenCols);
+      renderPgDetail();
+    },
+  });
+}
+
+/** Shared result-grid renderer for sample rows and query results — same
+ *  contract as _mariaTable(), adapted for PostgreSQL's query-string keys
+ *  (`database` rather than `schema`) and endpoint prefix. */
+function _pgTable(columns, rows, truncated, ctx) {
+  if (!rows.length) return '<div class="text-secondary small p-2">No rows.</div>';
+  const pk = (ctx && ctx.primaryKey) || [];
+  const hidden = (ctx && ctx.hidden) || new Set();
+  const visible = columns.filter(c => !hidden.has(c) || pk.includes(c));
+  if (!visible.length)
+    return '<div class="text-secondary small p-2">Every column is hidden — '
+         + 'use Columns to bring some back.</div>';
+
+  const canEdit = !!(ctx && ctx.editable) && can('pg.write') && pk.length > 0;
+
+  const head = visible.map(c => `<th class="text-nowrap">${esc(c)}</th>`).join('');
+  const body = rows.map(r => '<tr>' + visible.map(c => {
+    const v = r[c];
+    if (v === null || v === undefined) {
+      if (!canEdit || !_pgColEditable(c))
+        return '<td class="text-secondary fst-italic">null</td>';
+      const nkey = {}; for (const k of pk) nkey[k] = r[k];
+      return `<td class="text-secondary fst-italic sql-cell-editable"`
+           + ` title="NULL&#10;Double-click to edit" data-editcol="${esc(c)}"`
+           + ` data-rk="${esc(JSON.stringify(nkey))}" data-val="" data-null="1">null</td>`;
+    }
+
+    // bytea column. The server sends a marker rather than the bytes — same
+    // reasoning as MariaDB's BLOB marker, and the shape is identical
+    // (modules/pg/client.py::_jsonable mirrors modules/maria/client.py's).
+    if (v && typeof v === 'object' && v.__blob__) {
+      const size = _fmtBytes(v.bytes || 0);
+      if (!v.bytes) return `<td class="text-secondary fst-italic">empty blob</td>`;
+      const blobCols = (ctx && ctx.blobColumns) || null;
+      if (blobCols && !blobCols.includes(c))
+        return `<td class="text-secondary" title="Binary value on a `
+             + `non-binary column — not downloadable">binary · ${size}</td>`;
+      if (!pk.length || !ctx)
+        return `<td class="text-secondary" title="No primary key, so this row `
+             + `cannot be addressed for download">binary · ${size}</td>`;
+      const key = {}; for (const k of pk) key[k] = r[k];
+      const qs = 'database=' + encodeURIComponent(ctx.database)
+        + '&table=' + encodeURIComponent(ctx.table)
+        + '&column=' + encodeURIComponent(c)
+        + '&key=' + encodeURIComponent(JSON.stringify(key));
+      return `<td class="text-nowrap">
+                <button class="btn btn-link btn-sm p-0 text-decoration-none"
+                        data-pg-blob-qs="${esc(qs)}" title="View ${esc(c)} (${size})">
+                  <i class="bi bi-eye me-1"></i>${size}</button>
+                <a href="${esc(appUrl('/api/pg/blob?' + qs))}" download
+                   class="ms-2 text-secondary" title="Download raw bytes">
+                   <i class="bi bi-download"></i></a></td>`;
+    }
+
+    const s = String(v);
+    const shown = esc(s.length > 80 ? s.slice(0, 80) + '…' : s);
+    if (!canEdit || !_pgColEditable(c)) {
+      return `<td class="text-nowrap" title="${esc(s)}">${shown}</td>`;
+    }
+    const key = {}; for (const k of pk) key[k] = r[k];
+    return `<td class="text-nowrap sql-cell-editable" title="${esc(s)}&#10;`
+         + `Double-click to edit" data-editcol="${esc(c)}"`
+         + ` data-rk="${esc(JSON.stringify(key))}"`
+         + ` data-val="${esc(s)}">${shown}</td>`;
+  }).join('') + '</tr>').join('');
+  const ownScroller = !!(ctx && (ctx.editable || ctx.scroll));
+  return `
+    <div style="${ownScroller ? '' : 'overflow:auto;max-height:60vh;'}">
+      <table class="table table-sm table-hover mb-0 font-monospace sql-grid" style="font-size:.72rem;">
+        <thead><tr>${head}</tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>
+    ${truncated ? '<div class="small text-warning-emphasis px-2 py-1">'
+      + 'More rows exist — this result was capped.</div>' : ''}`;
+}
+
+/* ── Editing one cell ─────────────────────────────────────────────────────
+   Mirrors the server's rules in modules/pg/writes.py, the same way MariaDB's
+   client-side check mirrors modules/maria/writes.py — this decides what to
+   OFFER, not what is PERMITTED, and the server re-checks every one of these. */
+function _pgColEditable(name) {
+  const c = pgColumns.find(x => x.name === name);
+  if (!c) return false;
+  if (c.key_type === 'PRI') return false;
+  if ((c.is_identity || '').toUpperCase() === 'YES') return false;
+  if (String(c.default_value || '').startsWith('nextval(')) return false;
+  if ((c.is_generated || '').toUpperCase() === 'ALWAYS' || c.generation_expression) return false;
+  return (c.data_type || '').toLowerCase() !== 'bytea';
+}
+
+function beginPgCellEdit(td) {
+  if (td.querySelector('input')) return;
+  const original = td.dataset.val ?? '';
+  const wasNull  = td.dataset.null === '1';
+  const width = Math.max(td.getBoundingClientRect().width, 90);
+  td.innerHTML = `<input class="sql-cell-input" style="width:${Math.round(width)}px"`
+               + `${wasNull ? ' placeholder="NULL"' : ''}>`;
+  const input = td.querySelector('input');
+  input.value = original;
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const revert = () => {
+    if (settled) return;
+    settled = true;
+    td.innerHTML = _pgCellHtml(original, wasNull);
+  };
+  input.addEventListener('keydown', ev => {
+    if (ev.key === 'Escape') { ev.preventDefault(); revert(); }
+    else if (ev.key === 'Enter') {
+      ev.preventDefault();
+      if (settled) return;
+      settled = true;
+      commitPgCellEdit(td, original, input.value, wasNull);
+    }
+  });
+  input.addEventListener('blur', revert);
+}
+
+function _pgCellHtml(value, isNull) {
+  if (isNull) return '<em>null</em>';
+  return esc(value.length > 80 ? value.slice(0, 80) + '…' : value);
+}
+
+async function commitPgCellEdit(td, before, after, wasNull) {
+  const col = td.dataset.editcol;
+  const key = JSON.parse(td.dataset.rk);
+  td.innerHTML = _pgCellHtml(before, wasNull);
+
+  if (after === before && !(wasNull && after !== '')) return;
+
+  const keyText = Object.entries(key).map(([k, v]) => `${k} = ${v}`).join(' AND ');
+  const ok = await _pgConfirmEdit({
+    target: `${pgDatabase}.${pgTable}.${col}`,
+    where: keyText, before: wasNull ? 'NULL' : before, after,
+  });
+  if (!ok) return;
+
+  const d = await api('/api/pg/cell', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      database: pgDatabase, table: pgTable, column: col, key,
+      value: after, expected: wasNull ? null : before, expected_null: !!wasNull,
+    }),
+  });
+
+  if (!d || d.error) {
+    _pgError('pgError', (d && d.error) || 'the edit did not go through');
+    return;
+  }
+  _pgError('pgError', '');
+  const row = (pgSample?.rows || []).find(
+    r => Object.entries(key).every(([k, v]) => String(r[k]) === String(v)));
+  if (row) row[col] = after;
+  renderPgDetail();
+  document.querySelectorAll(`td[data-editcol="${CSS.escape(col)}"]`).forEach(cell => {
+    if (cell.dataset.rk === td.dataset.rk) cell.classList.add('sql-cell-edited');
+  });
+}
+
+/** Same confirmation as MariaDB's, with the statement it shows adjusted to
+ *  what the server actually runs: double-quoted identifiers, and no LIMIT —
+ *  PostgreSQL has no LIMIT clause on UPDATE (modules/pg/writes.py addresses
+ *  the row by its full primary key instead, which is unique by definition). */
+function _pgConfirmEdit(o) {
+  return new Promise(resolve => {
+    const wrap = document.createElement('div');
+    wrap.className = 'rt-modal-overlay';
+    const stmt = `UPDATE "public"."${pgTable}"\n   SET "${o.target.split('.').pop()}" = `
+      + `'${o.after}'\n WHERE ${o.where};`;
+    wrap.innerHTML = `<div class="rt-modal" style="max-width:560px;">
+        <div class="rt-modal-title">⚠ Edit a row on this CC</div>
+        <div class="rt-modal-body">
+          <div class="small mb-2">
+            This changes live data in the CC's configuration database. It is
+            not reversible from here.
+          </div>
+          <table class="table table-sm mb-2" style="font-size:.76rem;">
+            <tr><td class="text-secondary">Cell</td>
+                <td class="font-monospace">${esc(o.target)}</td></tr>
+            <tr><td class="text-secondary">Row</td>
+                <td class="font-monospace">${esc(o.where)}</td></tr>
+            <tr><td class="text-secondary">From</td>
+                <td class="font-monospace">${esc(o.before) || '<em>empty</em>'}</td></tr>
+            <tr><td class="text-secondary">To</td>
+                <td class="font-monospace fw-semibold">${esc(o.after) || '<em>empty</em>'}</td></tr>
+          </table>
+          <pre class="bg-body-tertiary p-2 rounded mb-0" style="font-size:.72rem;
+               white-space:pre-wrap;">${esc(stmt)}</pre>
+        </div>
+        <div class="rt-modal-actions">
+          <button class="btn btn-sm btn-warning" data-ok="1">Apply the change</button>
+          <button class="btn btn-sm btn-outline-secondary" data-ok="0">Cancel</button>
+        </div></div>`;
+    document.body.appendChild(wrap);
+    const done = v => { wrap.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey = e => { if (e.key === 'Escape') done(false); };
+    document.addEventListener('keydown', onKey);
+    wrap.addEventListener('click', e => {
+      const b = e.target.closest('button');
+      if (b) { done(b.getAttribute('data-ok') === '1'); return; }
+      if (e.target === wrap) done(false);
+    });
+  });
+}
+
+function _fillPgQuerySchemas() {
+  const sel = document.getElementById('pgQuerySchema');
+  if (!sel) return;
+  const keep = sel.value;
+  sel.innerHTML = '<option value="">(none)</option>'
+    + pgDatabases.map(s => `<option value="${esc(s.name)}">${esc(s.name)}</option>`).join('');
+  sel.value = keep || (pgDatabases.find(s => !s.system)?.name || '');
+}
+
+let _pgQueryCols = [];
+let _pgQueryRows = [];
+let _pgQueryMeta = null;
+let _pgQueryHidden = new Set();
+
+async function runPgQuery() {
+  const sql = (document.getElementById('pgQuerySql')?.value || '').trim();
+  if (!sql) return;
+  const database = document.getElementById('pgQuerySchema')?.value || '';
+  const limit = parseInt(document.getElementById('pgQueryLimit')?.value, 10) || null;
+
+  const out  = document.getElementById('pgQueryResults');
+  const meta = document.getElementById('pgQueryMeta');
+  out.innerHTML = '<div class="text-secondary small p-3">Running…</div>';
+  meta.textContent = '';
+  _pgError('pgQueryError', '');
+
+  const d = await api('/api/pg/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql, database, limit }),
+  });
+
+  if (!d || d.error) {
+    _pgError('pgQueryError', (d && d.error) || 'query failed');
+    out.innerHTML = '<div class="text-secondary small p-3">—</div>';
+    document.getElementById('pgQueryColsBtn')?.classList.add('d-none');
+    return;
+  }
+
+  _pgQueryCols = d.columns || [];
+  _pgQueryRows = d.rows || [];
+  _pgQueryMeta = d;
+  _pgQueryHidden = new Set([..._pgQueryHidden].filter(c => _pgQueryCols.includes(c)));
+
+  document.getElementById('pgQueryColsBtn')
+    ?.classList.toggle('d-none', !_pgQueryCols.length);
+  renderPgQueryResults();
+}
+
+function renderPgQueryResults() {
+  const out  = document.getElementById('pgQueryResults');
+  const meta = document.getElementById('pgQueryMeta');
+  const d = _pgQueryMeta;
+  if (!out || !d) return;
+
+  const shown = _pgQueryCols.length - _pgQueryHidden.size;
+  meta.textContent = `${d.count} row(s) · ${d.took_ms} ms`
+    + (d.truncated ? ` · capped at ${d.row_cap}` : '')
+    + (_pgQueryHidden.size ? ` · ${shown} of ${_pgQueryCols.length} columns` : '');
+
+  out.innerHTML = _pgTable(_pgQueryCols, _pgQueryRows, d.truncated,
+                           { hidden: _pgQueryHidden, scroll: true });
+}
+
+function openPgQueryColumnPicker() {
+  _openColumnPicker({
+    title: 'Columns — query results',
+    columns: _pgQueryCols,
+    locked: [],
+    hidden: _pgQueryHidden,
+    onChange: (hidden) => { _pgQueryHidden = hidden; renderPgQueryResults(); },
   });
 }
 
@@ -10675,6 +11614,7 @@ async function startApp() {
   applyPolicyToChrome();
   initDbTree();
   initMariaPanes();
+  initPgPanes();
   initUiPrefs();
   initQuerySplitter();
   initAutoRefresh();
@@ -10684,6 +11624,7 @@ async function startApp() {
   // Its own store with its own reachability — probed independently of ES, and
   // not awaited, so a slow or dead MariaDB cannot hold up the whole app.
   loadMariaHealth();
+  loadPgHealth();
 
   // Wherever we land, land on System Health. It answers the question an
   // engineer opens this tool with — "is this CC working" — and it is the one
