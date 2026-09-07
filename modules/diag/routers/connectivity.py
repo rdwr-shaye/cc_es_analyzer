@@ -10,6 +10,7 @@ agreed to expose.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
@@ -94,8 +95,19 @@ def check_connectivity(target: str = Query(default=""),
         local["vantage"] = "local"
         return local
 
+    # _probe (via run_probe_on_cc -> hostexec.run_op -> backend()) reads which
+    # CC is connected off a ContextVar that session_middleware sets on THIS
+    # request's thread. A worker thread from the pool below starts with that
+    # ContextVar unset, not inherited — so without copying it explicitly here,
+    # every probe silently resolved "no CC is connected" from inside the pool
+    # even though `backend` above, computed on this thread, correctly saw the
+    # session's SSH details. Confirmed live: vantage.backend reported "ssh"
+    # while every individual probe still fell back to local. The same
+    # ContextVar hazard modules/system/routers/dashboard.py's _in_context
+    # already exists to close — this endpoint just never got it.
+    ctx = contextvars.copy_context()
     with ThreadPoolExecutor(max_workers=min(8, len(chosen))) as pool:
-        results = list(pool.map(_probe, chosen))
+        results = list(pool.map(lambda t: ctx.run(_probe, t), chosen))
 
     summary = probes.roll_up(results)
     # WHOSE connectivity this describes. Embedded the answer is "this CC", and
