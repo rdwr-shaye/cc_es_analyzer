@@ -220,13 +220,16 @@ def connection(schema: str = "", readonly: bool = True):
     not registered otherwise. It is a keyword with a read-only default so that
     a connection nobody deliberately asked to write through cannot write.
     """
-    creds = credentials.resolve()
     cc_host, why = resolve_host()
     if not cc_host:
         raise MariaError(
             "no CC is connected — MariaDB is reached on the same machine as the "
             "Elasticsearch this session is pointed at, so connect to a CC first "
             "(or set MARIA_HOST to reach one directly)")
+    # host-scoped: an operator override or a discovered account belongs to
+    # THIS CC, and resolving before we know which one would cache the wrong
+    # appliance's answer for the rest of the session.
+    creds = credentials.resolve(cc_host)
 
     # Embedded the container name resolves on the shared docker network and
     # there is nothing to route around; only the remote tool needs the fallback.
@@ -366,8 +369,8 @@ def server_info() -> dict:
     """Version and uptime — the MariaDB node's identity for the sidebar."""
     rows, _ = run("SELECT VERSION() AS version")
     version = (rows[0].get("version") if rows else "") or ""
-    creds = credentials.resolve()
     host, why = resolve_host()
+    creds = credentials.resolve(host)
     routed = _route_cache.get(host)
     via = "direct" if (not routed or routed[0] == host) else "SSH tunnel"
     return {"connected": True, "version": version,

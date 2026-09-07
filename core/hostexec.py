@@ -119,10 +119,26 @@ _FIND_MARIA = "docker ps --format '{{.Names}}' | grep -m1 -i mariadb"
 
 # The credentials come off the host's own mysql wrapper — the same source
 # modules/maria/credentials.py reads — so no password ever travels in a
-# request. `sed` pulls the -u/-p pair out of the line that invokes the client.
+# request. `grep` pulls the -u/-p pair out of the line that invokes the client.
+#
+# Not every appliance HAS a -u/-p pair to find. Confirmed on a second lab CC
+# (10.205.189.21, an HA-config appliance): its /usr/local/bin/mysql wrapper is
+# a bare `mysql "$@"` with nothing embedded at all — the product's own scripts
+# on that box (net_utils.sh, lls_utils.sh) call `mysql -u root` with NO
+# password, relying on MariaDB's unix_socket auth plugin to authenticate root
+# by OS user once `docker exec` has already put us inside the container as
+# root. Verified directly: `mariadb-check -uroot --check` succeeds there with
+# no password at all. So when the wrapper yields nothing, fall back to trying
+# root with no password — a real credential mismatch on some other box then
+# surfaces as mariadb-check's own access-denied message instead of a
+# misleading "no credentials" refusal, which is a strictly more honest
+# failure. This account is not looked up anywhere else in the app — it is
+# only ever used inside a `docker exec` on THIS host, over the unix socket,
+# never over the network, so it grants nothing a network attacker could reach.
 _MARIA_CREDS = (
     "creds=$(grep -m1 -E -- '-u[^ ]+ +-p[^ ]+' /usr/local/bin/mysql "
-    "| grep -o -E -- '-u[^ ]+ +-p[^ ]+')"
+    "| grep -o -E -- '-u[^ ]+ +-p[^ ]+'); "
+    "[ -n \"$creds\" ] || creds='-uroot'"
 )
 
 
@@ -172,9 +188,47 @@ def _cmd_disk_largest(args: dict) -> str:
 
 
 def _cmd_maria_check(_args: dict) -> str:
+    # _MARIA_CREDS now always leaves $creds non-empty (its own root fallback),
+    # so a genuine credential problem shows up as mariadb-check's own
+    # access-denied output below, not as a refusal here.
     return (f"c=$({_FIND_MARIA}); [ -n \"$c\" ] || {{ echo 'no mariadb container' >&2; exit 3; }}; "
-            f"{_MARIA_CREDS}; [ -n \"$creds\" ] || {{ echo 'no credentials in /usr/local/bin/mysql' >&2; exit 4; }}; "
+            f"{_MARIA_CREDS}; "
             f"docker exec \"$c\" sh -c \"mariadb-check $creds --check --all-databases\" 2>&1")
+
+
+# What modules/maria/credentials.py needs is different from _cmd_maria_check's
+# own: that op runs INSIDE the container via `docker exec`, where MariaDB's
+# unix_socket plugin authenticates root by OS user with no password at all —
+# fine for a one-off check, useless for modules/maria/client.py's real TCP
+# connection, which unix_socket auth cannot answer regardless of password.
+#
+# _MARIA_CREDS's `-uroot` fallback (no password) is therefore not good enough
+# here. When the wrapper has nothing, this instead reads the MariaDB
+# container's own MARIADB_ROOT_PASSWORD environment variable — confirmed on
+# the same HA-config lab CC (10.205.189.21) to be root's real, network-capable
+# password (`mariadb -h127.0.0.1 -uroot -p<that value>` succeeds over TCP,
+# where a bare `-uroot` does not). Reading exactly that one named variable
+# from exactly the container _FIND_MARIA already validated — not a general
+# `docker inspect`, which could hand back unrelated secrets from that
+# container's other environment variables.
+_MARIA_CREDS_NETWORK = (
+    _MARIA_CREDS + "; "
+    "u=$(printf '%s' \"$creds\" | grep -o -E -- '-u[^ ]+' | cut -c3-); "
+    "p=$(printf '%s' \"$creds\" | grep -o -E -- '-p[^ ]+' | cut -c3-); "
+    "if [ -z \"$p\" ]; then "
+    "c=$(" + _FIND_MARIA + "); "
+    "if [ -n \"$c\" ]; then "
+    "rp=$(docker inspect \"$c\" "
+    "--format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null "
+    "| grep -m1 '^MARIADB_ROOT_PASSWORD=' | cut -d= -f2-); "
+    "[ -n \"$rp\" ] && u=root && p=\"$rp\"; "
+    "fi; fi"
+)
+
+
+def _cmd_maria_creds(_args: dict) -> str:
+    return (f"{_MARIA_CREDS_NETWORK}; "
+            f"[ -n \"$u\" ] && [ -n \"$p\" ] && printf '%s\\t%s' \"$u\" \"$p\"")
 
 
 # ── Connectivity probing ─────────────────────────────────────────────────────
@@ -279,6 +333,12 @@ OPS: dict[str, dict] = {
         "command": _cmd_maria_check,
         "timeout": 300,
         "what": "check every MariaDB table for corruption",
+    },
+    "maria.creds": {
+        "args": {},
+        "command": _cmd_maria_creds,
+        "timeout": 20,
+        "what": "discover which account reaches this CC's MariaDB over the network",
     },
     # The one operation in this table that CHANGES the appliance. Reaching it
     # needs two keys turned independently: the app's `system.storage.delete`

@@ -1261,6 +1261,11 @@
       <div class="d-flex align-items-center gap-2 mb-2">
         <h5 class="mb-0"><i class="bi bi-diagram-3 me-2 text-primary"></i>MariaDB — Schemas &amp; Tables</h5>
         <span id="mariaServer" class="badge bg-secondary" style="font-size:.65rem;"></span>
+        <button id="mariaAccountBtn" class="btn btn-sm btn-outline-secondary py-0 px-2 d-none"
+                onclick="openMariaCredentialsModal()" style="font-size:.7rem;"
+                title="Which account this tool uses to reach MariaDB — click to change it">
+          <i class="bi bi-key me-1"></i><span id="mariaAccountLabel"></span>
+        </button>
         <div class="ms-auto d-flex align-items-center gap-2">
           <div class="form-check form-switch mb-0">
             <input class="form-check-input" type="checkbox" id="mariaShowSystem"

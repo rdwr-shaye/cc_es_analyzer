@@ -118,9 +118,43 @@ FIND_MARIA = "docker ps --format '{{.Names}}' | grep -m1 -i mariadb"
 # Credentials come off the host's own mysql wrapper, the same file
 # modules/maria/credentials.py reads. They are read HERE, on the host, so no
 # password ever appears in a request or a result.
+#
+# Not every appliance has a -u/-p pair to find — confirmed on an HA-config lab
+# CC (10.205.189.21) whose wrapper is a bare `mysql "$@"`, relying on
+# MariaDB's unix_socket auth plugin to authenticate root by OS user once
+# `docker exec` has already put us inside the container as root (verified:
+# `mariadb-check -uroot` succeeds there with no password). So when nothing is
+# found, fall back to root with no password rather than refusing outright — a
+# real mismatch then surfaces as mariadb-check's own access-denied message.
+# This account is only ever used inside a docker exec on THIS host, over the
+# unix socket, never over the network.
 MARIA_CREDS = (
     "creds=$(grep -m1 -E -- '-u[^ ]+ +-p[^ ]+' /usr/local/bin/mysql "
-    "| grep -o -E -- '-u[^ ]+ +-p[^ ]+')"
+    "| grep -o -E -- '-u[^ ]+ +-p[^ ]+'); "
+    "[ -n \"$creds\" ] || creds='-uroot'"
+)
+
+# What modules/maria/credentials.py needs for the app's actual TCP connection
+# is different from MARIA_CREDS's own -uroot fallback: root-via-unix_socket
+# authenticates by OS user through `docker exec`, but that plugin does not
+# answer a real network connection at all, regardless of password. So when the
+# wrapper has nothing, this instead reads the MariaDB container's own
+# MARIADB_ROOT_PASSWORD environment variable — confirmed on the same
+# HA-config lab CC to be root's real, network-capable password. Reading
+# exactly that one named variable from exactly the container FIND_MARIA
+# already validated, not a general docker inspect.
+MARIA_CREDS_NETWORK = (
+    MARIA_CREDS + "; "
+    "u=$(printf '%s' \"$creds\" | grep -o -E -- '-u[^ ]+' | cut -c3-); "
+    "p=$(printf '%s' \"$creds\" | grep -o -E -- '-p[^ ]+' | cut -c3-); "
+    "if [ -z \"$p\" ]; then "
+    "c=$(" + FIND_MARIA + "); "
+    "if [ -n \"$c\" ]; then "
+    "rp=$(docker inspect \"$c\" "
+    "--format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null "
+    "| grep -m1 '^MARIADB_ROOT_PASSWORD=' | cut -d= -f2-); "
+    "[ -n \"$rp\" ] && u=root && p=\"$rp\"; "
+    "fi; fi"
 )
 
 
@@ -175,11 +209,17 @@ def build(op: str, args: dict, compose_file: str) -> str:
                 f"| head -n {args['n']}")
 
     if op == "maria.check":
+        # MARIA_CREDS now always leaves $creds non-empty (its own root
+        # fallback), so a genuine credential problem shows up as
+        # mariadb-check's own access-denied output below, not a refusal here.
         return (f"c=$({FIND_MARIA}); "
                 f"[ -n \"$c\" ] || {{ echo 'no mariadb container' >&2; exit 3; }}; "
                 f"{MARIA_CREDS}; "
-                f"[ -n \"$creds\" ] || {{ echo 'no credentials in /usr/local/bin/mysql' >&2; exit 4; }}; "
                 f"docker exec \"$c\" sh -c \"mariadb-check $creds --check --all-databases\" 2>&1")
+
+    if op == "maria.creds":
+        return (f"{MARIA_CREDS_NETWORK}; "
+                f"[ -n \"$u\" ] && [ -n \"$p\" ] && printf '%s\\t%s' \"$u\" \"$p\"")
 
     raise Refused(f"unknown operation {op!r}")
 
@@ -235,6 +275,7 @@ OPS = {
                                 "n": (v_int(1, 100), 20)},
                        "timeout": 900},
     "maria.check":    {"args": {}, "timeout": 300},
+    "maria.creds":    {"args": {}, "timeout": 20},
     # The only operation here that CHANGES anything. Off unless the agent was
     # started with --allow-delete; see delete_file().
     "file.delete":    {"args": {"path": (v_path, None)}, "timeout": 60},

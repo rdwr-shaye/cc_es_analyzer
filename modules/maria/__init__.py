@@ -26,7 +26,7 @@ def _module() -> Module:
     # Imported inside the function for the same reason as modules/es: the
     # routers import this package's siblings, so importing them at module scope
     # would be a cycle.
-    from modules.maria.routers import browse, edit, query
+    from modules.maria.routers import browse, credentials, edit, query
 
     return Module(
         id="maria",
@@ -60,6 +60,7 @@ def _module() -> Module:
         ),
         routers=(
             (browse.router, "maria.read"),
+            (credentials.router, "maria.read"),
             (query.router, "maria.query.raw"),
             (edit.router, "maria.write"),
         ),

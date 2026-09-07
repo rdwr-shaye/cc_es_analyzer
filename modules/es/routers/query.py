@@ -77,6 +77,13 @@ def connect(req: ConnectionRequest):
             client.ssh = ({"user": req.ssh_user, "password": req.ssh_password,
                            "port": req.ssh_port} if req.ssh_enabled and req.ssh_user
                           else None)
+            # MariaDB's resolved account is cached per process, not re-checked
+            # per connection (modules/maria/credentials.py) — without this, a
+            # session that switches CCs would keep the previous appliance's
+            # account and either fail against the new one or, worse, succeed
+            # against it by coincidence.
+            from modules.maria import credentials as maria_credentials
+            maria_credentials.reset()
         except Exception:      # never fail a good connection over bookkeeping
             logger.warning("[connect] could not record CC target", exc_info=True)
         return {"connected": True,

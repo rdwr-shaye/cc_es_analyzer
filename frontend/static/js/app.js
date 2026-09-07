@@ -8090,6 +8090,15 @@ async function loadMariaHealth() {
   }
   const badge = document.getElementById('mariaServer');
   if (badge) badge.textContent = ok ? `${d.version} · ${d.host}:${d.port}` : '';
+
+  // The account button: always offered once a CC is connected, whether or
+  // not the connection succeeded — a wrong account is exactly the reason
+  // someone would open it, and hiding the fix behind a working connection
+  // would be backwards.
+  const acctBtn = document.getElementById('mariaAccountBtn');
+  const acctLabel = document.getElementById('mariaAccountLabel');
+  if (acctBtn) acctBtn.classList.toggle('d-none', !d || !d.host);
+  if (acctLabel) acctLabel.textContent = (d && d.user) ? d.user : 'account';
 }
 
 function _mariaError(id, msg) {
@@ -8097,6 +8106,105 @@ function _mariaError(id, msg) {
   if (!box) return;
   box.classList.toggle('d-none', !msg);
   box.textContent = msg || '';
+}
+
+/** The account modal. Discovery (modules/maria/credentials.py) tries hard,
+ *  but two lab CCs already needed two entirely different conventions to find
+ *  the right one — an operator who knows better needs to be able to just say
+ *  so, without a redeploy. Reads /api/maria/credentials fresh on every open
+ *  rather than reusing loadMariaHealth()'s payload, because that endpoint
+ *  also reports whether an override is set, which the health check does not. */
+async function openMariaCredentialsModal() {
+  document.querySelector('.rt-modal-overlay.rt-mariacreds')?.remove();
+  const wrap = document.createElement('div');
+  wrap.className = 'rt-modal-overlay rt-mariacreds';
+  wrap.innerHTML = `<div class="rt-modal" style="max-width:420px;">
+      <div class="rt-modal-title"><i class="bi bi-key me-1"></i>MariaDB account</div>
+      <div class="rt-modal-body">
+        <div class="small text-secondary mb-3" data-role="status">Loading…</div>
+        <div class="mb-2">
+          <label class="form-label small mb-1">Username</label>
+          <input type="text" class="form-control form-control-sm" data-role="user"
+                 autocomplete="off">
+        </div>
+        <div class="mb-1">
+          <label class="form-label small mb-1">Password</label>
+          <input type="password" class="form-control form-control-sm" data-role="pass"
+                 autocomplete="new-password">
+        </div>
+        <div class="form-text mb-0" style="font-size:.7rem;">
+          Saved for this CC only, and used the next time this tool connects —
+          no restart needed. Leave both fields as shown and click Save to
+          re-save what discovery already found; use Clear to go back to
+          automatic discovery.
+        </div>
+      </div>
+      <div class="rt-modal-actions">
+        <button class="btn btn-sm btn-outline-danger me-auto" data-act="clear">Clear override</button>
+        <button class="btn btn-sm btn-outline-secondary" data-act="cancel">Cancel</button>
+        <button class="btn btn-sm btn-primary" data-act="save">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+
+  const done = () => { wrap.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') done(); };
+  document.addEventListener('keydown', onKey);
+  wrap.addEventListener('click', e => { if (e.target === wrap) done(); });
+  wrap.querySelector('[data-act="cancel"]').addEventListener('click', done);
+
+  const status = wrap.querySelector('[data-role="status"]');
+  const userBox = wrap.querySelector('[data-role="user"]');
+  const passBox = wrap.querySelector('[data-role="pass"]');
+  let host = '';
+
+  const d = await api('/api/maria/credentials');
+  if (!d || !d.host) {
+    status.textContent = (d && d.error) || 'no CC is connected — connect to one first.';
+    wrap.querySelector('[data-act="save"]').disabled = true;
+    wrap.querySelector('[data-act="clear"]').disabled = true;
+    return;
+  }
+  host = d.host;
+  userBox.value = d.effective_user || '';
+  status.innerHTML = d.override.set
+    ? `<b>${esc(host)}</b> — using an operator-set override (<code>${esc(d.override.user)}</code>).`
+    : `<b>${esc(host)}</b> — currently using <code>${esc(d.effective_user)}</code>, `
+      + `${esc(d.effective_source)}.`;
+  wrap.querySelector('[data-act="clear"]').classList.toggle('d-none', !d.override.set);
+
+  wrap.querySelector('[data-act="save"]').addEventListener('click', async () => {
+    const user = userBox.value.trim();
+    const password = passBox.value;
+    if (!user || !password) {
+      showToast('Both a username and a password are required', 'bg-warning');
+      return;
+    }
+    const r = await api('/api/maria/credentials', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user, password }),
+    });
+    if (!r || r.error) {
+      showToast((r && r.error) || 'could not save the override', 'bg-danger');
+      return;
+    }
+    showToast(`MariaDB account for ${host} set to ${user}`, 'bg-success');
+    done();
+    loadMariaHealth();
+    if (currentView === 'maria' || currentView === 'mariaquery') loadMariaSchemas();
+  });
+
+  wrap.querySelector('[data-act="clear"]').addEventListener('click', async () => {
+    const r = await api('/api/maria/credentials', { method: 'DELETE' });
+    if (!r || r.error) {
+      showToast((r && r.error) || 'could not clear the override', 'bg-danger');
+      return;
+    }
+    showToast('MariaDB account override cleared — back to automatic discovery', 'bg-info');
+    done();
+    loadMariaHealth();
+    if (currentView === 'maria' || currentView === 'mariaquery') loadMariaSchemas();
+  });
 }
 
 async function loadMariaSchemas() {
