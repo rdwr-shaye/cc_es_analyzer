@@ -105,9 +105,20 @@ def check_connectivity(target: str = Query(default=""),
     # while every individual probe still fell back to local. The same
     # ContextVar hazard modules/system/routers/dashboard.py's _in_context
     # already exists to close — this endpoint just never got it.
-    ctx = contextvars.copy_context()
+    #
+    # ONE COPY PER TASK, not one shared copy: contextvars.Context.run() is not
+    # safe to call concurrently on the SAME Context object from more than one
+    # thread — it raises "cannot enter context: ... is already entered" the
+    # moment two probes overlap. Caught by this fix's own first deploy, which
+    # only tested a single target and so never had two threads racing to enter
+    # one shared context. Each copy_context() call here happens sequentially,
+    # in this request's own thread, before anything reaches the pool — cheap,
+    # and each resulting Context is independent even though all snapshot the
+    # same bindings.
+    task_ctxs = [contextvars.copy_context() for _ in chosen]
     with ThreadPoolExecutor(max_workers=min(8, len(chosen))) as pool:
-        results = list(pool.map(lambda t: ctx.run(_probe, t), chosen))
+        results = list(pool.map(lambda pair: pair[0].run(_probe, pair[1]),
+                                zip(task_ctxs, chosen)))
 
     summary = probes.roll_up(results)
     # WHOSE connectivity this describes. Embedded the answer is "this CC", and
