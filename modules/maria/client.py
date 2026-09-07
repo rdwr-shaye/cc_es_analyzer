@@ -178,9 +178,17 @@ def _route(host: str) -> tuple[str, int, str]:
     port = settings.maria_port
     cached = _route_cache.get(host)
     if cached:
+        active = ssh_tunnel.active_tunnel(_TUNNEL)
         # A dead tunnel still accepts connections locally and then hangs, so
-        # confirm it is alive rather than trusting the cache.
-        if cached[0] != "127.0.0.1" or ssh_tunnel.active_tunnel(_TUNNEL) is not None:
+        # confirm it is alive — and, since the "maria" tunnel is ONE named
+        # slot shared across whichever CC is currently connected (not one
+        # per host), confirm it is STILL pointed at the CC this cache entry
+        # was recorded for. Switching from CC A to CC B and back left A's
+        # entry pointing at a local port that now forwards to B instead —
+        # verified live: reconnecting to a previously-visited CC got
+        # "Connection refused", because the cached port was answering for a
+        # different appliance's tunnel by then.
+        if cached[0] != "127.0.0.1" or (active is not None and active.meta.get("ssh_host") == host):
             return cached[0], cached[1], ("direct" if cached[0] == host else "SSH tunnel")
         _route_cache.pop(host, None)
 

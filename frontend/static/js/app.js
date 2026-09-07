@@ -7770,6 +7770,7 @@ function initMariaPanes() {
     const jump = ev.target.closest('[data-goto-table]');
     if (jump) { selectMariaTable(jump.dataset.gotoTable); return; }
     if (ev.target.closest('[data-maria-cols]')) { openMariaColumnPicker(); return; }
+    if (ev.target.closest('[data-maria-popout]')) { popOutSqlResults('maria-table'); return; }
     if (ev.target.closest('[data-join-build]')) { openMariaJoinBuilder(); return; }
     if (ev.target.closest('[data-join-clear]')) {
       mariaJoinSel.clear(); renderMariaDetail(); return;
@@ -8222,6 +8223,29 @@ async function loadMariaSchemas() {
   mariaSchemas = d.schemas || [];
   renderMariaSchemas();
   _fillMariaQuerySchemas();
+
+  // "Refresh" means refresh what is actually on screen, not just this pane.
+  // Without this, a table's row-estimate (InnoDB's own approximation, only
+  // updated when MariaDB next runs ANALYZE) could look permanently stuck at
+  // whatever it read the moment the schema was first opened, and an already-
+  // open table's own sample rows would go stale the moment something changed
+  // the data behind them — confirmed live: a table written to right after
+  // being opened kept showing its old row count no matter how many times
+  // Refresh was clicked, because Refresh never actually asked about it again.
+  if (mariaSchema) await _refreshMariaTableList(mariaSchema);
+  if (mariaTable) await selectMariaTable(mariaTable);
+}
+
+/** Re-fetch the table list for `name` WITHOUT selectMariaSchema's side
+ *  effects (clearing the open table, resetting the search box) — those are
+ *  right for a deliberate schema change, wrong for a background refresh of
+ *  the schema that is already open. */
+async function _refreshMariaTableList(name) {
+  const d = await api(`/api/maria/tables?schema=${encodeURIComponent(name)}`);
+  if (mariaSchema !== name) return;   // superseded by a schema change meanwhile
+  if (!d || d.error) return;          // keep showing the last good list
+  mariaTableList = d.tables || [];
+  renderMariaTables();
 }
 
 function renderMariaSchemas() {
@@ -8383,9 +8407,15 @@ function renderMariaDetail(sampleError) {
                 title="Choose which columns to show">
           <i class="bi bi-eye me-1"></i>Columns
         </button>
+        <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+                data-maria-popout="1" style="font-size:.7rem;text-transform:none;"
+                title="Open these rows in a separate window">
+          <i class="bi bi-box-arrow-up-right"></i>
+        </button>
       </div>
       <div class="sql-grid-scroll">${rowsHtml}</div>
     </div>`;
+  syncSqlPopout();
 }
 
 /** A dragged height for a section, if it has one. */
@@ -8575,15 +8605,40 @@ function _mariaSelectedJoins() {
   return picked;
 }
 
-/** Build the SELECT. `opts` = {joinType, where[], limit}. */
+/** Build the SELECT. `opts` = {joinType, where[], limit, groups, hidden}.
+ *
+ * `groups` is _mariaJoinColumnCatalog()'s output — one entry per table in
+ * the query, base first, then one per selected join in the same order
+ * _mariaSelectedJoins() produces them (both iterate the same Set, so the
+ * order always lines up). `hidden` is a Set of "alias.column" keys the
+ * column picker turned off.
+ *
+ * Every table's FULL column list is selected by default now, not just the
+ * join key — a join exists to answer questions about the OTHER table, and
+ * `user_settings.name` is a far more likely thing to want than
+ * `user_settings.row_id` alone. `SELECT a.*, b.*` was ruled out for the same
+ * reason as before (the disambiguated names would depend on the driver, not
+ * the query), so each column is still selected and aliased explicitly —
+ * there are just more of them, and the picker is what keeps a 26+10-column
+ * join from being unreadable by default.
+ */
 function _buildMariaJoinSql(opts) {
   const taken = new Set();
   const baseAlias = _mariaAlias(mariaTable, taken);
   const jt = opts.joinType === 'INNER' ? 'INNER JOIN' : 'LEFT JOIN';
+  const hidden = opts.hidden || new Set();
+  const groups = opts.groups || [];
 
-  const selects = [`${_q(baseAlias)}.*`];
+  const baseCols = (groups[0]?.columns || mariaColumns.map(c => c.name))
+    .filter(c => !hidden.has(`${baseAlias}.${c}`));
+  // A query with no columns at all is not one anyone meant to run — if every
+  // base column got hidden, fall back to *, rather than produce empty SQL.
+  const selects = baseCols.length
+    ? baseCols.map(c => `${_q(baseAlias)}.${_q(c)}`)
+    : [`${_q(baseAlias)}.*`];
   const joins = [];
 
+  let gi = 1;
   for (const { side, f } of _mariaSelectedJoins()) {
     // Outbound: we hold the foreign key and point at their key.
     // Inbound:  they hold the foreign key and point back at ours.
@@ -8600,14 +8655,12 @@ function _buildMariaJoinSql(opts) {
     joins.push(`  ${jt} ${_q(otherSchema)}.${_q(otherTable)} AS ${_q(alias)}\n`
              + `    ON ${on}`);
 
-    // Only the join columns from the other side, each explicitly aliased.
-    // `SELECT a.*, b.*` is not wrong — the driver disambiguates a repeated
-    // name to `user_settings.row_id` rather than dropping it — but it is worse
-    // in two ways: it drags in every column of every joined table (26 + 10 for
-    // this one pair alone), and the disambiguated names depend on the driver's
-    // behaviour rather than on the query. An explicit alias is what the query
-    // itself says the column is called.
-    for (const c of (side === 'out' ? f.ref_columns : f.columns)) {
+    // Unlike the base table, a joined table selecting NOTHING is a legitimate
+    // choice — "does a match exist" without wanting any of its columns — so
+    // no *-fallback here.
+    const group = groups[gi++];
+    const allCols = group?.columns || (side === 'out' ? f.ref_columns : f.columns);
+    for (const c of allCols.filter(c => !hidden.has(`${alias}.${c}`))) {
       selects.push(`${_q(alias)}.${_q(c)} AS ${_q(alias + '__' + c)}`);
     }
   }
@@ -8754,7 +8807,13 @@ async function openMariaJoinBuilder() {
           <div class="mj-where"></div>
         </div>
 
-        <div class="small fw-semibold text-secondary mb-1">Generated SQL — edit freely</div>
+        <div class="d-flex align-items-center gap-2 mb-1">
+          <span class="small fw-semibold text-secondary">Generated SQL — edit freely</span>
+          <button class="btn btn-sm btn-outline-secondary py-0 px-2 ms-auto mj-cols"
+                  style="font-size:.7rem;" title="Choose which columns to include, per table">
+            <i class="bi bi-eye me-1"></i>Columns
+          </button>
+        </div>
         <!-- wrap=off: soft-wrapping breaks the indentation that makes a join
              readable, which is the whole point of showing it. -->
         <textarea class="form-control font-monospace mj-sql" rows="12" wrap="off"
@@ -8777,11 +8836,17 @@ async function openMariaJoinBuilder() {
   let touched = false;                 // stop regenerating over a hand-edit
   sqlBox.addEventListener('input', () => { touched = true; });
 
+  // Which "alias.column" pairs the picker turned off — transient to this one
+  // dialog, the same way mariaJoinSel itself does not survive closing it.
+  const hiddenJoinCols = new Set();
+
   const regen = () => {
     if (touched) return;
     sqlBox.value = _buildMariaJoinSql({
       joinType: wrap.querySelector('.mj-jointype').value,
       limit: wrap.querySelector('.mj-limit').value,
+      groups: colGroups,
+      hidden: hiddenJoinCols,
       where: [...wrap.querySelectorAll('.mj-wrow')].map(row => ({
         sql: _mariaWhereSql(row.querySelector('.mj-col').value,
                             row.querySelector('.mj-op').value,
@@ -8838,6 +8903,22 @@ async function openMariaJoinBuilder() {
   wrap.addEventListener('input', regen);
   wrap.addEventListener('change', regen);
   wrap.addEventListener('click', async ev => {
+    if (ev.target.closest('.mj-cols')) {
+      // Flat, but built table-by-table in order — base first, then each join
+      // in the order they were ticked — so it reads as grouped without
+      // needing the picker itself to know about groups at all.
+      const columns = colGroups.flatMap(g => g.columns.map(c => `${g.alias}.${c}`));
+      _openColumnPicker({
+        title: `Columns — ${mariaTable} join`,
+        columns, locked: [], hidden: hiddenJoinCols,
+        onChange: (hidden) => {
+          hiddenJoinCols.clear();
+          for (const h of hidden) hiddenJoinCols.add(h);
+          regen();
+        },
+      });
+      return;
+    }
     if (ev.target.closest('.mj-addwhere')) { addWhere(); regen(); return; }
     if (ev.target.closest('.mj-del')) {
       ev.target.closest('.mj-wrow').remove(); regen(); return;
@@ -8916,11 +8997,16 @@ function openMariaColumnPicker() {
  * "select all" can act on just the matches.
  */
 function _openColumnPicker(opts) {
-  document.querySelector('.rt-modal-overlay.rt-mariacols')?.remove();
+  // `doc` lets this same picker be opened from the SQL results pop-out
+  // window (popOutSqlResults below) rather than only the main document —
+  // the modal then belongs to whichever window the user is actually looking
+  // at instead of yanking their focus back to the other one.
+  const doc = opts.doc || document;
+  doc.querySelector('.rt-modal-overlay.rt-mariacols')?.remove();
   const locked = new Set(opts.locked || []);
   let hidden = new Set(opts.hidden || []);
 
-  const wrap = document.createElement('div');
+  const wrap = doc.createElement('div');
   wrap.className = 'rt-modal-overlay rt-mariacols';
   wrap.innerHTML = `<div class="rt-modal rt-modal-fields">
       <div class="rt-modal-title"><i class="bi bi-eye me-1"></i>${esc(opts.title)}</div>
@@ -8938,11 +9024,11 @@ function _openColumnPicker(opts) {
         <button class="btn btn-sm btn-secondary" data-act="close">Close</button>
       </div>
     </div>`;
-  document.body.appendChild(wrap);
+  doc.body.appendChild(wrap);
 
-  const done = () => { wrap.remove(); document.removeEventListener('keydown', onKey); };
+  const done = () => { wrap.remove(); doc.removeEventListener('keydown', onKey); };
   const onKey = e => { if (e.key === 'Escape') done(); };
-  document.addEventListener('keydown', onKey);
+  doc.addEventListener('keydown', onKey);
 
   // What the search box is currently narrowing to. The bulk buttons act on
   // THESE, so "search 'date' then Unselect all" hides only the date columns —
@@ -9708,6 +9794,7 @@ async function runMariaQuery() {
     _mariaError('mariaQueryError', (d && d.error) || 'query failed');
     out.innerHTML = '<div class="text-secondary small p-3">—</div>';
     document.getElementById('mariaQueryColsBtn')?.classList.add('d-none');
+    document.getElementById('mariaQueryPopoutBtn')?.classList.add('d-none');
     return;
   }
 
@@ -9720,6 +9807,8 @@ async function runMariaQuery() {
   _mariaQueryHidden = new Set([..._mariaQueryHidden].filter(c => _mariaQueryCols.includes(c)));
 
   document.getElementById('mariaQueryColsBtn')
+    ?.classList.toggle('d-none', !_mariaQueryCols.length);
+  document.getElementById('mariaQueryPopoutBtn')
     ?.classList.toggle('d-none', !_mariaQueryCols.length);
   // The datalist behind the "add condition" row comes from the result columns.
   syncMariaQueryConditions();
@@ -9739,6 +9828,7 @@ function renderMariaQueryResults() {
 
   out.innerHTML = _mariaTable(_mariaQueryCols, _mariaQueryRows, d.truncated,
                               { hidden: _mariaQueryHidden, scroll: true });
+  syncSqlPopout();
 }
 
 /** Column picker for the query results. Same furniture as the browser's, plus
@@ -9819,6 +9909,7 @@ function initPgPanes() {
     const jump = ev.target.closest('[data-goto-table]');
     if (jump) { selectPgTable(jump.dataset.gotoTable); return; }
     if (ev.target.closest('[data-pg-cols]')) { openPgColumnPicker(); return; }
+    if (ev.target.closest('[data-pg-popout]')) { popOutSqlResults('pg-table'); return; }
   });
   detail?.addEventListener('dblclick', ev => {
     const td = ev.target.closest('td[data-editcol]');
@@ -10102,6 +10193,26 @@ async function loadPgDatabases() {
   pgDatabases = d.databases || [];
   renderPgDatabases();
   _fillPgQuerySchemas();
+
+  // Same reasoning as loadMariaSchemas: "Refresh" means refresh what is
+  // actually on screen. Without this, a table's row-estimate (n_live_tup,
+  // only updated when PostgreSQL next runs autovacuum/ANALYZE) could look
+  // permanently stuck, and an already-open table's own sample rows would go
+  // stale the moment something changed the data behind them.
+  if (pgDatabase) await _refreshPgTableList(pgDatabase);
+  if (pgTable) await selectPgTable(pgTable);
+}
+
+/** Re-fetch the table list for `name` WITHOUT selectPgDatabase's side
+ *  effects (clearing the open table, resetting the search box) — those are
+ *  right for a deliberate database change, wrong for a background refresh of
+ *  the database that is already open. */
+async function _refreshPgTableList(name) {
+  const d = await api(`/api/pg/tables?database=${encodeURIComponent(name)}`);
+  if (pgDatabase !== name) return;   // superseded by a database change meanwhile
+  if (!d || d.error) return;         // keep showing the last good list
+  pgTableList = d.tables || [];
+  renderPgTables();
 }
 
 function renderPgDatabases() {
@@ -10244,9 +10355,15 @@ function renderPgDetail(sampleError) {
                 title="Choose which columns to show">
           <i class="bi bi-eye me-1"></i>Columns
         </button>
+        <button class="btn btn-sm btn-outline-secondary py-0 px-2"
+                data-pg-popout="1" style="font-size:.7rem;text-transform:none;"
+                title="Open these rows in a separate window">
+          <i class="bi bi-box-arrow-up-right"></i>
+        </button>
       </div>
       <div class="sql-grid-scroll">${rowsHtml}</div>
     </div>`;
+  syncSqlPopout();
 }
 
 function _pgSectionStyle(id) {
@@ -10639,6 +10756,7 @@ async function runPgQuery() {
     _pgError('pgQueryError', (d && d.error) || 'query failed');
     out.innerHTML = '<div class="text-secondary small p-3">—</div>';
     document.getElementById('pgQueryColsBtn')?.classList.add('d-none');
+    document.getElementById('pgQueryPopoutBtn')?.classList.add('d-none');
     return;
   }
 
@@ -10648,6 +10766,8 @@ async function runPgQuery() {
   _pgQueryHidden = new Set([..._pgQueryHidden].filter(c => _pgQueryCols.includes(c)));
 
   document.getElementById('pgQueryColsBtn')
+    ?.classList.toggle('d-none', !_pgQueryCols.length);
+  document.getElementById('pgQueryPopoutBtn')
     ?.classList.toggle('d-none', !_pgQueryCols.length);
   renderPgQueryResults();
 }
@@ -10665,6 +10785,7 @@ function renderPgQueryResults() {
 
   out.innerHTML = _pgTable(_pgQueryCols, _pgQueryRows, d.truncated,
                            { hidden: _pgQueryHidden, scroll: true });
+  syncSqlPopout();
 }
 
 function openPgQueryColumnPicker() {
@@ -10675,6 +10796,262 @@ function openPgQueryColumnPicker() {
     hidden: _pgQueryHidden,
     onChange: (hidden) => { _pgQueryHidden = hidden; renderPgQueryResults(); },
   });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   SQL results — dock-aside viewer (MariaDB + PostgreSQL)
+   ══════════════════════════════════════════════════════════════════════════
+   The same convenience ES's results pop-out offers — keep the data visible
+   in its own window while working elsewhere — for the four SQL result grids:
+   table content and query results, for both stores.
+
+   Deliberately a fresh, smaller build rather than a parameterisation of ES's
+   pop-out (frontend/static/js/app.js's RV_QUERY/RV_INDEX machinery). That one
+   carries write-mode, ES-query-generation-from-filters and group-by
+   aggregation — none of which have a SQL equivalent — plus row/column
+   selection and sort/filter state per viewer. Threading "not applicable
+   here" through all of it would cost more than it would share. What IS
+   shared: _openColumnPicker (already generic), the sql-* CSS classes, and
+   the same window.open shell shape.
+
+   One popout window, reused across all four sources — the same way ES
+   reuses one window between the Query Editor and Index Detail — selected by
+   `sqlActiveViewerKey`. Its buttons call back via `window.opener.<fn>()`
+   rather than copying function references onto the popout the way ES does:
+   simpler to reason about, since every action explicitly says which
+   document it means to touch (sqlResultsWindow.document) instead of relying
+   on which window a copied closure happened to remember.
+*/
+let sqlResultsWindow = null;
+let sqlPopoutView = 'table';        // 'table' | 'json' | 'csv'
+let sqlActiveViewerKey = null;      // key into _sqlViewers
+
+const _sqlViewers = {
+  'maria-table': {
+    label: () => `${mariaSchema}.${mariaTable}`,
+    rows: () => mariaSample?.rows || [],
+    cols: () => mariaSample?.columns || [],
+    hidden: () => _mariaHiddenSet(),
+    onHiddenChange: (hidden) => {
+      mariaHiddenCols[_mariaTableKey()] = [...hidden];
+      _mariaSave('ccadmin.maria.hiddenCols', mariaHiddenCols);
+      renderMariaDetail();
+    },
+    refresh: () => selectMariaTable(mariaTable),
+  },
+  'maria-query': {
+    label: () => 'MariaDB query',
+    rows: () => _mariaQueryRows,
+    cols: () => _mariaQueryCols,
+    hidden: () => _mariaQueryHidden,
+    onHiddenChange: (hidden) => { _mariaQueryHidden = hidden; renderMariaQueryResults(); },
+    refresh: () => runMariaQuery(),
+  },
+  'pg-table': {
+    label: () => `${pgDatabase}.${pgTable}`,
+    rows: () => pgSample?.rows || [],
+    cols: () => pgSample?.columns || [],
+    hidden: () => _pgHiddenSet(),
+    onHiddenChange: (hidden) => {
+      pgHiddenCols[_pgTableKey()] = [...hidden];
+      _mariaSave('ccadmin.pg.hiddenCols', pgHiddenCols);
+      renderPgDetail();
+    },
+    refresh: () => selectPgTable(pgTable),
+  },
+  'pg-query': {
+    label: () => 'PostgreSQL query',
+    rows: () => _pgQueryRows,
+    cols: () => _pgQueryCols,
+    hidden: () => _pgQueryHidden,
+    onHiddenChange: (hidden) => { _pgQueryHidden = hidden; renderPgQueryResults(); },
+    refresh: () => runPgQuery(),
+  },
+};
+
+function _sqlCurrentViewer() {
+  return sqlActiveViewerKey ? _sqlViewers[sqlActiveViewerKey] : null;
+}
+
+/** One cell, as plain text — shared by the table view and CSV export. A blob
+ *  marker (modules/maria and modules/pg both send `{__blob__:true,bytes:N}`
+ *  rather than raw bytes) gets a description instead of [object Object];
+ *  the live preview/download button next to it in the MAIN grid is not
+ *  reproduced here — this window is a read-only convenience view, not a
+ *  second interactive copy of the screen. */
+function _sqlCellText(v) {
+  if (v === null || v === undefined) return 'null';
+  if (typeof v === 'object') {
+    return v.__blob__ ? `<binary: ${_fmtBytes(v.bytes || 0)}>` : JSON.stringify(v);
+  }
+  const s = String(v);
+  return s.length > 200 ? s.slice(0, 200) + '…' : s;
+}
+
+/** Read-only grid — no cell editing, no blob viewer button, for the same
+ *  reason _sqlCellText doesn't reproduce one: this window is for looking at
+ *  data conveniently, not a second place to change it. */
+function _sqlPopoutTableHtml(cols, rows, hidden) {
+  if (!rows.length) return '<div class="text-secondary p-3">No rows.</div>';
+  const visible = cols.filter(c => !hidden.has(c));
+  if (!visible.length) return '<div class="text-secondary p-3">Every column is hidden.</div>';
+  const head = visible.map(c => `<th class="text-nowrap">${esc(c)}</th>`).join('');
+  const body = rows.map(r => '<tr>' + visible.map(c => {
+    const v = r[c];
+    const cls = (v === null || v === undefined) ? ' class="text-secondary fst-italic"' : '';
+    return `<td${cls}>${esc(_sqlCellText(v))}</td>`;
+  }).join('') + '</tr>').join('');
+  return `<table class="table table-sm table-striped table-dark mb-0 font-monospace"
+               style="font-size:.78rem;white-space:nowrap;">
+      <thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+/** CSV text for the current viewer — its own small builder rather than ES's
+ *  buildResultsCsv(), which is tied to hit/mapping-aware helpers (date
+ *  columns, resultColumns()) that a plain SQL row does not have. */
+function _sqlBuildCsv(cols, rows, hidden) {
+  const visible = cols.filter(c => !hidden.has(c));
+  const escCsv = (s) => /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  const cellRaw = (v) => {
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'object') return v.__blob__ ? `<binary: ${_fmtBytes(v.bytes || 0)}>` : JSON.stringify(v);
+    return String(v);
+  };
+  const lines = [visible.map(escCsv).join(',')];
+  for (const r of rows) lines.push(visible.map(c => escCsv(cellRaw(r[c]))).join(','));
+  return lines.join('\r\n');
+}
+
+function sqlPopoutBodyHtml() {
+  const v = _sqlCurrentViewer();
+  if (!v) return '<div class="text-secondary p-3">Nothing to show yet.</div>';
+  const rows = v.rows(), cols = v.cols(), hidden = v.hidden();
+  if (sqlPopoutView === 'json') {
+    return rows.length
+      ? `<pre class="p-2 mb-0" style="white-space:pre-wrap;word-break:break-word;">${esc(JSON.stringify(rows, null, 2))}</pre>`
+      : '<div class="text-secondary p-3">No rows.</div>';
+  }
+  if (sqlPopoutView === 'csv') {
+    return rows.length
+      ? `<pre class="p-2 mb-0" style="white-space:pre;overflow:auto;">${esc(_sqlBuildCsv(cols, rows, hidden))}</pre>`
+      : '<div class="text-secondary p-3">No rows.</div>';
+  }
+  return _sqlPopoutTableHtml(cols, rows, hidden);
+}
+
+/** Refresh the popout's content, title and toolbar state from whichever
+ *  viewer is currently selected. Called after every render of any of the
+ *  four source screens (harmless when the popout is closed, or open on a
+ *  DIFFERENT viewer than the one that just changed — _sqlCurrentViewer()
+ *  only reflects data for the selected key). */
+function syncSqlPopout() {
+  if (!sqlResultsWindow || sqlResultsWindow.closed) return;
+  const v = _sqlCurrentViewer();
+  const doc = sqlResultsWindow.document;
+  const title = doc.getElementById('title');
+  const meta  = doc.getElementById('meta');
+  const out   = doc.getElementById('out');
+  if (title) title.textContent = v ? v.label() : '';
+  if (meta)  meta.textContent  = v ? `${v.rows().length} row(s)` : '';
+  if (out)   out.innerHTML = sqlPopoutBodyHtml();
+  ['table', 'json', 'csv'].forEach(m =>
+    doc.getElementById('po-' + m)?.classList.toggle('active', m === sqlPopoutView));
+}
+
+function setSqlPopoutView(view) {
+  sqlPopoutView = view;
+  syncSqlPopout();
+}
+
+/** Re-run whatever produced the current viewer's rows (re-select the table,
+ *  or re-run the query) and reflect the fresh data in the popout. */
+async function refreshSqlPopoutSource() {
+  const v = _sqlCurrentViewer();
+  if (!v) return;
+  await v.refresh();
+  syncSqlPopout();
+}
+
+/** _openColumnPicker already takes a `doc` — this just points it at the
+ *  popout's own document, so the modal appears in the window the user is
+ *  actually looking at rather than yanking focus back to the main one. */
+function openSqlPopoutColumns() {
+  const v = _sqlCurrentViewer();
+  if (!v || !sqlResultsWindow || sqlResultsWindow.closed) return;
+  _openColumnPicker({
+    doc: sqlResultsWindow.document,
+    title: `Columns — ${v.label()}`,
+    columns: v.cols(),
+    locked: [],
+    hidden: v.hidden(),
+    onChange: (hidden) => { v.onHiddenChange(hidden); syncSqlPopout(); },
+  });
+}
+
+function downloadSqlPopoutResults() {
+  const v = _sqlCurrentViewer();
+  if (!v) return;
+  const rows = v.rows(), cols = v.cols(), hidden = v.hidden();
+  if (!rows.length) { showToast('No rows to export', 'bg-warning'); return; }
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  let content, mime, ext;
+  if (sqlPopoutView === 'json') {
+    content = JSON.stringify(rows, null, 2);
+    mime = 'application/json'; ext = 'json';
+  } else {
+    content = _sqlBuildCsv(cols, rows, hidden);
+    mime = 'text/csv'; ext = 'csv';
+  }
+  const blob = new Blob([content], { type: mime + ';charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `sql_results_${ts}.${ext}`;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+}
+
+/** Open (or focus) the shared SQL results window, showing `key`'s data. */
+function popOutSqlResults(key) {
+  sqlActiveViewerKey = key;
+  if (sqlResultsWindow && !sqlResultsWindow.closed) { sqlResultsWindow.focus(); syncSqlPopout(); return; }
+  sqlResultsWindow = window.open('', 'cc_sql_results', 'width=860,height=800,scrollbars=yes,resizable=yes');
+  if (!sqlResultsWindow) { showToast('Pop-up blocked — allow pop-ups for this site', 'bg-danger'); return; }
+  sqlResultsWindow.document.write(`<!DOCTYPE html><html lang="en" data-bs-theme="dark"><head><meta charset="utf-8"/>
+    <title>CC Admin — SQL Results</title>
+    <link href="${appUrl('/static/vendor/bootstrap.min.css')}" rel="stylesheet"/>
+    <link href="${appUrl('/static/vendor/bootstrap-icons.min.css')}" rel="stylesheet"/>
+    <link rel="stylesheet" href="${appUrl('/static/css/style.css')}"/>
+    <style>
+      body{margin:0;background:#1e2530;color:#c9d1d9;font-family:Consolas,'Courier New',monospace;}
+      header{background:#11161d;padding:8px 12px;border-bottom:1px solid #343a40;
+             font-size:.8rem;color:#8aa;display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+      #meta{color:#9ab;font-size:.75rem;margin-right:auto;}
+      #out{padding:10px;overflow:auto;}
+      .btn-group .btn.active{background:#0052CC;color:#fff;border-color:#0052CC;}
+    </style></head><body>
+    <header>
+      <strong id="title" style="color:#5cc8ff;"></strong><span id="meta"></span>
+      <div class="btn-group btn-group-sm" role="group">
+        <button type="button" class="btn btn-outline-light py-0 px-2" id="po-table"
+                onclick="window.opener.setSqlPopoutView('table')">Table</button>
+        <button type="button" class="btn btn-outline-light py-0 px-2" id="po-json"
+                onclick="window.opener.setSqlPopoutView('json')">JSON</button>
+        <button type="button" class="btn btn-outline-light py-0 px-2" id="po-csv"
+                onclick="window.opener.setSqlPopoutView('csv')">CSV</button>
+      </div>
+      <button class="btn btn-sm btn-outline-success py-0 px-2"
+              onclick="window.opener.downloadSqlPopoutResults()" title="Download shown">
+        <i class="bi bi-download"></i></button>
+      <button class="btn btn-sm btn-outline-light py-0 px-2"
+              onclick="window.opener.openSqlPopoutColumns()" title="Choose which columns to show">
+        <i class="bi bi-eye me-1"></i>Columns</button>
+      <button class="btn btn-sm btn-outline-light py-0 px-2"
+              onclick="window.opener.refreshSqlPopoutSource()" title="Reload the data">
+        <i class="bi bi-arrow-clockwise"></i></button>
+    </header>
+    <div id="out"><pre class="p-3 text-secondary mb-0">Loading…</pre></div></body></html>`);
+  sqlResultsWindow.document.close();
+  syncSqlPopout();
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -12139,6 +12516,155 @@ const HELP_CONTENT = {
       <h6>Write mode</h6>
       <ul>
         <li>Enables in-place cell edits, field deletes, and document deletes. When a filter matches more docs than are loaded, delete offers <b>Selected only</b> vs <b>All matching filter</b>.</li>
+      </ul>`,
+  },
+  maria: {
+    title: 'MariaDB — Schemas & Tables', icon: 'bi-diagram-3',
+    body: `
+      <p>Browse the CC's MariaDB — read-only, at the transaction level as well
+      as the SQL, so nothing here can change data on a customer's appliance.</p>
+      <h6>Three panes</h6>
+      <ul>
+        <li><b>Schemas</b> — curated, so 175 tables in <code>vision_ng</code>
+          is not the answer you get to "where do I look". A schema this file
+          has never catalogued still shows, badged <b>new</b> rather than
+          hidden.</li>
+        <li><b>Tables</b> — filterable; the row count is InnoDB's own
+          estimate (<code>information_schema.tables.table_rows</code>), only
+          refreshed when MariaDB next runs <code>ANALYZE</code>, so it can lag
+          a table you just wrote to. <b>Refresh</b> re-asks for the current
+          schema's table list and, if a table is open, its detail too.</li>
+        <li><b>Detail</b> — columns, keys &amp; relations, and the first rows,
+          each independently resizable and collapsible.</li>
+      </ul>
+      <h6>Keys &amp; relations</h6>
+      <p>Declared <code>FOREIGN KEY</code>s split into <b>References out</b>
+      (this table's own) and <b>Referenced by</b> (other tables pointing at
+      this one — what tells you a row cannot simply be deleted). When a
+      schema declares none, <b>Possibly related</b> lists same-named indexed
+      columns elsewhere — a labelled <i>guess</i> from column names, never a
+      substitute for a real constraint.</p>
+      <h6>Join builder</h6>
+      <p>Tick relations, then <b>Build join query</b>. Every column of every
+      joined table is included by default, not just the join key — a join
+      exists to answer questions about the <i>other</i> table. Use
+      <b>Columns</b> in that dialog to narrow it down per table before
+      running; the generated SQL is always shown and editable, never run
+      unseen.</p>
+      <h6>Columns and pop-out</h6>
+      <p><b>Columns</b> on the rows section chooses which to display for the
+      open table. The <i class="bi bi-box-arrow-up-right"></i> button opens
+      the same rows in a separate window — Table / JSON / CSV, its own
+      Columns picker, Download and Refresh — handy for keeping data visible
+      while you work elsewhere.</p>
+      <h6>Binary columns</h6>
+      <p>A BLOB is shown as a size, not text — on this CC it is typically a
+      serialised Java object. <b>View</b> decodes what can be read out of it
+      (readable strings, and the JSON payload when one is found inside);
+      <b>Download</b> gets the raw bytes.</p>
+      <h6>Editing a cell</h6>
+      <p>Off by default everywhere — it needs an operator to unlock it via a
+      property file on the CC, because the identity and audit trail it should
+      sit behind do not exist yet. When it is on: one column of one row,
+      addressed by its full primary key, refused on key / binary / generated
+      columns, and refused if the row changed since you loaded it.</p>
+      <h6>Which account reaches this CC</h6>
+      <p>Discovered automatically — the CC's own <code>mysql</code> wrapper,
+      or (on appliances that use MariaDB's <code>unix_socket</code>
+      authentication instead) the account's password read from the container's
+      own environment. The <i class="bi bi-key"></i> button beside the version
+      badge shows which account is in effect and lets you override it for this
+      CC if discovery ever gets it wrong — effective on the next connection,
+      no restart needed.</p>`,
+  },
+  mariaquery: {
+    title: 'MariaDB — SQL Query', icon: 'bi-terminal',
+    body: `
+      <p>The escape hatch, not the front door — for the join the curated
+      screens do not cover. Still read-only: enforced by the server at the
+      transaction level, so this adds no privilege the browse screen does
+      not already have.</p>
+      <ul>
+        <li>Only <code>SELECT</code>, <code>SHOW</code>,
+          <code>DESCRIBE</code>, <code>EXPLAIN</code> and <code>WITH</code>
+          are accepted, and only one statement at a time.</li>
+        <li>Set the <b>schema</b> the query is aimed at and an optional
+          <b>row limit</b>; the result reports how long it took, since "is
+          this slow?" is otherwise invisible from this screen.</li>
+        <li><b>Build query</b> opens a wizard for picking a table, columns
+          and conditions without needing to remember SQL syntax — the
+          statement it produces is always shown before running.</li>
+        <li><b>Columns</b> chooses which result columns to display; the
+          <i class="bi bi-box-arrow-up-right"></i> pop-out works the same way
+          as the browse screen's.</li>
+      </ul>`,
+  },
+  pg: {
+    title: 'PostgreSQL — Databases & Tables', icon: 'bi-diagram-3',
+    body: `
+      <p>Browse the CC's PostgreSQL — read-only, the same guarantee as the
+      MariaDB screen and for the same reason.</p>
+      <h6>Why "databases", not "schemas"</h6>
+      <p>PostgreSQL has no <code>USE</code> statement: one connection sees
+      exactly one database, unlike MariaDB where one connection sees every
+      schema on the server. So the left pane lists databases, and switching
+      between them opens a fresh connection rather than just re-scoping one.
+      Within a database, this CC keeps its own tables in the <code>public</code>
+      schema.</p>
+      <ul>
+        <li><b>Databases</b> — curated the same way as MariaDB's schema list;
+          an uncatalogued one is still shown, badged <b>new</b>.</li>
+        <li><b>Tables</b> — the row count is PostgreSQL's own estimate
+          (<code>pg_stat_user_tables.n_live_tup</code>), only refreshed by
+          autovacuum or <code>ANALYZE</code>, so it can lag a table you just
+          wrote to. <b>Refresh</b> re-asks for the current database's table
+          list and, if a table is open, its detail too.</li>
+        <li><b>Detail</b> — columns, keys &amp; relations, and the first
+          rows, same layout as MariaDB's.</li>
+      </ul>
+      <h6>Keys &amp; relations</h6>
+      <p>Same three-part answer as MariaDB: declared foreign keys as
+      <b>References out</b> / <b>Referenced by</b>, plus a labelled
+      <b>Possibly related</b> guess from column names when a database
+      declares no constraints at all.</p>
+      <p>There is no visual join builder here yet — porting MariaDB's join
+      builder and its WHERE-condition wizard to a second SQL dialect is its
+      own project. The SQL Query screen is still the full read-only escape
+      hatch for a join, just typed rather than point-and-click for now.</p>
+      <h6>Columns and pop-out</h6>
+      <p>Same as MariaDB's: <b>Columns</b> chooses which to display, and the
+      <i class="bi bi-box-arrow-up-right"></i> button opens the same rows in
+      a separate window with its own view switching, column picker, download
+      and refresh.</p>
+      <h6>Binary columns</h6>
+      <p>A <code>bytea</code> column is shown as a size, not text — the same
+      decoder as MariaDB's BLOBs (this CC serialises Java objects into both).
+      <b>View</b> decodes what can be read out of it; <b>Download</b> gets the
+      raw bytes.</p>
+      <h6>Editing a cell</h6>
+      <p>Off by default everywhere, unlocked the same way as MariaDB's — an
+      operator's property file on the CC, because the identity and audit
+      trail it should sit behind do not exist yet.</p>`,
+  },
+  pgquery: {
+    title: 'PostgreSQL — SQL Query', icon: 'bi-terminal',
+    body: `
+      <p>The escape hatch, not the front door — same role as MariaDB's SQL
+      Query screen. Read-only, enforced by the server at the transaction
+      level via <code>BEGIN READ ONLY</code>, not just by checking the
+      statement's leading keyword.</p>
+      <ul>
+        <li>Only <code>SELECT</code>, <code>WITH</code>,
+          <code>EXPLAIN</code>, <code>SHOW</code>, <code>TABLE</code> and
+          <code>VALUES</code> are accepted, and only one statement at a
+          time.</li>
+        <li>Set the <b>database</b> the query is aimed at and an optional
+          <b>row limit</b>; the result reports how long it took.</li>
+        <li>No visual query wizard yet, unlike MariaDB's — this box is still
+          the full escape hatch, just typed rather than point-and-click.</li>
+        <li><b>Columns</b> chooses which result columns to display; the
+          <i class="bi bi-box-arrow-up-right"></i> pop-out works the same way
+          as the browse screen's.</li>
       </ul>`,
   },
 };

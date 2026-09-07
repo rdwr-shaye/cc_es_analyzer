@@ -1,8 +1,18 @@
-# Keep shell scripts LF so they run on Linux even when edited on Windows.
-*.sh text eol=lf
-# Normalise line endings for common text types.
-*.py text
-*.md text
-*.yml text
-*.yaml text
+# Every deployment target is Linux (the lab CCs, the standalone build boxes),
+# and this is edited from Windows too — `text` alone lets core.autocrlf on a
+# Windows checkout decide the on-disk line ending, and `git archive` (the
+# deploy path: git archive HEAD | tar -x on the target) honours that same
+# decision. On a Windows machine with autocrlf=true that meant every deployed
+# text file came out CRLF, invisibly — first noticed on .py/.js files (which
+# tolerate CRLF at the language level, so it went unnoticed for a while), then
+# on files with no listed extension at all (VERSION, .env.example, a
+# .properties.sample) once *those* got enumerated one at a time and still
+# came out wrong. A per-extension list is exactly the wrong shape for this:
+# it is only ever proven complete by the next file nobody thought to add.
+#
+# `* text=auto eol=lf` is the fix that does not need a list: every path git's
+# own content-sniffing calls text gets normalised to LF, in the repo and on
+# every export, full stop. Genuinely binary paths (fonts, images) are left
+# alone by the same auto-detection — nothing below is needed to protect them.
+* text=auto eol=lf
 
