@@ -21,10 +21,15 @@ boundary sits.
   the other two only so a deployment with a data-residency rule can switch it
   off; it is on by default.
 
-  BUILT BUT LOCKED — system.storage.delete. The route, the host operation and
-  the safety classifier all exist. It is off because it needs TWO keys: this
-  capability unlocked via the property file, AND the host agent started with
-  --allow-delete. Unlocking it here alone does nothing, which is the point.
+  ON BY DEFAULT IN STANDALONE, LOCKED IN EMBEDDED — system.storage.delete. An
+  engineer running the remote tool on their own machine is already trusted
+  with full SSH access to the box they pointed it at, so gating deletion
+  there added a second key that protected nothing — the operator can already
+  read and remove that file over the same SSH session `maria`/`pg`/`es` use.
+  Embedded is different: it rides the CC's own compose next to a customer's
+  production data, so it stays off there unless the property file unlocks it
+  AND the host agent was started with --allow-delete. Two keys still guard
+  the appliance; standalone was never the box that needed them.
 
   DECLARED, NOT BUILT — system.es.delete_index, system.maria.repair,
   system.maria.recreate. No route, and deploy/host_agent.py has no operation
@@ -42,6 +47,7 @@ from core.policy import Capability, Module, EMBEDDED, STANDALONE
 
 _BOTH = (STANDALONE, EMBEDDED)
 _NEITHER: tuple[str, ...] = ()
+_STANDALONE_ONLY = (STANDALONE,)
 
 
 def _module() -> Module:
@@ -86,15 +92,19 @@ def _module() -> Module:
             Capability(
                 id="system.storage.delete",
                 title="Delete a log, heap dump or zip to reclaim disk space",
-                profiles=_NEITHER,
+                profiles=_STANDALONE_ONLY,
                 unlockable=True,
                 note="Restricted by modules/system/safety.py to logs, heap "
                      "dumps and zips, and refused outright inside backups, "
                      "configuration and datastore volumes — the biggest files "
                      "on a CC are usually a Lucene segment or MariaDB's Aria "
-                     "log. TWO keys: this capability, plus the host agent "
-                     "started with --allow-delete. Unlocking this alone does "
-                     "nothing, which is the point.",
+                     "log. On by default in standalone: the operator already "
+                     "has SSH access to whatever CC they connected to, so this "
+                     "only saves them a terminal. Off in embedded unless TWO "
+                     "keys are both present: this capability unlocked via the "
+                     "property file, plus the host agent started with "
+                     "--allow-delete — that pairing still guards a customer's "
+                     "production appliance.",
             ),
             Capability(
                 id="system.es.delete_index",

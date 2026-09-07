@@ -278,6 +278,34 @@ def _cmd_net_probe(args: dict) -> str:
     )
 
 
+def _cmd_file_delete(args: dict) -> str:
+    # Re-checks symlink/directory on the host at the moment of deletion, the
+    # same defence deploy/host_agent.py's Python delete_file() applies for the
+    # embedded path — safety.py's path-pattern allowlist runs before this op is
+    # reached, but it is lexical (it cannot see what a path actually resolves
+    # to), so this is the check that catches "looks like a log, is actually a
+    # symlink into /etc". `rm -f` alone would silently follow neither of those
+    # protections.
+    #
+    # The success JSON mirrors host_agent.py's delete_file() ({"bytes",
+    # "was_open"}) since modules/system/routers/dashboard.py's delete_file()
+    # reads both fields off whichever backend answered. The path itself is
+    # deliberately left out of that JSON — the caller already has it and
+    # building it into a printf format string would mean either escaping
+    # whatever _path() lets through or trusting user-controlled text inside
+    # the one string here that isn't pure program output.
+    path = shlex.quote(args["path"])
+    return (
+        f"if [ -L {path} ]; then echo 'refusing a symlink' >&2; exit 3; fi; "
+        f"if [ -d {path} ]; then echo 'refusing a directory' >&2; exit 4; fi; "
+        f"if [ ! -f {path} ]; then echo 'no longer exists' >&2; exit 2; fi; "
+        f"size=$(stat -c%s -- {path} 2>/dev/null || echo 0); "
+        f"open=false; fuser -s -- {path} 2>/dev/null && open=true; "
+        f"rm -f -- {path} || {{ echo 'could not delete' >&2; exit 1; }}; "
+        f'printf \'{{"bytes":%s,"was_open":%s}}\' "$size" "$open"'
+    )
+
+
 OPS: dict[str, dict] = {
     "compose.ps": {
         "args": {},
@@ -337,22 +365,26 @@ OPS: dict[str, dict] = {
         "timeout": 20,
         "what": "discover which account reaches this CC's MariaDB over the network",
     },
-    # The one operation in this table that CHANGES the appliance. Reaching it
-    # needs two keys turned independently: the app's `system.storage.delete`
-    # capability (or the route that calls this does not exist), and the host
-    # agent started with --allow-delete. Both are acts on the host. Unlocking
-    # the capability alone does nothing — the agent still refuses.
+    # The one operation in this table that CHANGES the appliance.
     #
-    # There is no `command` because deletion never goes through a shell: the
-    # agent removes the file with os.remove. That also means the SSH backend
-    # cannot perform it, which is deliberate — a standalone install pointed at
-    # a customer's CC has no business deleting files on it.
+    # Embedded needs TWO keys turned independently: the app's
+    # `system.storage.delete` capability (or the route that calls this does
+    # not exist), and the host agent started with --allow-delete. Unlocking
+    # the capability alone does nothing there — the agent still refuses, and
+    # deletes with os.remove, never a shell.
+    #
+    # Standalone ships this capability on by default (modules/system/__init__.py)
+    # because the operator already has an interactive SSH session's worth of
+    # access to whatever CC they connected to — this button saves them a
+    # terminal, it does not grant anything new. _cmd_file_delete builds the
+    # remove for that path; safety.py's allowlist (backups, config, datastore
+    # volumes refused outright) is checked before this op is ever reached and
+    # applies identically regardless of which backend runs it.
     "file.delete": {
         "args": {"path": (lambda v: _path(v), None)},
-        "command": None,
+        "command": _cmd_file_delete,
         "timeout": 60,
         "what": "delete one log, heap dump or zip",
-        "agent_only": True,
     },
     # Reading a file back, a chunk at a time. A READ — it needs no --allow-delete
     # on the agent — but held to the same allowlist as deletion: the files an

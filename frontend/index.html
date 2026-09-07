@@ -1511,7 +1511,13 @@
             <label class="small text-secondary mb-0 ms-2">Max rows</label>
             <input id="pgQueryLimit" type="number" min="1" max="10000" value="200"
                    class="form-control form-control-sm" style="width:90px;font-size:.78rem;">
-            <button class="btn btn-sm btn-primary ms-auto py-0 px-3" onclick="runPgQuery()"
+            <!-- For engineers who know the CC but not SQL: pick a table and
+                 some conditions, get a statement. -->
+            <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2"
+                    onclick="openPgQueryWizard()" style="font-size:.78rem;">
+              <i class="bi bi-magic me-1"></i>Build query
+            </button>
+            <button class="btn btn-sm btn-primary py-0 px-3" onclick="runPgQuery()"
                     style="font-size:.78rem;">
               <i class="bi bi-play-fill me-1"></i>Run
             </button>

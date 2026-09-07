@@ -65,6 +65,11 @@ STANDALONE_ONLY = {
     "/api/update/apply":   "the embedded build upgrades with the CC",
     "/api/update/status":  "the embedded build upgrades with the CC",
     "/api/update/job":     "the embedded build upgrades with the CC",
+    "/api/system/storage/delete":
+        "on by default in standalone — the operator already has SSH access "
+        "to whatever CC they connected to, so this only saves a terminal. "
+        "Embedded stays off unless the property file AND --allow-delete both "
+        "unlock it, since that box sits beside a customer's production data",
 }
 
 # Endpoints that must exist in BOTH, listed because their absence would be a
@@ -96,9 +101,10 @@ IN_BOTH = [
 
 # Endpoints that must exist in NEITHER until someone deliberately unlocks the
 # capability. These are the unlockable ones: off in every profile by default.
-IN_NEITHER = [
-    "/api/system/storage/delete",     # needs the property file AND --allow-delete
-]
+# (Empty today — system.storage.delete moved to STANDALONE_ONLY once it shipped
+# on by default there; still unlockable-only in embedded, so it stays governed
+# by the property-file mechanism on that side.)
+IN_NEITHER: list[str] = []
 
 
 def _surface(profile: str) -> dict:

@@ -10798,6 +10798,233 @@ function openPgQueryColumnPicker() {
   });
 }
 
+/** PostgreSQL identifier quoting — double quotes, doubled to escape one
+ *  embedded, the same rule _q() applies with backticks for MariaDB. */
+function _pgQuote(name) { return '"' + String(name).replace(/"/g, '""') + '"'; }
+
+/** "Build query" for PostgreSQL — same wizard as openMariaQueryWizard(),
+ *  adapted for what is actually different here: identifiers are double-quoted
+ *  not backtick-quoted, a table lives unqualified in the selected database's
+ *  `public` schema rather than behind a `schema.table` prefix (PostgreSQL has
+ *  no cross-database FROM — the database picker already scopes the
+ *  connection, matching the bare-name placeholder the query box itself
+ *  shows), and the column/table catalogs come off /api/pg/*, not /api/maria/*.
+ *  _mariaWhereSql/_sqlLit are reused as-is — building `col op value` and
+ *  quoting a string literal are the same problem in both dialects. */
+async function openPgQueryWizard() {
+  document.querySelector('.rt-modal-overlay.rt-pgquerywiz')?.remove();
+  if (!pgDatabases.length) await loadPgDatabases();
+
+  const wrap = document.createElement('div');
+  wrap.className = 'rt-modal-overlay rt-pgquerywiz';
+  wrap.innerHTML = `<div class="rt-modal" style="width:min(900px,94vw);">
+      <div class="rt-modal-title"><i class="bi bi-magic me-1"></i>Build a query</div>
+      <div class="rt-modal-body" style="white-space:normal;">
+
+        <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+          <div class="btn-group btn-group-sm" role="group">
+            <input type="radio" class="btn-check" name="pgWizVerb" id="pgWizSelect" checked>
+            <label class="btn btn-outline-primary py-0 px-3" for="pgWizSelect"
+                   style="font-size:.75rem;">SELECT</label>
+            <input type="radio" class="btn-check" name="pgWizVerb" id="pgWizUpdate" disabled>
+            <label class="btn btn-outline-secondary py-0 px-3 disabled" for="pgWizUpdate"
+                   style="font-size:.75rem;"
+                   title="Not available — see the note below">UPDATE</label>
+            <input type="radio" class="btn-check" name="pgWizVerb" id="pgWizDelete" disabled>
+            <label class="btn btn-outline-secondary py-0 px-3 disabled" for="pgWizDelete"
+                   style="font-size:.75rem;"
+                   title="Not available — see the note below">DELETE</label>
+          </div>
+          <label class="small text-secondary mb-0 ms-2">Database</label>
+          <select class="form-select form-select-sm wiz-schema" style="width:170px;font-size:.75rem;">
+            ${pgDatabases.map(s => `<option value="${esc(s.name)}"
+              ${s.name === pgDatabase ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
+          </select>
+          <label class="small text-secondary mb-0 ms-1">Table</label>
+          <select class="form-select form-select-sm wiz-table"
+                  style="width:220px;font-size:.75rem;"><option>loading…</option></select>
+        </div>
+
+        <div class="alert alert-secondary py-1 px-2 small mb-2" style="font-size:.72rem;">
+          <b>UPDATE and DELETE are not offered.</b> This screen runs through a
+          read-only connection, so the server would refuse them. Changing data
+          needs the per-row edit in the table browser, which is separately
+          gated and audited.
+        </div>
+
+        <div class="mj-filters mb-2">
+          <div class="mj-filters-head">
+            <i class="bi bi-list-columns me-1"></i><span>Columns</span>
+            <span class="text-secondary fw-normal ms-1" style="text-transform:none;">
+              — none ticked means all</span>
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2 ms-auto wiz-cols-none"
+                    style="font-size:.7rem;">Unselect all</button>
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2 wiz-cols-all"
+                    style="font-size:.7rem;">Select all</button>
+          </div>
+          <div class="wiz-cols" style="max-height:120px;overflow:auto;padding:6px 8px;
+               display:flex;flex-wrap:wrap;gap:4px 12px;"></div>
+        </div>
+
+        <div class="mj-filters mb-2">
+          <div class="mj-filters-head">
+            <i class="bi bi-funnel me-1"></i><span>Conditions</span>
+            <span class="text-secondary fw-normal ms-1" style="text-transform:none;">
+              — combined with AND</span>
+            <button class="btn btn-sm btn-outline-primary py-0 px-2 ms-auto wiz-addwhere"
+                    style="font-size:.7rem;"><i class="bi bi-plus-lg me-1"></i>Add condition</button>
+          </div>
+          <div class="wiz-where"></div>
+        </div>
+
+        <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+          <label class="small text-secondary mb-0">Order by</label>
+          <select class="form-select form-select-sm wiz-order" style="width:200px;font-size:.75rem;">
+            <option value="">(none)</option>
+          </select>
+          <select class="form-select form-select-sm wiz-dir" style="width:90px;font-size:.75rem;">
+            <option value="ASC">ASC</option><option value="DESC">DESC</option>
+          </select>
+          <label class="small text-secondary mb-0 ms-2">Limit</label>
+          <input type="number" min="1" max="10000" value="200"
+                 class="form-control form-control-sm wiz-limit" style="font-size:.75rem;width:90px;">
+        </div>
+
+        <div class="small fw-semibold text-secondary mb-1">Generated SQL</div>
+        <textarea class="form-control font-monospace wiz-sql" rows="7" wrap="off"
+                  spellcheck="false" readonly
+                  style="font-size:.74rem;white-space:pre;overflow-x:auto;"></textarea>
+      </div>
+      <div class="rt-modal-actions">
+        <button class="btn btn-sm btn-primary" data-act="run">
+          <i class="bi bi-play-fill me-1"></i>Run</button>
+        <button class="btn btn-sm btn-outline-primary" data-act="use">Put in editor</button>
+        <button class="btn btn-sm btn-outline-secondary" data-act="close">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+
+  const done = () => { wrap.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') done(); };
+  document.addEventListener('keydown', onKey);
+
+  let columns = [];
+
+  const regen = () => {
+    const table = wrap.querySelector('.wiz-table').value;
+    if (!table) { wrap.querySelector('.wiz-sql').value = ''; return; }
+    const picked = [...wrap.querySelectorAll('.wiz-cols input:checked')]
+      .map(cb => cb.dataset.col);
+    const cols = picked.length && picked.length !== columns.length
+      ? picked.map(c => _pgQuote(c)).join(',\n       ') : '*';
+
+    const where = [...wrap.querySelectorAll('.wiz-wrow')].map(r =>
+      _mariaWhereSql(_pgQuote(r.querySelector('.wiz-col').value),
+                     r.querySelector('.wiz-op').value,
+                     r.querySelector('.wiz-val')?.value ?? '')).filter(Boolean);
+
+    const order = wrap.querySelector('.wiz-order').value;
+    const lines = [`SELECT ${cols}`, `  FROM ${_pgQuote(table)}`];
+    if (where.length) lines.push(' WHERE ' + where.join('\n   AND '));
+    if (order) lines.push(` ORDER BY ${_pgQuote(order)} ${wrap.querySelector('.wiz-dir').value}`);
+    lines.push(` LIMIT ${Math.max(1, parseInt(wrap.querySelector('.wiz-limit').value, 10) || 200)}`);
+    wrap.querySelector('.wiz-sql').value = lines.join('\n');
+  };
+
+  const addWhere = () => {
+    const row = document.createElement('div');
+    row.className = 'wiz-wrow d-flex align-items-center gap-1 mb-1';
+    row.innerHTML = `
+      <select class="form-select form-select-sm wiz-col font-monospace"
+              style="font-size:.72rem;flex:1 1 auto;min-width:0;">
+        ${columns.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}
+      </select>
+      <select class="form-select form-select-sm wiz-op" style="width:120px;font-size:.72rem;">
+        ${['=', '!=', 'LIKE', 'IN', '>', '<', '>=', '<=', 'IS NULL', 'IS NOT NULL']
+          .map(o => `<option>${o}</option>`).join('')}
+      </select>
+      <input type="text" class="form-control form-control-sm wiz-val" placeholder="value"
+             style="font-size:.72rem;width:180px;">
+      <button class="btn btn-sm btn-link text-secondary py-0 px-1 wiz-del"
+              title="Remove"><i class="bi bi-x-lg"></i></button>`;
+    wrap.querySelector('.wiz-where').appendChild(row);
+    const op = row.querySelector('.wiz-op');
+    op.addEventListener('change', () => {
+      const none = op.value === 'IS NULL' || op.value === 'IS NOT NULL';
+      row.querySelector('.wiz-val').classList.toggle('d-none', none);
+    });
+  };
+
+  const loadColumns = async () => {
+    const database = wrap.querySelector('.wiz-schema').value;
+    const table  = wrap.querySelector('.wiz-table').value;
+    const host = wrap.querySelector('.wiz-cols');
+    if (!table) { host.innerHTML = ''; columns = []; return; }
+    host.innerHTML = '<span class="text-secondary small">loading…</span>';
+    const d = await api(`/api/pg/columns?database=${encodeURIComponent(database)}`
+                      + `&table=${encodeURIComponent(table)}`);
+    columns = (d && !d.error && d.columns) ? d.columns.map(c => c.name) : [];
+    host.innerHTML = columns.map(c => `
+      <label class="d-flex align-items-center gap-1" style="font-size:.72rem;">
+        <input type="checkbox" data-col="${esc(c)}">
+        <span class="font-monospace">${esc(c)}</span>
+      </label>`).join('') || '<span class="text-secondary small">no columns</span>';
+    wrap.querySelector('.wiz-order').innerHTML = '<option value="">(none)</option>'
+      + columns.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+    wrap.querySelector('.wiz-where').innerHTML = '';   // stale columns
+    regen();
+  };
+
+  const loadTables = async () => {
+    const database = wrap.querySelector('.wiz-schema').value;
+    const sel = wrap.querySelector('.wiz-table');
+    sel.innerHTML = '<option>loading…</option>';
+    const d = await api(`/api/pg/tables?database=${encodeURIComponent(database)}`);
+    const tables = (d && !d.error && d.tables) ? d.tables : [];
+    sel.innerHTML = tables.map(t => `<option value="${esc(t.name)}"
+      ${t.name === pgTable ? 'selected' : ''}>${esc(t.name)}</option>`).join('')
+      || '<option value="">(no tables)</option>';
+    await loadColumns();
+  };
+
+  wrap.addEventListener('change', async ev => {
+    if (ev.target.closest('.wiz-schema')) { await loadTables(); return; }
+    if (ev.target.closest('.wiz-table'))  { await loadColumns(); return; }
+    regen();
+  });
+  wrap.addEventListener('input', regen);
+  wrap.addEventListener('click', ev => {
+    if (ev.target.closest('.wiz-addwhere')) { addWhere(); regen(); return; }
+    if (ev.target.closest('.wiz-del')) { ev.target.closest('.wiz-wrow').remove(); regen(); return; }
+    if (ev.target.closest('.wiz-cols-all')) {
+      wrap.querySelectorAll('.wiz-cols input').forEach(cb => cb.checked = true); regen(); return;
+    }
+    if (ev.target.closest('.wiz-cols-none')) {
+      wrap.querySelectorAll('.wiz-cols input').forEach(cb => cb.checked = false); regen(); return;
+    }
+    const act = ev.target.closest('[data-act]')?.dataset.act;
+    if (act === 'close' || ev.target === wrap) { done(); return; }
+    if (act === 'use' || act === 'run') {
+      const sql = wrap.querySelector('.wiz-sql').value;
+      const database = wrap.querySelector('.wiz-schema').value;
+      done();
+      const sel = document.getElementById('pgQuerySchema');
+      if (sel) {
+        if (![...sel.options].some(o => o.value === database)) sel.add(new Option(database, database));
+        sel.value = database;
+      }
+      document.getElementById('pgQueryLimit').value =
+        wrap.querySelector('.wiz-limit').value || 200;
+      document.getElementById('pgQuerySql').value = sql;
+      if (act === 'run') runPgQuery();
+    }
+  });
+
+  await loadTables();
+  addWhere();
+  regen();
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
    SQL results — dock-aside viewer (MariaDB + PostgreSQL)
    ══════════════════════════════════════════════════════════════════════════
