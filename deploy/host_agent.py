@@ -245,9 +245,6 @@ def v_path(value):
 PROBE_HOSTS = frozenset({
     "services.radware.com",
     "radwareti.s3.amazonaws.com",
-    "radware.flexnetoperations.com",
-    "filepile.radware.com",
-    "support.radware.com",
 })
 
 

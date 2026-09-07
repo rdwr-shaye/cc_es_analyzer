@@ -49,7 +49,7 @@ class Target:
 TARGETS: tuple[Target, ...] = (
     Target(
         id="radware-services",
-        label="Radware Services (SUS / EAAF)",
+        label="Radware Services (SUS / EAAF / GEO / etc.)",
         host="services.radware.com",
         purpose="Signature Update Service and ERT Active Attackers Feed "
                 "authorisation. If this is unreachable, signature and feed "
@@ -61,7 +61,7 @@ TARGETS: tuple[Target, ...] = (
     ),
     Target(
         id="radware-ti-feed",
-        label="Threat-intel / GeoDB feed",
+        label="Threat-intel / AWS s3 bucket",
         host="radwareti.s3.amazonaws.com",
         purpose="Where the ERT Active Attackers Feed and the GeoDB location "
                 "updates are actually downloaded from, after Services "
@@ -73,35 +73,11 @@ TARGETS: tuple[Target, ...] = (
                "HTTP status.",
         sources=("1093778", "1029823"),
     ),
-    Target(
-        id="radware-flexnet",
-        label="FlexNet licensing",
-        host="radware.flexnetoperations.com",
-        purpose="Licence activation for the Local Licence Server. An LLS that "
-                "cannot reach this cannot activate or renew licences, which "
-                "presents later as devices losing entitlement.",
-        sources=("1054455",),
-    ),
-    Target(
-        id="radware-filepile",
-        label="Radware file transfer",
-        host="filepile.radware.com",
-        purpose="Where support procedures fetch images, migration archives and "
-                "fixes from. Not needed for the appliance to run, but a "
-                "documented step in many recovery procedures needs it.",
-        critical=False,
-        sources=("1028816",),
-    ),
-    Target(
-        id="radware-support",
-        label="Radware support portal",
-        host="support.radware.com",
-        purpose="The support portal itself. Informational: its reachability "
-                "says something about general internet egress, but nothing on "
-                "this appliance depends on it.",
-        critical=False,
-        sources=(),
-    ),
+    # FlexNet licensing, the file-transfer share and the support portal were
+    # dropped from this screen — not useful checked from inside the CC: an
+    # engineer debugging connectivity from here cares whether the appliance
+    # can reach what it actually depends on to function (Services and the
+    # feed bucket above), not licensing or support-site reachability.
 )
 
 _BY_ID = {t.id: t for t in TARGETS}

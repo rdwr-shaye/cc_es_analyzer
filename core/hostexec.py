@@ -245,9 +245,6 @@ def _cmd_maria_creds(_args: dict) -> str:
 _PROBE_HOSTS = frozenset({
     "services.radware.com",
     "radwareti.s3.amazonaws.com",
-    "radware.flexnetoperations.com",
-    "filepile.radware.com",
-    "support.radware.com",
 })
 
 
