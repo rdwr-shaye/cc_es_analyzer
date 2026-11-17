@@ -54,6 +54,11 @@ class ESHttpClient:
         # Set by the connect endpoint; defaults keep a plain .env run honest.
         self.cc_host  = host
         self.ssh: dict | None = None
+        # modules/widgets' Check 1: a live VRM login on this CC, if one was
+        # established — {"jsessionid", "visionsessionid", "username",
+        # "logged_in_at"}. Same one-place-a-session's-secrets-live rule as
+        # .ssh; see modules/widgets/client.py for how it is used and cleared.
+        self.vrm_session: dict | None = None
         self.base_url = f"{scheme}://{host}:{port}"
         self.auth     = HTTPBasicAuth(user, password) if user else None
         self.verify   = verify_certs
@@ -242,6 +247,14 @@ def session_target(sid: str) -> str | None:
     with _session_lock:
         client = _session_clients.get(sid)
     return client.base_url if client is not None else None
+
+
+def all_session_clients() -> list["ESHttpClient"]:
+    """Every browser session's own client, for a process-wide sweep — used at
+    shutdown by modules/widgets/client.py::logout_all_sessions() rather than
+    reaching into _session_clients directly from another module."""
+    with _session_lock:
+        return list(_session_clients.values())
 
 
 def drop_session(sid: str) -> None:

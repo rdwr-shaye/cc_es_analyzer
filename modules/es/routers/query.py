@@ -35,6 +35,13 @@ class ConnectionRequest(BaseModel):
     ssh_user: str = ""
     ssh_password: str = ""
     ssh_port: int = 22
+    # NOTE: modules/widgets' Check 1 (VRM API replay) needs a SYS_ADMIN login
+    # too, but NOT here — confirmed live that /mgmt/vrm/* auth is a real
+    # session (POST /mgmt/system/user/login -> a JSESSIONID cookie), not a
+    # per-request credential a connect-time field could hold. That login is
+    # its own explicit action on the Widget Debugging screen
+    # (POST /api/widgets/vrm/login) rather than bundled into this form — see
+    # modules/widgets/client.py.
 
 
 def _try_connect(req: "ConnectionRequest"):

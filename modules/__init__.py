@@ -32,6 +32,11 @@ ENABLED: tuple[str, ...] = (
     # The first half of the corrective-actions work — the half that changes
     # nothing and is therefore safe on a customer's production appliance.
     "modules.diag",
+    # Per-widget root cause: why is this dashboard widget showing no data.
+    # Depends on modules.es (discovery) and modules.maria (client), so it is
+    # listed after both — the same lazy-import shape modules/pg/client.py
+    # already uses against modules.es.client.
+    "modules.widgets",
     # Phase 3: "modules.kb"
 )
 

@@ -170,6 +170,13 @@
           <i class="bi bi-globe2 me-2"></i>Connectivity
           <span class="sys-dot sys-unknown ms-1" id="connNavDot" title="Not checked yet"></span>
         </button>
+        <!-- Also a sibling of System Health, not a datastore screen: "why is
+             THIS widget empty" is a per-widget diagnosis across the API, the
+             index and the collection pipeline, not a browse-this-store tool. -->
+        <button class="btn btn-sm w-100 text-start px-2 py-1 sidebar-nav-btn ps-4" id="nav-widgets"
+                onclick="showView('widgets')">
+          <i class="bi bi-puzzle me-2"></i>Widget Debugging
+        </button>
       </div>
 
       <!-- Datastores. The tool is growing from "the ES analyzer" into one
@@ -466,6 +473,13 @@
 
               </div><!-- /row -->
 
+              <!-- Widget Debugging's Check 1 needs a SYS_ADMIN login of its own —
+                   confirmed live to be a real CC session (a JSESSIONID cookie from
+                   POST /mgmt/system/user/login), not a per-request credential this
+                   form could hold. That login lives on the Widget Debugging screen
+                   itself (its own explicit action, not bundled into Connect) — see
+                   modules/widgets/client.py. -->
+
               <!-- Status feedback -->
               <div id="connFeedback" class="mt-3 d-none"></div>
 
@@ -585,6 +599,108 @@
         </div>
         <div class="card-body p-0" id="sysDetailBody"></div>
       </div>
+    </div>
+
+    <!-- ── WIDGET DEBUGGING VIEW ──
+         Three checks for one picked widget: does its own API call return
+         data, does its Elasticsearch index exist for the picked window, and
+         has the underlying DefensePro device actually been polled recently.
+         The report reuses System Health's exact banner/tile classes
+         (sys-banner, sys-tile, sys-{severity}) rather than inventing new
+         CSS — this screen's report is the same "traffic light + evidence"
+         shape, applied per-widget instead of per-appliance. -->
+    <div id="view-widgets" class="view-panel p-3 d-none">
+      <div class="d-flex justify-content-between align-items-center mb-2 gap-2 flex-wrap">
+        <h5 class="fw-bold mb-0"><i class="bi bi-puzzle me-2 text-info"></i>Widget Debugging</h5>
+        <div class="d-flex align-items-center gap-2 ms-auto flex-wrap">
+          <button class="btn btn-sm btn-outline-info help-btn py-0 px-2" onclick="showHelp('widgets')"
+                  title="Help for this screen"><i class="bi bi-question-circle me-1"></i>Help</button>
+        </div>
+      </div>
+      <p class="text-secondary small mb-3">Pick a dashboard widget that is showing no data, a time
+        range and (optionally) which devices — replays the widget's own API call, checks its
+        Elasticsearch index, and reads the last polling status for those devices.</p>
+
+      <!-- Check 1's own login. Confirmed live to be a real CC session (a
+           JSESSIONID cookie from POST /mgmt/system/user/login, a SYS_ADMIN
+           account), not a per-request credential — so it is its own explicit
+           action here, not a field on the general Connect form. Logged out
+           automatically when this tool shuts down (main.py's shutdown event);
+           if the session expires mid-use, the next check re-opens this form
+           rather than silently retrying. -->
+      <div class="d-flex align-items-center gap-2 mb-2 small">
+        <span class="text-secondary">VRM session:</span>
+        <span id="widgetVrmStatusText" class="fw-semibold text-secondary">checking…</span>
+        <button class="btn btn-sm btn-outline-primary py-0 px-2 d-none" id="btnWidgetVrmLogin"
+                onclick="toggleWidgetVrmLoginForm()">
+          <i class="bi bi-box-arrow-in-right me-1"></i>Log in
+        </button>
+        <button class="btn btn-sm btn-outline-secondary py-0 px-2 d-none" id="btnWidgetVrmLogout"
+                onclick="widgetVrmLogout()">
+          <i class="bi bi-box-arrow-right me-1"></i>Log out
+        </button>
+      </div>
+      <div id="widgetVrmLoginForm" class="card shadow-sm mb-3 d-none">
+        <div class="card-body p-2">
+          <div class="row g-2 align-items-end">
+            <div class="col-md-4">
+              <label class="small text-secondary mb-1">SYS_ADMIN Username</label>
+              <input id="widgetVrmUser" type="text" class="form-control form-control-sm" autocomplete="off">
+            </div>
+            <div class="col-md-4">
+              <label class="small text-secondary mb-1">Password</label>
+              <input id="widgetVrmPass" type="password" class="form-control form-control-sm" autocomplete="off">
+            </div>
+            <div class="col-md-2">
+              <button class="btn btn-sm btn-primary w-100" onclick="widgetVrmLogin()">
+                <i class="bi bi-box-arrow-in-right me-1"></i>Log in
+              </button>
+            </div>
+            <div class="col-md-2">
+              <button class="btn btn-sm btn-outline-secondary w-100" onclick="toggleWidgetVrmLoginForm(false)">Cancel</button>
+            </div>
+          </div>
+          <div class="form-text mt-1">A system-administrator (SYS_ADMIN) login on this CC — needed only
+            for Check 1's API replay. Held only for this browser session, never saved to disk, and logged
+            out automatically when this tool shuts down.</div>
+          <div id="widgetVrmLoginError" class="small text-danger mt-1 d-none"></div>
+        </div>
+      </div>
+
+      <div class="card shadow-sm mb-3">
+        <div class="card-body p-3">
+          <div class="row g-2 align-items-end">
+            <div class="col-md-5">
+              <label class="small text-secondary mb-1">Widget</label>
+              <select id="widgetPicker" class="form-select form-select-sm" onchange="onWidgetPicked()">
+                <option value="">Loading catalog…</option>
+              </select>
+              <div class="small text-secondary mt-1" id="widgetInfo"></div>
+            </div>
+            <div class="col-md-3">
+              <label class="small text-secondary mb-1">From</label>
+              <input type="datetime-local" id="widgetRangeFrom" class="form-control form-control-sm">
+            </div>
+            <div class="col-md-3">
+              <label class="small text-secondary mb-1">To</label>
+              <input type="datetime-local" id="widgetRangeTo" class="form-control form-control-sm">
+            </div>
+            <div class="col-md-1">
+              <button class="btn btn-sm btn-primary w-100" onclick="runWidgetDebug()" id="btnWidgetRun">
+                <i class="bi bi-play-fill me-1"></i>Run
+              </button>
+            </div>
+          </div>
+          <div class="mt-2">
+            <label class="small text-secondary mb-1 d-block">Devices <span class="text-secondary">(none selected = every device this widget's API call covers)</span></label>
+            <div id="widgetDeviceList" class="d-flex flex-wrap gap-2">
+              <span class="small text-secondary">Loading devices…</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="widgetReport"></div>
     </div>
 
     <!-- ── DASHBOARD VIEW ── -->

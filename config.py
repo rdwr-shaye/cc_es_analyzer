@@ -68,6 +68,44 @@ class Settings(BaseSettings):
     pg_timeout_s: int = Field(default=15, alias="PG_TIMEOUT_S")
     pg_max_rows: int = Field(default=1000, alias="PG_MAX_ROWS")
 
+    # ── Widget Debugging (modules/widgets) ────────────────────────────────
+    # Check 1 replays a widget's own backend call against the CC's `/mgmt/vrm`
+    # REST API — a target CC Admin has never reached before (ES/MariaDB/
+    # PostgreSQL, never the CC's own web app). The default assumption is that
+    # this is the SAME public endpoint an engineer's own browser already
+    # reaches for the CC's UI, so no host/port pair to configure separately —
+    # VRM_BASE_URL is the escape hatch if that assumption is wrong for a given
+    # install, not the normal path.
+    vrm_scheme: str = Field(default="https", alias="VRM_SCHEME")
+    vrm_port: int = Field(default=0, alias="VRM_PORT")   # 0 = default for scheme
+    vrm_base_url: str = Field(default="", alias="VRM_BASE_URL")
+    vrm_timeout_s: float = Field(default=20.0, alias="VRM_TIMEOUT_S")
+    vrm_verify_certs: bool = Field(default=False, alias="VRM_VERIFY_CERTS")
+    # Check 3 reads vision_ng.polling_tasks / device_access over the SAME
+    # MariaDB connection modules/maria/client.py already knows how to route —
+    # this just names the schema, since vision_ng is not the CC's default one.
+    widgets_vision_schema: str = Field(default="vision_ng", alias="WIDGETS_VISION_SCHEMA")
+    # The live device probe (widget.device_probe, locked by default — see
+    # AGENTS.md / the widget-debugging plan). The AES key that decrypts
+    # device_access.https_password lives on the CC host at
+    # /opt/radware/storage/secrets/.key (confirmed live against the system
+    # compose's `secrets:` block) and reaches this container ONLY via a
+    # read-only bind mount an operator deliberately adds to the embedded
+    # compose — there is no path to it from standalone, and none should be
+    # invented. vision_key_file is where THIS container expects to find it;
+    # its absence is the normal, honest state of every install that has not
+    # added the mount.
+    vision_key_file: str = Field(default="/app/.vision_key", alias="VISION_KEY_FILE")
+    # The DefensePro device's own data/attack-collection REST API port. A
+    # product-wide constant (kvision_configuration_service's
+    # DP_HTTP_COLLECTOR_PORT_INT_DEFAULT), NOT the per-device `https_port`
+    # column on device_access — the two are configured independently on the
+    # product side and are not guaranteed to match (confirmed in source: one
+    # converter uses the fixed collector port, another uses the stored
+    # column). This tool intentionally follows the collector-port convention,
+    # matching decrypt_device_passwords.py's own reference implementation.
+    dp_device_port: int = Field(default=8790, alias="DP_DEVICE_PORT")
+
     # ── Host access (core/hostexec.py, modules/system) ───────────────────
     # Directory shared with deploy/host_agent.py, the root process that runs
     # the System dashboard's checks on the CC host. Bind-mounted into the

@@ -471,6 +471,364 @@ function _connCard(r) {
       </div></div>`;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   WIDGET DEBUGGING — modules/widgets. Three checks for one picked widget:
+   does its own API return data (Check 1), does its Elasticsearch index exist
+   for the picked window (Check 2), and has the underlying DefensePro device
+   been polled recently (Check 3, Tier A — a MariaDB read, no credential
+   touched). A fourth, separately-gated action — "Probe device directly" —
+   calls the device itself (Check 3, Tier B). That one is never automatic:
+   see modules/widgets/device_probe.py for why it stays a deliberate click
+   behind its own capability, never folded into the routine check above.
+
+   The report reuses System Health's sys-banner / sys-tile / sys-{severity}
+   classes rather than inventing new CSS — this is the same "traffic light +
+   evidence" shape, applied per-widget instead of per-appliance.
+   ══════════════════════════════════════════════════════════════════════════ */
+let _widgetCatalogLoaded = false;
+let _widgetDevices = [];
+let _lastWidgetDebugParams = null;   // {widgetId, timeFromMs, timeToMs, deviceIps}
+
+async function loadWidgetCatalog() {
+  const picker = document.getElementById('widgetPicker');
+  if (!picker) return;
+  const data = await api('/api/widgets/catalog');
+  if (!data || data.error || !data.domains) {
+    picker.innerHTML = '<option value="">Could not load the widget catalog</option>';
+    return;
+  }
+  window._widgetCatalogData = data;
+  picker.innerHTML = data.domains.map(d => `<optgroup label="${esc(d.domain)}">${
+    d.widgets.map(w => `<option value="${esc(w.id)}">${esc(w.label)}${w.confirmed ? '' : ' ⚠'}</option>`).join('')
+  }</optgroup>`).join('');
+  _widgetCatalogLoaded = true;
+  if (picker.options.length) onWidgetPicked();
+}
+
+function _findWidget(widgetId) {
+  const data = window._widgetCatalogData;
+  if (!data) return null;
+  for (const d of data.domains) {
+    const w = d.widgets.find(x => x.id === widgetId);
+    if (w) return w;
+  }
+  return null;
+}
+
+/** The picker's own info line — the row's provenance (controller, executor
+ *  type, min DP version), and the "unverified" badge for a catalog row whose
+ *  index prefix was not pinned down to source (see catalog.py). */
+function onWidgetPicked() {
+  const picker = document.getElementById('widgetPicker');
+  const info = document.getElementById('widgetInfo');
+  if (!picker || !info) return;
+  const w = _findWidget(picker.value);
+  if (!w) { info.innerHTML = ''; return; }
+  const parts = [
+    `<span class="font-monospace">${esc(w.api_path)}</span>`,
+    w.executor_type ? `executor <span class="font-monospace">${esc(w.executor_type)}</span>` : '',
+    w.min_dp_version ? `min DP ${esc(w.min_dp_version)}` : '',
+  ].filter(Boolean).join(' · ');
+  const badge = w.confirmed ? '' : `<span class="badge bg-warning text-dark ms-1" title="${
+    esc(w.notes || 'index prefix not confirmed against source')}">unverified index</span>`;
+  info.innerHTML = parts + badge;
+}
+
+async function loadWidgetDevices() {
+  const box = document.getElementById('widgetDeviceList');
+  if (!box) return;
+  const data = await api('/api/widgets/devices');
+  if (!data || data.error || !data.devices) {
+    box.innerHTML = '<span class="small text-secondary">Could not load the device list — connect to a CC first.</span>';
+    return;
+  }
+  _widgetDevices = data.devices.map(d => d.mgt_ip);
+  box.innerHTML = _widgetDevices.length
+    ? _widgetDevices.map(ip => `
+        <label class="form-check form-check-inline m-0 small">
+          <input type="checkbox" class="form-check-input widget-device-cb" value="${esc(ip)}">
+          ${esc(ip)}
+        </label>`).join('')
+    : '<span class="small text-secondary">No devices found on this CC.</span>';
+}
+
+function _selectedWidgetDevices() {
+  return [...document.querySelectorAll('.widget-device-cb:checked')].map(cb => cb.value);
+}
+
+/* ── VRM login (Check 1's real auth) ──────────────────────────────────────
+   A SYS_ADMIN session on the CC (POST /mgmt/system/user/login -> a
+   JSESSIONID cookie the server holds on this browser session's client),
+   not a per-request credential — see modules/widgets/client.py. This is an
+   explicit login/logout pair on this screen, never bundled into the general
+   Connect form: most connections never need it, and unlike the ES/SSH
+   credentials this is a real operator account, not something to collect
+   speculatively at connect time. */
+
+async function loadWidgetVrmStatus() {
+  const data = await api('/api/widgets/vrm/status');
+  const text = document.getElementById('widgetVrmStatusText');
+  const loginBtn = document.getElementById('btnWidgetVrmLogin');
+  const logoutBtn = document.getElementById('btnWidgetVrmLogout');
+  if (!text || !loginBtn || !logoutBtn) return;
+  if (data?.logged_in) {
+    text.textContent = `logged in as ${data.username}`;
+    text.className = 'fw-semibold text-success';
+    loginBtn.classList.add('d-none');
+    logoutBtn.classList.remove('d-none');
+    toggleWidgetVrmLoginForm(false);
+  } else {
+    text.textContent = 'not logged in';
+    text.className = 'fw-semibold text-secondary';
+    loginBtn.classList.remove('d-none');
+    logoutBtn.classList.add('d-none');
+  }
+}
+
+function toggleWidgetVrmLoginForm(force) {
+  const form = document.getElementById('widgetVrmLoginForm');
+  if (!form) return;
+  const show = force === undefined ? form.classList.contains('d-none') : !!force;
+  form.classList.toggle('d-none', !show);
+  if (show) setTimeout(() => document.getElementById('widgetVrmUser')?.focus(), 0);
+}
+
+async function widgetVrmLogin() {
+  const user = document.getElementById('widgetVrmUser')?.value.trim();
+  const pass = document.getElementById('widgetVrmPass')?.value;
+  const errEl = document.getElementById('widgetVrmLoginError');
+  errEl?.classList.add('d-none');
+  if (!user || !pass) return;
+  const data = await api('/api/widgets/vrm/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: user, password: pass }),
+  });
+  if (!data || data.error) {
+    if (errEl) {
+      errEl.textContent = data?.error || 'Login failed.';
+      errEl.classList.remove('d-none');
+    }
+    return;
+  }
+  document.getElementById('widgetVrmPass').value = '';
+  await loadWidgetVrmStatus();
+  // Now that we're logged in, re-run whatever the last check was — the
+  // whole reason a login prompt was raised is usually a check that just
+  // came back needing one.
+  if (_lastWidgetDebugParams) runWidgetDebug();
+}
+
+async function widgetVrmLogout() {
+  await api('/api/widgets/vrm/logout', { method: 'POST' });
+  await loadWidgetVrmStatus();
+}
+
+/** [from_ms, to_ms] from the pickers, defaulting to the last hour so a first
+ *  run needs no setup — the same default a support engineer reaches for. */
+function _widgetTimeRangeMs() {
+  const fromEl = document.getElementById('widgetRangeFrom');
+  const toEl = document.getElementById('widgetRangeTo');
+  const from = fromEl?.value ? new Date(fromEl.value).getTime() : Date.now() - 3600_000;
+  const to = toEl?.value ? new Date(toEl.value).getTime() : Date.now();
+  return [from, to];
+}
+
+async function runWidgetDebug(manual) {
+  const picker = document.getElementById('widgetPicker');
+  const report = document.getElementById('widgetReport');
+  const widgetId = picker?.value;
+  if (!widgetId || !report) return;
+
+  const [timeFromMs, timeToMs] = _widgetTimeRangeMs();
+  const deviceIps = _selectedWidgetDevices();
+  _lastWidgetDebugParams = { widgetId, timeFromMs, timeToMs, deviceIps };
+
+  // Same "do not blank the screen mid-refresh" discipline as System Health:
+  // an automatic re-run (manual=false, from REFRESHERS) leaves the last
+  // report on screen while the new one is in flight.
+  if (manual !== false || !report.innerHTML) {
+    report.innerHTML = `<div class="text-center text-secondary py-4">
+        <span class="spinner-border spinner-border-sm me-2"></span>
+        Replaying the widget's API call, checking its index, reading polling status…</div>`;
+  }
+  const data = await api(`/api/widgets/${encodeURIComponent(widgetId)}/debug`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ time_from_ms: timeFromMs, time_to_ms: timeToMs, device_ips: deviceIps }),
+  });
+  if (!data || data.error) {
+    report.innerHTML = `<div class="alert alert-danger py-2 small mb-0">${
+      esc(data?.error || 'The check could not run.')}</div>`;
+    return;
+  }
+  renderWidgetReport(data);
+}
+
+function _apiTileSev(apiResult) {
+  if (!apiResult || !apiResult.status) return 'unknown';
+  if (apiResult.status === 'PASS') return 'ok';
+  if (apiResult.status === 'ERROR') return 'crit';
+  return 'warn';                      // EMPTY — a real answer, just nothing
+}
+function _indexTileSev(rows) {
+  if (!rows || !rows.length) return 'unknown';
+  if (rows.some(r => r.status === 'MISSING')) return 'crit';
+  if (rows.some(r => r.status === 'EXISTS_EMPTY')) return 'warn';
+  if (rows.every(r => r.status === 'UNKNOWN')) return 'unknown';
+  return 'ok';
+}
+function _deviceTileSev(rows) {
+  if (!rows || !rows.length) return 'unknown';
+  if (rows.some(r => r.status === 'FAIL')) return 'crit';
+  if (rows.some(r => r.status === 'NO_DATA')) return 'warn';
+  if (rows.every(r => r.status === 'UNKNOWN')) return 'unknown';
+  return 'ok';
+}
+const _DEVICE_BADGE_CLASS = { SUCCESS: 'success', FAIL: 'danger',
+  NO_DATA: 'warning text-dark', UNKNOWN: 'secondary' };
+const _PROBE_ALERT_CLASS = { DATA: 'success', EMPTY: 'warning',
+  HTTP_ERROR: 'danger', UNSUPPORTED_VERSION: 'secondary' };
+
+/** A collapsed-by-default view of the actual response a check got back — the
+ *  point of Check 1 is not just PASS/EMPTY/ERROR, it is letting an engineer
+ *  see what the widget's API (or the device, for a live probe) really said.
+ *  Collapsed by default so the report stays scannable; still there on a
+ *  click, including on an ERROR result, where the body very often names the
+ *  real cause (a 400/500 from this CC's own controller usually does). */
+function _sampleBlock(sample, label) {
+  if (sample === null || sample === undefined) return '';
+  let text;
+  try { text = JSON.stringify(sample, null, 1); } catch { text = String(sample); }
+  return `<details class="mt-1">
+      <summary class="small text-secondary" style="cursor:pointer;">${esc(label || 'response')}</summary>
+      <pre class="small mb-0 mt-1 p-2 bg-body-tertiary rounded" style="max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;">${esc(text)}</pre>
+    </details>`;
+}
+
+function renderWidgetReport(data) {
+  const report = document.getElementById('widgetReport');
+  if (!report) return;
+
+  // Check 1 came back needing a VRM login it doesn't have (never logged in)
+  // or no longer has (the session expired under us) — raise the login form
+  // rather than just showing a bare 401/403 in the API tile. loadWidgetVrmStatus()
+  // also re-syncs the status bar, since call_widget_api() already cleared the
+  // dead session server-side on an expiry.
+  if (data.api?.session_expired || data.api?.auth_required) {
+    loadWidgetVrmStatus();
+    toggleWidgetVrmLoginForm(true);
+  }
+
+  const diag = data.diagnosis || { severity: 'unknown', headline: 'No diagnosis yet' };
+  const sevIcon = { ok: 'bi-check-circle-fill', warn: 'bi-exclamation-triangle-fill',
+    crit: 'bi-x-octagon-fill', unknown: 'bi-question-circle-fill' }[diag.severity]
+    || 'bi-question-circle-fill';
+
+  const apiAuthNote = data.api?.session_expired
+    ? '<div class="small text-warning mt-1"><i class="bi bi-exclamation-triangle me-1"></i>VRM session expired — log in again above.</div>'
+    : data.api?.auth_required
+      ? '<div class="small text-warning mt-1"><i class="bi bi-exclamation-triangle me-1"></i>Not logged in to VRM — log in above.</div>'
+      : '';
+  const apiCard = `<div class="sys-tile sys-${_apiTileSev(data.api)}">
+      <div class="sys-tile-head"><i class="bi bi-hdd-network"></i><span>API</span></div>
+      <div class="sys-tile-headline">${esc(data.api?.status || 'UNKNOWN')}</div>
+      <div class="sys-tile-foot">${esc(data.api?.detail || '')}${
+        data.api?.row_count != null ? ` · ${data.api.row_count} row(s)` : ''}</div>
+      ${apiAuthNote}
+      ${_sampleBlock(data.api?.sample, 'show response')}
+    </div>`;
+
+  const indexRows = (data.index || []).map(ix =>
+    `<div>${esc(ix.prefix || 'unconfirmed')}: <strong>${esc(ix.status)}</strong>${
+      ix.doc_count ? ` (${ix.doc_count} docs)` : ''}</div>`
+  ).join('') || '<div class="text-secondary">no index prefix to check</div>';
+  const indexCard = `<div class="sys-tile sys-${_indexTileSev(data.index)}">
+      <div class="sys-tile-head"><i class="bi bi-database"></i><span>Index</span></div>
+      <div class="sys-tile-headline" style="font-size:0.8rem;">${indexRows}</div>
+    </div>`;
+
+  const canProbe = can('widget.device_probe');
+  const probeTitle = canProbe
+    ? "Call this device's own API directly"
+    : 'Locked — enable widget.device_probe and add the AES-key bind mount to unlock the live device probe';
+  const deviceRows = (data.device || []).map(d => {
+    // The badge/task_info line is a summary — the full polling_tasks row
+    // (every timestamp plus the untruncated task_info) is one click away,
+    // same "collapsed but never hidden" treatment as the API/probe response.
+    // Shown even for NO_DATA: an explicit "every field is null" IS the
+    // evidence that this device has never been polled for this executor,
+    // not a blank to fill in later.
+    const raw = {
+      task_status: d.task_status, last_update_time: d.last_update_time,
+      next_query_time: d.next_query_time, fire_time: d.fire_time,
+      task_info: d.task_info,
+    };
+    return `
+    <div class="py-1 border-bottom">
+      <div class="d-flex align-items-center gap-2">
+        <span class="font-monospace small">${esc(d.device_ip)}</span>
+        <span class="badge bg-${_DEVICE_BADGE_CLASS[d.status] || 'secondary'}">${esc(d.status)}</span>
+        <span class="small text-secondary flex-grow-1 text-truncate">${esc(d.task_info || '')}</span>
+        <button class="btn btn-sm btn-outline-secondary py-0 px-2" style="font-size:0.72rem;"
+                onclick="probeWidgetDevice('${esc(d.device_ip)}')" ${canProbe ? '' : 'disabled'}
+                title="${esc(probeTitle)}">
+          <i class="bi bi-broadcast me-1"></i>Probe device
+        </button>
+      </div>
+      ${_sampleBlock(raw, 'last poll detail')}
+    </div>`;
+  }).join('') || '<div class="text-secondary small">no devices selected</div>';
+  const deviceCard = `<div class="sys-tile sys-${_deviceTileSev(data.device)}">
+      <div class="sys-tile-head"><i class="bi bi-hdd-rack"></i><span>Device (last poll)</span></div>
+      <div class="sys-tile-headline" style="font-size:0.8rem;">${deviceRows}</div>
+    </div>`;
+
+  const probeCard = data.probe ? `<div class="alert alert-${
+      _PROBE_ALERT_CLASS[data.probe.status] || 'secondary'} py-2 mt-2 mb-0">
+      <i class="bi bi-broadcast me-1"></i>Live probe of <span class="font-monospace">${
+      esc(data.probe.device_ip)}</span>: <strong>${esc(data.probe.status)}</strong>${
+      data.probe.detail ? ` — ${esc(data.probe.detail)}` : ''}
+      ${_sampleBlock(data.probe.sample, 'show device response')}
+    </div>` : '';
+
+  report.innerHTML = `
+    <div class="sys-banner sys-${diag.severity}">
+      <i class="bi ${sevIcon} sys-banner-icon"></i>
+      <div>
+        <div class="sys-banner-title">${esc(diag.headline)}</div>
+        <div class="sys-banner-sub">${esc(data.widget?.label || '')} · ${
+          esc(data.widget?.controller || '')} · checked in ${data.took_ms ?? 0} ms</div>
+      </div>
+    </div>
+    <div class="row g-3 sys-tiles mt-1">
+      <div class="col-12 col-lg-4">${apiCard}</div>
+      <div class="col-12 col-lg-4">${indexCard}</div>
+      <div class="col-12 col-lg-4">${deviceCard}</div>
+    </div>
+    ${probeCard}`;
+}
+
+/** The one and only place /api/widgets/{id}/probe is called — an explicit
+ *  click on one device's row, never automatic. Recomputes the whole report
+ *  server-side with this device's live result folded in (see
+ *  modules/widgets/routers/probe.py), so the screen re-renders from one
+ *  object rather than trying to merge two responses client-side. */
+async function probeWidgetDevice(deviceIp) {
+  if (!can('widget.device_probe')) return;
+  const p = _lastWidgetDebugParams;
+  if (!p) return;
+  const data = await api(`/api/widgets/${encodeURIComponent(p.widgetId)}/probe`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ time_from_ms: p.timeFromMs, time_to_ms: p.timeToMs, device_ip: deviceIp }),
+  });
+  if (!data || data.error) {
+    document.getElementById('widgetReport')?.insertAdjacentHTML('beforeend',
+      `<div class="alert alert-danger py-2 small mt-2 mb-0">${
+        esc(data?.error || 'The live probe could not run.')}</div>`);
+    return;
+  }
+  renderWidgetReport(data);
+}
+
 /* Rail tree: which groups the user collapsed. Persisted because re-collapsing
    the tree on every page load would make collapsing not worth doing. */
 const LS_DB_TREE = 'cc_admin_db_tree';
@@ -606,6 +964,16 @@ function applyPolicyToChrome() {
   if (!can('es.index.delete')) {
     document.querySelector('#view-index [onclick="deleteCurrentIndex()"]')?.remove();
   }
+  // widget.debug ships on in both profiles — this only matters for a future
+  // deployment that unlocks nothing extra and somehow still lacks it, which
+  // AGENTS.md's registration-gating rule means cannot happen silently: if the
+  // route were absent this nav entry would 404 on click, so hide it instead.
+  if (!can('widget.debug')) {
+    document.getElementById('nav-widgets')?.classList.add('d-none');
+  }
+  // widget.device_probe is left VISIBLE but disabled when locked — renderWidgetReport()
+  // titles the button with why, matching System Health's own disabled-action
+  // convention (AGENTS.md §6): a dead control with no explanation reads as a bug.
   syncDbCount();
 }
 
@@ -665,6 +1033,12 @@ function showView(name) {
   // world has nothing to do with whether Elasticsearch is answering, and
   // an ES outage is one of the times you most want to ask.
   if (name === 'connectivity') loadConnectivity();
+  // The catalog is static (loaded once); the device list is per-CC, so it
+  // reloads whenever it is empty — cleared on every reconnect, same as
+  // mariaSchemas/pgDatabases just above doConnect()'s reset block.
+  if (name === 'widgets' && !_widgetCatalogLoaded) loadWidgetCatalog();
+  if (name === 'widgets' && !_widgetDevices.length) loadWidgetDevices();
+  if (name === 'widgets') loadWidgetVrmStatus();
   if (name === 'attacks'  && isConnected) loadAttacks();
   if (name === 'dashboard'&& isConnected) loadClusterHealth();
   if (name === 'summary'  && isConnected) loadSummary();
@@ -691,6 +1065,10 @@ const _autoTimers = {};   // view name -> setInterval handle
 const REFRESHERS = {
   system:    (manual) => loadSystemHealth(!!manual),
   connectivity: (manual) => loadConnectivity(!!manual),
+  // A no-op until a check has been run once — this is an on-demand
+  // diagnostic, not a live-polling screen, so auto-refresh only re-runs the
+  // LAST debug (never the locked live probe, which stays an explicit click).
+  widgets:   (manual) => { if (_lastWidgetDebugParams) runWidgetDebug(!!manual); },
   dashboard: () => { loadClusterHealth(); loadIndices(); },
   summary:   () => loadSummary(),
   attacks:   () => loadAttacks(),
@@ -2879,6 +3257,7 @@ function toggleSshFields() {
   document.getElementById('sshFields').classList.toggle('d-none', !on);
 }
 
+
 function toggleSshPassVis() {
   const inp  = document.getElementById('connSshPass');
   const icon = document.getElementById('sshPassEyeIcon');
@@ -3028,6 +3407,13 @@ function onConnected(settings, info) {
   pgDatabases = []; pgTableList = [];
   pgDatabase = ''; pgTable = '';
   pgColumns = []; pgSample = null; pgRelations = null;
+
+  // The widget-debugging device list is per-CC too (vision_ng.device_access
+  // belongs to whichever CC MariaDB just re-routed to above) — dropping it
+  // forces a reload next time that screen is opened rather than showing the
+  // previous CC's devices under this one's name. The widget catalog itself
+  // is static across CCs, so it is deliberately NOT reset here.
+  _widgetDevices = [];
 
   // The store's own identity, on the store's own row.
   const meta = document.getElementById('db-es-meta');
@@ -12497,6 +12883,72 @@ const HELP_CONTENT = {
       <p>Each destination cites the knowledge-base articles that establish it
       as a real dependency. Nothing here was guessed, and you can check the
       reasoning.</p>`,
+  },
+
+  widgets: {
+    title: 'Widget Debugging', icon: 'bi-puzzle',
+    body: `
+      <p>A support engineer looking at an empty dashboard widget has one
+      question: <b>where in the pipeline was the data lost?</b> This screen
+      runs the manual version of that investigation for a picked widget, over
+      a time range and (optionally) a set of devices.</p>
+
+      <h6>VRM session</h6>
+      <p>Check 1 (below) needs a <b>SYS_ADMIN login on the CC</b> — the same
+      kind of session your own browser holds when you're logged into the CC's
+      UI, obtained the same way (<span class="font-monospace">POST /mgmt/system/user/login</span>).
+      It is <i>not</i> the same as the Elasticsearch/SSH credentials on the
+      Connect screen, so it is its own explicit "Log in" action at the top of
+      this screen — held only for this browser session, never saved to disk,
+      and logged out automatically when this tool shuts down. If the session
+      expires mid-use, the next check reopens this login form instead of
+      silently retrying.</p>
+
+      <h6>The three checks</h6>
+      <ul>
+        <li><b>API</b> — replays the widget's own <span class="font-monospace">/mgmt/vrm</span>
+            call, using the VRM session above. <i>PASS</i> means it returned
+            data; <i>EMPTY</i> means it answered but found nothing (a real
+            answer, not a failure); <i>ERROR</i> means the call itself did
+            not complete — including "not logged in" and "session expired",
+            both of which reopen the login form for you.</li>
+        <li><b>Index</b> — resolves the Elasticsearch index family this
+            widget's data lives in and checks it for the picked window.
+            <i>MISSING</i> — no index of this family exists at all.
+            <i>EXISTS_EMPTY</i> — the index exists, nothing in range.
+            <i>EXISTS</i> — has documents. A row marked <b>unverified</b>
+            means this catalog entry's index prefix was not pinned to a
+            single source constant when it was written — see
+            <span class="font-monospace">modules/widgets/widget_catalog.json</span>.</li>
+        <li><b>Device (last poll)</b> — reads the last polling-task result
+            for each device from MariaDB. <i>SUCCESS</i>/<i>FAIL</i> are the
+            product's own last outcome; <i>NO_DATA</i> means this device has
+            never been polled for this widget's executor type at all. <b>No
+            credential is touched for this check</b> — it is a plain status
+            read.</li>
+      </ul>
+
+      <h6>Probe device directly — a separate, locked action</h6>
+      <p>Each device row also carries a <b>Probe device</b> button. Unlike
+      the three checks above, this one <b>calls the DefensePro device
+      itself</b> — decrypting its stored credential and hitting its own
+      management API, exactly as an engineer's own
+      <span class="font-monospace">decrypt_device_passwords.py</span> already
+      does by hand. It never runs automatically, and it is <b>locked by
+      default everywhere</b> behind two independent keys: the
+      <span class="font-monospace">widget.device_probe</span> capability
+      unlocked via the property file, <i>and</i> a read-only bind mount of
+      the CC host's own AES key added to the compose file an operator
+      deploys. Missing either one, the button stays visible but disabled and
+      says so on hover — it never disappears silently.</p>
+
+      <p>When a probe DOES run and finds real data on the device while the
+      index stays empty, that is the sharpest finding this screen can
+      produce: it means the data never even reached this product's own
+      pipeline (if the last poll reported success) or was never fetched at
+      all (if it reported failure or was never polled) — narrowing the
+      suspect to the data-persist-service or the data-polling-scheduler
+      respectively, rather than to the query layer.</p>`,
   },
   system: {
     title: 'System Health', icon: 'bi-heart-pulse',

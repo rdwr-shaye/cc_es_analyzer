@@ -86,6 +86,9 @@ IN_BOTH = [
     "/api/exports/restore",
     "/api/system/summary",
     "/api/system/containers/{name}/logs",
+    "/api/widgets/catalog",
+    "/api/widgets/devices",
+    "/api/widgets/{widget_id}/debug",
     # Registered in BOTH profiles, but only ENFORCED embedded — auth.required()
     # and lifecycle.enabled() follow the profile, not the route table. The
     # endpoints exist either way so that standalone can opt in with
@@ -101,10 +104,16 @@ IN_BOTH = [
 
 # Endpoints that must exist in NEITHER until someone deliberately unlocks the
 # capability. These are the unlockable ones: off in every profile by default.
-# (Empty today — system.storage.delete moved to STANDALONE_ONLY once it shipped
-# on by default there; still unlockable-only in embedded, so it stays governed
-# by the property-file mechanism on that side.)
-IN_NEITHER: list[str] = []
+IN_NEITHER: list[str] = [
+    "/api/widgets/{widget_id}/probe",
+    # Decrypts a managed DefensePro device's own credential and calls that
+    # device directly — a materially different kind of access from anything
+    # else in the tool (every other capability reads THIS CC's own
+    # datastores). Locked everywhere until an operator both unlocks
+    # widget.device_probe via the property file AND adds the read-only bind
+    # mount of the CC host's AES key file to the compose an operator deploys
+    # — two independent keys, same shape as system.storage.delete embedded.
+]
 
 
 def _surface(profile: str) -> dict:

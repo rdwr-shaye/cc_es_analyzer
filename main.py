@@ -79,6 +79,19 @@ async def _widen_threadpool() -> None:
                     if auth.is_default() else "")
 
 
+@app.on_event("shutdown")
+async def _logout_vrm_sessions() -> None:
+    """A VRM login (modules/widgets' Check 1) is a real SYS_ADMIN session on
+    the CC, not a credential this tool owns — leaving it open when this
+    process exits is a stray, forgotten login on someone's account. uvicorn
+    runs shutdown handlers on a clean exit (including the time box's own
+    SIGTERM — see core/lifecycle.py), so this covers both the embedded
+    time-box stop and an ordinary standalone Ctrl+C."""
+    if policy.enabled("widget.debug"):
+        from modules.widgets import client as widgets_client
+        widgets_client.logout_all_sessions()
+
+
 # ── Session / presence middleware ─────────────────────────────────────────────
 # Requests that CHANGE data on the connected CC. Matched on method + path so a
 # new UI path can never bypass the peer notification.

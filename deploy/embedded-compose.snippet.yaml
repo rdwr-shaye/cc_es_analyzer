@@ -91,6 +91,17 @@
       # unlocked something — losing the hardening at exactly the moment
       # somebody was tightening the box.
       - "/opt/radware/storage/data/cc-admin/config:/app/data"
+      # OMITTED BY DEFAULT — add this line only when widget.device_probe is
+      # deliberately being unlocked. It is the SECOND of the two keys that
+      # capability needs: the same AES key kvision_configuration_service uses
+      # to decrypt device_access.https_password (confirmed live: the system
+      # compose's own `secrets:` block names this exact host path), mounted
+      # read-only so modules/widgets/device_probe.py can decrypt a managed
+      # DefensePro device's credential and call that device directly. Without
+      # this line the capability can be unlocked via cc_admin.properties and
+      # will still refuse every call, loudly, naming the missing mount — that
+      # is the intended behaviour, not a bug to work around.
+      # - "/opt/radware/storage/secrets/.key:/app/.vision_key:ro"
     # Bound to loopback like every other service here — reached through nginx,
     # never exposed on the appliance's external interface directly.
     ports:

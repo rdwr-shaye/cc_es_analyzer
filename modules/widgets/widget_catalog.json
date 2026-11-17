@@ -1,0 +1,163 @@
+{
+  "schema_version": 1,
+  "generated_by": "hand-authored, 2026-09-08 — see modules/widgets/catalog.py's module docstring for how a future automated scanner should regenerate this file",
+  "category_order": [
+    "EAAF", "WebDDoS", "DP Attacks", "DP Applications", "DP Traffic",
+    "TLS Statistics", "Flow Detector Traffic", "Flow Detector Top Talkers"
+  ],
+  "widgets": {
+    "eaaf-total": {
+      "label": "EAAF total", "domain": "EAAF", "controller": "EaafController",
+      "api_path": "/eaaf/total", "index_prefixes": ["eaaf-attack-data"],
+      "executor_type": "DP_ATTACK_DATA", "min_dp_version": "8.29.0.0"
+    },
+    "eaaf-top-geolocations": {
+      "label": "EAAF top geolocations", "domain": "EAAF", "controller": "EaafController",
+      "api_path": "/eaaf/top/geolocations", "index_prefixes": ["eaaf-attack-data"],
+      "executor_type": "DP_ATTACK_DATA", "min_dp_version": "8.29.0.0"
+    },
+    "eaaf-timeline": {
+      "label": "EAAF timeline", "domain": "EAAF", "controller": "EaafController",
+      "api_path": "/eaaf/timeline", "index_prefixes": ["eaaf-attack-data"],
+      "executor_type": "DP_ATTACK_DATA", "min_dp_version": "8.29.0.0"
+    },
+    "eaaf-distinct-ips": {
+      "label": "EAAF distinct IPs", "domain": "EAAF", "controller": "EaafController",
+      "api_path": "/eaaf/distinct-ips", "index_prefixes": ["eaaf-attack-data"],
+      "executor_type": "DP_ATTACK_DATA", "min_dp_version": "8.29.0.0"
+    },
+    "eaaf-top-addresses": {
+      "label": "EAAF top addresses", "domain": "EAAF", "controller": "EaafController",
+      "api_path": "/eaaf/top/addresses", "index_prefixes": ["eaaf-attack-data"],
+      "executor_type": "DP_ATTACK_DATA", "min_dp_version": "8.29.0.0"
+    },
+
+    "webddos-lifecycle": {
+      "label": "WebDDoS lifecycle", "domain": "WebDDoS", "controller": "WebDDosController",
+      "api_path": "/dp/attacks/webddos/lifecycle", "index_prefixes": ["dp-attack-raw"],
+      "executor_type": "DP_ATTACK_DATA", "min_dp_version": "10.1.0.0"
+    },
+    "webddos-table": {
+      "label": "WebDDoS table (v1)", "domain": "WebDDoS", "controller": "WebDDosController",
+      "api_path": "/dp/attacks/webddos/v1/table", "index_prefixes": ["dp-attack-raw"],
+      "executor_type": "DP_ATTACK_DATA", "min_dp_version": "10.1.0.0"
+    },
+    "webddos-realtime-lifecycle": {
+      "label": "WebDDoS real-time lifecycle (v2)", "domain": "WebDDoS", "controller": "WebDDosController",
+      "api_path": "/dp/attacks/webddos/v2/lifecycle", "index_prefixes": [],
+      "executor_type": "WEB_DDOS_REAL_TIME_ATTACK", "min_dp_version": "10.7.0.0",
+      "confirmed": false,
+      "notes": "WebDdosRealTimeAttackEntity's own index prefix constant was not pinned to a single source file in this pass — confirm before relying on Check 2 for this row."
+    },
+
+    "dp-attacks-table": {
+      "label": "DP attacks (table)", "domain": "DP Attacks", "controller": "DPAttacksController",
+      "api_path": "/dp/attacks", "index_prefixes": ["dp-attack-raw"],
+      "executor_type": "DP_ATTACK_DATA", "min_dp_version": "10.1.0.0"
+    },
+    "dp-attacks-metadata": {
+      "label": "DP attacks metadata", "domain": "DP Attacks", "controller": "DPAttacksController",
+      "api_path": "/dp/attacks/metadata", "index_prefixes": ["dp-attack-raw"],
+      "executor_type": "DP_ATTACK_DATA", "min_dp_version": "10.1.0.0"
+    },
+    "dp-attacks-destinations": {
+      "label": "DP attacks destinations", "domain": "DP Attacks", "controller": "DPAttacksController",
+      "api_path": "/dp/attacks/destinations", "index_prefixes": ["dp-attack-raw"],
+      "executor_type": "DP_ATTACK_DATA", "min_dp_version": "10.1.0.0"
+    },
+    "dp-attacks-aggregated": {
+      "label": "DP attacks (aggregated chart)", "domain": "DP Attacks",
+      "controller": "AttackDataAdaptiveReportIndexNameResolver",
+      "api_path": "/dp/attacks", "index_prefixes": ["attack-data"],
+      "executor_type": "DP_ATTACK_DATA", "min_dp_version": "10.1.0.0",
+      "notes": "Feeds the dashboard top-attack widgets rather than a single controller path of its own; the API replay uses the table endpoint above, this row exists to name the aggregated index."
+    },
+
+    "dp-applications-webddos": {
+      "label": "Top applications — WebDDoS", "domain": "DP Applications", "controller": "DpApplicationController",
+      "api_path": "/dp-traffic/top/application/webddos", "index_prefixes": ["dp-applications"],
+      "executor_type": "DP_APPLICATIONS", "min_dp_version": "10.4.0.0"
+    },
+    "dp-applications-domain": {
+      "label": "Top applications — domain", "domain": "DP Applications", "controller": "DpApplicationController",
+      "api_path": "/dp-traffic/top/application/domain", "index_prefixes": ["dp-applications"],
+      "executor_type": "DP_APPLICATIONS", "min_dp_version": "10.4.0.0"
+    },
+    "dp-applications-fqdn": {
+      "label": "Top applications — FQDN", "domain": "DP Applications", "controller": "DpApplicationController",
+      "api_path": "/dp-traffic/top/application/fqdn", "index_prefixes": ["dp-applications"],
+      "executor_type": "DP_APPLICATIONS", "min_dp_version": "10.4.0.0"
+    },
+
+    "dp-traffic-source-ip": {
+      "label": "Top traffic — source IP", "domain": "DP Traffic", "controller": "DpTrafficController",
+      "api_path": "/dp-traffic/top/source-ip", "index_prefixes": ["traffic-data"],
+      "executor_type": "DP_TRAFFIC_DATA", "min_dp_version": "10.1.0.0"
+    },
+    "dp-traffic-destination-ip": {
+      "label": "Top traffic — destination IP", "domain": "DP Traffic", "controller": "DpTrafficController",
+      "api_path": "/dp-traffic/top/destination-ip", "index_prefixes": ["traffic-data"],
+      "executor_type": "DP_TRAFFIC_DATA", "min_dp_version": "10.1.0.0"
+    },
+    "dp-traffic-country": {
+      "label": "Top traffic — country", "domain": "DP Traffic", "controller": "DpTrafficController",
+      "api_path": "/dp-traffic/top/country", "index_prefixes": ["traffic-data"],
+      "executor_type": "DP_TRAFFIC_DATA", "min_dp_version": "10.1.0.0"
+    },
+    "dp-traffic-protocol": {
+      "label": "Top traffic — protocol", "domain": "DP Traffic", "controller": "DpTrafficController",
+      "api_path": "/dp-traffic/top/protocol", "index_prefixes": ["traffic-data"],
+      "executor_type": "DP_TRAFFIC_DATA", "min_dp_version": "10.1.0.0"
+    },
+
+    "tls-kpis": {
+      "label": "TLS KPIs", "domain": "TLS Statistics", "controller": "TlsStatisticsController",
+      "api_path": "/dp-traffic/tls/kpis", "index_prefixes": ["tls-statistics"],
+      "executor_type": "DP_TRAFFIC_STATISTICS", "min_dp_version": "10.12.0.0"
+    },
+    "tls-statistics": {
+      "label": "TLS statistics", "domain": "TLS Statistics", "controller": "TlsStatisticsController",
+      "api_path": "/dp-traffic/tls/statistics", "index_prefixes": ["tls-statistics"],
+      "executor_type": "DP_TRAFFIC_STATISTICS", "min_dp_version": "10.12.0.0"
+    },
+    "tls-total-connections": {
+      "label": "Total TLS connections", "domain": "TLS Statistics", "controller": "TlsStatisticsController",
+      "api_path": "/dp-traffic/tls/total-tls-connections", "index_prefixes": ["tls-statistics"],
+      "executor_type": "DP_TRAFFIC_STATISTICS", "min_dp_version": "10.12.0.0"
+    },
+
+    "fd-traffic-top-inbound": {
+      "label": "Flow Detector — top inbound", "domain": "Flow Detector Traffic",
+      "controller": "FlowDetectorTrafficController",
+      "api_path": "/traffic/flow-detector/top-inbound", "index_prefixes": [],
+      "executor_type": "FLOW_DETECTOR_TRAFFIC_DATA_NETWORK_ANALYTICS", "min_dp_version": "",
+      "confirmed": false,
+      "notes": "Index prefix not individually confirmed in this pass — the FdNetworkAnalyticsConsumer chain was traced but the Fd*EntityIndexDetails prefix constant was not opened."
+    },
+    "fd-traffic-top-outbound": {
+      "label": "Flow Detector — top outbound", "domain": "Flow Detector Traffic",
+      "controller": "FlowDetectorTrafficController",
+      "api_path": "/traffic/flow-detector/top-outbound", "index_prefixes": [],
+      "executor_type": "FLOW_DETECTOR_TRAFFIC_DATA_NETWORK_ANALYTICS", "min_dp_version": "",
+      "confirmed": false,
+      "notes": "Same unconfirmed prefix as fd-traffic-top-inbound."
+    },
+
+    "fd-top-talkers-tcp": {
+      "label": "Top talkers — TCP", "domain": "Flow Detector Top Talkers",
+      "controller": "TopTalkersController",
+      "api_path": "/top-talkers/flow-detector/tcp", "index_prefixes": [],
+      "executor_type": "FLOW_DETECTOR_TRAFFIC_DATA_TOP_TALKERS", "min_dp_version": "",
+      "confirmed": false,
+      "notes": "TopTalkers*EntityIndexDetails prefix constants not individually opened in this pass."
+    },
+    "fd-top-talkers-udp": {
+      "label": "Top talkers — UDP", "domain": "Flow Detector Top Talkers",
+      "controller": "TopTalkersController",
+      "api_path": "/top-talkers/flow-detector/udp", "index_prefixes": [],
+      "executor_type": "FLOW_DETECTOR_TRAFFIC_DATA_TOP_TALKERS", "min_dp_version": "",
+      "confirmed": false,
+      "notes": "Same unconfirmed prefix as fd-top-talkers-tcp."
+    }
+  }
+}
